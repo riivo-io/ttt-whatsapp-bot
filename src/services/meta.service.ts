@@ -1,4 +1,5 @@
 import axios from 'axios';
+import FormData from 'form-data';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -90,6 +91,89 @@ export class MetaWhatsAppService {
             console.log(`[Meta WhatsApp] Sent buttons to ${to}`);
         } catch (error: any) {
             console.error('[Meta WhatsApp] Failed to send buttons:', error?.response?.data || error.message);
+        }
+    }
+
+    /**
+     * Send a PDF (or other document) as a WhatsApp document message.
+     *
+     * Two-step Meta Cloud API flow:
+     *   1. POST multipart to /{phoneNumberId}/media with the file → get a media_id
+     *   2. POST JSON to /{phoneNumberId}/messages with type=document + media_id
+     *
+     * If Meta creds are missing (empty token or phone number id), the call drops
+     * into DRY-RUN mode: it logs what would have happened and returns a stub
+     * result. This lets the rest of the application flow (permission gating,
+     * CRM timeline write, audit fields, staff-facing confirmation) be exercised
+     * end-to-end without actually needing a live Meta setup.
+     */
+    async sendDocument(
+        to: string,
+        pdfBuffer: Buffer,
+        fileName: string,
+        caption?: string
+    ): Promise<{ delivered: boolean; dryRun: boolean; messageId?: string; error?: string }> {
+        if (!this.token || !this.phoneNumberId) {
+            console.log(`[Meta WhatsApp] DRY RUN: would have sent ${fileName} (${pdfBuffer.length} bytes) to ${to}${caption ? ` with caption "${caption}"` : ''}`);
+            return { delivered: false, dryRun: true };
+        }
+
+        try {
+            // Step 1: upload the PDF as a media asset
+            const uploadForm = new FormData();
+            uploadForm.append('messaging_product', 'whatsapp');
+            uploadForm.append('type', 'application/pdf');
+            uploadForm.append('file', pdfBuffer, { filename: fileName, contentType: 'application/pdf' });
+
+            const uploadRes = await axios.post(
+                `${this.baseUrl}/${this.phoneNumberId}/media`,
+                uploadForm,
+                {
+                    headers: {
+                        'Authorization': `Bearer ${this.token}`,
+                        ...uploadForm.getHeaders(),
+                    },
+                    maxContentLength: Infinity,
+                    maxBodyLength: Infinity,
+                }
+            );
+
+            const mediaId: string | undefined = uploadRes.data?.id;
+            if (!mediaId) {
+                throw new Error('Meta media upload returned no id');
+            }
+
+            // Step 2: send the document message referencing the uploaded media
+            const messagePayload: any = {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to,
+                type: 'document',
+                document: {
+                    id: mediaId,
+                    filename: fileName,
+                    ...(caption ? { caption } : {}),
+                },
+            };
+
+            const sendRes = await axios.post(
+                `${this.baseUrl}/${this.phoneNumberId}/messages`,
+                messagePayload,
+                {
+                    headers: {
+                        'Authorization': `Bearer ${this.token}`,
+                        'Content-Type': 'application/json',
+                    },
+                }
+            );
+
+            const messageId: string | undefined = sendRes.data?.messages?.[0]?.id;
+            console.log(`[Meta WhatsApp] Sent document ${fileName} to ${to} (message ${messageId})`);
+            return { delivered: true, dryRun: false, messageId };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error('[Meta WhatsApp] Failed to send document:', errMsg);
+            return { delivered: false, dryRun: false, error: errMsg };
         }
     }
 

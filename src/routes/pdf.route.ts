@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { dynamicsService } from '../services/dynamics.service';
-import { pdfService, InvoiceData } from '../services/pdf.service';
+import { pdfService, InvoiceData, mapInvoiceToInvoiceData } from '../services/pdf.service';
 
 const router = Router();
 
@@ -24,37 +24,9 @@ router.get('/invoice/:invoiceNumber', async (req: Request, res: Response): Promi
             return;
         }
 
-        // Map Dynamics data to InvoiceData
-        const invoiceData: InvoiceData = {
-            invoiceNumber: invoice.new_name,
-            invoiceDate: new Date(invoice.createdon).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }),
-            consultantName: invoice.riivo_consultantfullname || '',
-            customerFullname: invoice.riivo_customerfullname || '',
-            customerStreet: invoice.riivo_customerstreet || '',
-            customerSuburb: invoice.riivo_customersuburb || '',
-            customerProvince: invoice.riivo_customerprovince || '',
-            customerCity: invoice.riivo_customercity || '',
-            customerCountry: invoice.riivo_customercountry || '',
-            customerPostalCode: invoice.riivo_customerponumber || '',
-            customerVatNumber: invoice.riivo_customervatnumber || '',
-            consultantCompany: invoice.riivo_consultantcompany || '',
-            consultantStreet: invoice.riivo_consultantstreet || '',
-            consultantSuburb: invoice.riivo_consultantsuburb || '',
-            consultantProvince: invoice.riivo_consultantprovince || '',
-            consultantCity: invoice.riivo_consultantcity || '',
-            consultantCountry: invoice.riivo_consultantcountry || '',
-            consultantPostalCode: invoice.riivo_consultantponumber || '',
-            consultantVatNumber: invoice.riivo_consultantvatnumber || '',
-            sarsReimbursement: invoice.ttt_sarsreimbursement || 0,
-            subtotal: invoice.ttt_totalwithinterest || 0,
-            vatAmount: invoice.riivo_vattotal || 0,
-            totalInclVat: invoice.riivo_totalinclvat || 0,
-            accountHolderName: invoice.icon_accountholdername || '',
-            bankName: invoice.icon_bank || '',
-            accountNumber: invoice.icon_accountnumber || '',
-            accountType: invoice.icon_accounttype || '',
-            branchNumber: invoice.icon_branchnumber || ''
-        };
+        // Map Dynamics data to InvoiceData via the shared helper so /api/pdf
+        // and the OpenAI tool handlers can't drift apart when fields change.
+        const invoiceData: InvoiceData = mapInvoiceToInvoiceData(invoice);
 
         // Generate PDF
         const pdfBuffer = await pdfService.generateInvoicePDF(invoiceData);

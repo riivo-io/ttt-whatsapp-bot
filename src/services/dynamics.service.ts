@@ -723,11 +723,15 @@ export class DynamicsService {
         };
 
         try {
-            const response = await this.crmPost('new_invoices', payload, params.ownerSystemUserId);
+            // Entity set name is new_invoiceses (Dynamics auto-pluralizes the
+            // already-plural-looking logical name 'new_invoices' → 'new_invoiceses').
+            // Matches the collection segment used elsewhere (getClientInvoices,
+            // getInvoiceByNumber). Using 'new_invoices' returns a 404.
+            const response = await this.crmPost('new_invoiceses', payload, params.ownerSystemUserId);
             const invoiceId = response.data?.new_invoicesid;
             console.log(`[Dynamics CRM] Created invoice ${invoiceId} for contact ${params.customerContactId}`);
             await supabaseService.logCrmWrite({
-                crmEntity: 'new_invoices',
+                crmEntity: 'new_invoiceses',
                 crmRecordId: invoiceId,
                 action: 'create',
                 payload,
@@ -982,6 +986,49 @@ export class DynamicsService {
         }
 
         return { success: true, annotationId, flagSet, ocrPageCount };
+    }
+
+    /**
+     * Log an "invoice PDF sent via WhatsApp" annotation to a Contact's timeline.
+     * Separate from uploadDocument because we're not attaching a file here —
+     * the PDF itself lives in Meta's media store; the timeline note is just
+     * the audit record that the send happened. Audit fields are added
+     * automatically by crmPost via addAuditFields.
+     */
+    async logInvoiceSentToContact(
+        contactId: string,
+        invoiceNumber: string,
+        triggeredBy: string
+    ): Promise<{ success: boolean; annotationId?: string; error?: string }> {
+        const payload: any = {
+            subject: `Invoice ${invoiceNumber} sent via WhatsApp`,
+            notetext: `Invoice PDF delivered to client via WhatsApp Bot at ${new Date().toISOString()}.`,
+            'objectid_contact@odata.bind': `/contacts(${contactId})`,
+            objecttypecode: 'contact',
+        };
+
+        try {
+            const response = await this.crmPost('annotations', payload, triggeredBy);
+            const annotationId = response.data?.annotationid;
+            console.log(`[Dynamics CRM] Logged invoice-send note for ${invoiceNumber} on contact ${contactId} (annotation ${annotationId})`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'annotations',
+                crmRecordId: annotationId,
+                action: 'create',
+                payload: {
+                    subject: payload.subject,
+                    objecttypecode: payload.objecttypecode,
+                    contact_id: contactId,
+                    invoice_number: invoiceNumber,
+                },
+                triggeredBy,
+            });
+            return { success: true, annotationId };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error('[Dynamics CRM] Failed to log invoice-send note:', errMsg);
+            return { success: false, error: errMsg };
+        }
     }
 
     async uploadDocument(

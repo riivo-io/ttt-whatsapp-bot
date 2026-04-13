@@ -248,3 +248,42 @@ export class PDFService {
 }
 
 export const pdfService = new PDFService();
+
+/**
+ * Map a Dynamics invoice record (from getInvoiceByNumber) into the InvoiceData
+ * shape the PDF renderer expects. Extracted here so the /api/pdf/invoice route
+ * and the OpenAI tool handlers share one definition — otherwise adding a
+ * rendered field means updating two places and one will inevitably drift.
+ */
+export function mapInvoiceToInvoiceData(invoice: any): InvoiceData {
+    return {
+        invoiceNumber: invoice.new_name,
+        invoiceDate: new Date(invoice.createdon).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }),
+        consultantName: invoice.riivo_consultantfullname || '',
+        customerFullname: invoice.riivo_customerfullname || '',
+        customerStreet: invoice.riivo_customerstreet || '',
+        customerSuburb: invoice.riivo_customersuburb || '',
+        customerProvince: invoice.riivo_customerprovince || '',
+        customerCity: invoice.riivo_customercity || '',
+        customerCountry: invoice.riivo_customercountry || '',
+        customerPostalCode: invoice.riivo_customerponumber || '',
+        customerVatNumber: invoice.riivo_customervatnumber || '',
+        consultantCompany: invoice.riivo_consultantcompany || '',
+        consultantStreet: invoice.riivo_consultantstreet || '',
+        consultantSuburb: invoice.riivo_consultantsuburb || '',
+        consultantProvince: invoice.riivo_consultantprovince || '',
+        consultantCity: invoice.riivo_consultantcity || '',
+        consultantCountry: invoice.riivo_consultantcountry || '',
+        consultantPostalCode: invoice.riivo_consultantponumber || '',
+        consultantVatNumber: invoice.riivo_consultantvatnumber || '',
+        sarsReimbursement: invoice.ttt_sarsreimbursement || 0,
+        subtotal: invoice.ttt_totalwithinterest || 0,
+        vatAmount: invoice.riivo_vattotal || 0,
+        totalInclVat: invoice.riivo_totalinclvat || 0,
+        accountHolderName: invoice.icon_accountholdername || '',
+        bankName: invoice.icon_bank || '',
+        accountNumber: invoice.icon_accountnumber || '',
+        accountType: invoice.icon_accounttype || '',
+        branchNumber: invoice.icon_branchnumber || '',
+    };
+}

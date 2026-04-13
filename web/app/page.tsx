@@ -331,12 +331,19 @@ export default function Home() {
                       return;
                     }
 
-                    // Step 2: Tell the chat AI a file was uploaded so it asks for classification
+                    // Step 2: Tell the chat AI a file was uploaded so it asks for classification.
+                    // Pass newSession flag so this turn is part of the same session as
+                    // whatever conversation is already on screen. Crucially, also reset the
+                    // flag afterwards — otherwise the NEXT typed message will still think it
+                    // needs a fresh session and nuke the context we just established here
+                    // (which is what broke the "upload LoE → bot asks which lead → user
+                    // replies 'rosie'" flow).
                     const chatRes = await fetch('http://localhost:3001/api/chat', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ message: `I just uploaded a document: ${file.name}`, testOverride: { type: testContext, staffRole: selectedOption.staffRole } }),
+                      body: JSON.stringify({ message: `I just uploaded a document: ${file.name}`, testOverride: { type: testContext, staffRole: selectedOption.staffRole, newSession: needsNewSession } }),
                     });
+                    if (needsNewSession) setNeedsNewSession(false);
                     const chatData = await chatRes.json();
                     if (chatRes.ok) {
                       setMessages(prev => [...prev, { role: 'assistant', content: chatData.response, interactive: chatData.interactive }]);

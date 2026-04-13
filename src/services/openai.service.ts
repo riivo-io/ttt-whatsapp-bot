@@ -2,7 +2,8 @@ import OpenAI from 'openai';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import { dynamicsService } from './dynamics.service';
-import { pdfService, InvoiceData } from './pdf.service';
+import { pdfService, InvoiceData, mapInvoiceToInvoiceData } from './pdf.service';
+import { metaWhatsAppService } from './meta.service';
 import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from '../routes/upload.route';
 
 dotenv.config();
@@ -29,6 +30,7 @@ const STAFF_TOOL_PERMISSIONS: Record<string, string> = {
     get_client_invoices: 'view_outstanding_invoices',
     get_outstanding_balance: 'view_outstanding_invoices',
     get_invoice_pdf: 'send_invoice_pdf',
+    send_invoice_pdf: 'send_invoice_pdf',
     upload_letter_of_engagement: 'upload_letter_of_engagement',
     create_contact: 'create_contact',
     create_invoice: 'create_invoice',
@@ -60,7 +62,8 @@ You also have access to the user's TTT account information (Invoices and Support
 - For Cases: Mention the Title (Name), Process, and Stage. **DO NOT** output the Case ID (GUID).
 
 **Tool Errors & Ambiguity — MUST follow these rules**:
-- If a tool response contains \`error: "multiple_matches"\` and a \`candidates\` list, show the candidate names (and mobile numbers if helpful) back to the user and ask which one they mean. Do NOT pick one yourself.
+- If a tool response contains \`error: "multiple_matches"\` and a \`candidates\` list, show the candidate names (and mobile numbers if helpful) back to the user and ask which one they mean. Do NOT pick one yourself. **When the user picks one, you MUST re-call the SAME tool with the \`client\` argument set to the chosen candidate's \`id\` (the GUID, e.g. "50334bea-1a00-f111-88b4-002248a29481"), NOT the name. Re-using the name will trigger the same ambiguous result and you will loop forever.**
+- **CONTEXT RE-USE — VERY IMPORTANT.** When a tool response contains a \`client_id\` (GUID) and \`client_name\`, that means a specific client was successfully resolved. For any FOLLOW-UP calls in the same conversation about the same person ("can you also show me their cases", "send them an invoice", "what about their balance"), you MUST reuse that exact \`client_id\` GUID as the \`client\` argument. Do NOT re-look up the same person by name — they may be one of several people with that name, and re-looking up will cause an ambiguous-match loop.
 - If a tool response contains \`error: "not_found"\`, tell the user clearly you couldn't find a match for exactly what they gave you, and ask for more information — full name, phone number, or offer to list their clients.
 - If a tool response contains \`error: "lookup_failed"\` or any other error, state clearly that the CRM had an issue looking that up, and suggest they try again or ask you to list their clients instead.
 - Never silently return an empty result when the real problem was an unresolved lookup. Always say specifically *why* you couldn't complete the action.
@@ -135,7 +138,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "get_invoice_pdf",
-            description: "Use this when the user asks for a COPY or PDF of a specific invoice. Requires an invoice number.",
+            description: "Use this when the user wants to VIEW or DOWNLOAD a PDF of a specific invoice for themselves. Returns a link. Do NOT use this to send an invoice to a client — use send_invoice_pdf for that.",
             parameters: {
                 type: "object",
                 properties: {
@@ -145,6 +148,27 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
                     }
                 },
                 required: ["invoice_number"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "send_invoice_pdf",
+            description: "Staff-only: DELIVER an invoice PDF to a specific client via WhatsApp. Requires the invoice number AND which client to send it to (name or phone number). Fetches the invoice, generates the PDF, sends as a WhatsApp document message, and logs the send to the client's timeline. Do NOT use this when the staff just wants to preview the PDF — use get_invoice_pdf for that.",
+            parameters: {
+                type: "object",
+                properties: {
+                    invoice_number: {
+                        type: "string",
+                        description: "The invoice number to send (e.g. INV123)"
+                    },
+                    client: {
+                        type: "string",
+                        description: "The client to send to — their name or phone number. Will be resolved to a Contact record."
+                    }
+                },
+                required: ["invoice_number", "client"],
             },
         },
     },
@@ -236,7 +260,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "get_my_leads",
-            description: "Use when a staff member asks to see their LEADS — prospects in the onboarding pipeline that they own as consultant. Leads and clients are different: clients are confirmed contacts, leads are not yet clients. Returns leads owned by the staff member.",
+            description: "Use when a staff member asks to see their LEADS — prospects in the onboarding pipeline that they own as consultant. Leads and clients are different: clients are confirmed contacts, leads are not yet clients. Returns each lead's id, full name, mobile number, and email. This is ALL the lead info we have — do NOT then call get_client_details for a lead (leads are not contacts and get_client_details will return nothing). Just answer from what this tool returns.",
             parameters: {
                 type: "object",
                 properties: {},
@@ -265,7 +289,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "get_client_details",
-            description: "Get a specific client's full profile: name, phone, email, ID number, tax number. For staff to look up any client's details.",
+            description: "Get a specific CLIENT's (contact record) full profile: name, phone, email, ID number, tax number. For staff to look up any confirmed client. Do NOT use this for LEADS — leads live in a separate entity and this tool will not find them. For lead info, use search_lead_by_name or get_my_leads, which already return complete lead details.",
             parameters: {
                 type: "object",
                 properties: {
@@ -433,7 +457,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "search_lead_by_name",
-            description: "Search for a lead by name. Scoped to leads owned by the calling staff member. If nothing comes back, the tool will tell you and you should offer to create a new lead via create_lead.",
+            description: "Search for a lead by name. Scoped to leads owned by the calling staff member. Returns each match's id, full name, and mobile number — that is the COMPLETE lead info we expose. Do NOT then call get_client_details for any of the results (leads are not contacts and that tool won't find them). If nothing comes back, the tool will tell you and you should offer to create a new lead via create_lead.",
             parameters: {
                 type: "object",
                 properties: {
@@ -651,7 +675,7 @@ export class OpenAIService {
 
             // Filter tools by role
             const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'opt_out_whatsapp', 'refer_friend', 'save_document'];
-            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'upload_letter_of_engagement'];
+            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'upload_letter_of_engagement'];
             const leadTools = ['save_document'];
             const unknownTools = ['verify_identity'];
 
@@ -675,6 +699,25 @@ export class OpenAIService {
             } else {
                 // Unknown users
                 availableTools = TOOLS.filter(t => unknownTools.includes((t as any).function.name));
+            }
+
+            // When a staff member has a pending document upload, the only valid
+            // next action is "identify the target lead and attach the LOE". Strip
+            // contact-lookup and client-data tools from the available list so the
+            // AI physically cannot pick the wrong path (e.g. search_contact_by_name
+            // for what is meant to be a lead lookup). Prompt-only guidance wasn't
+            // enough — gpt-4o-mini kept reaching for search_contact_by_name.
+            if (entityType === 'user' && phoneNumber && hasPendingUpload(phoneNumber) && availableTools) {
+                const allowedDuringUpload = new Set([
+                    'search_lead_by_name',
+                    'get_my_leads',
+                    'upload_letter_of_engagement',
+                    'create_lead',           // fallback if the lead doesn't exist yet
+                    'get_industries',        // supporting tool for create_lead
+                ]);
+                const before = availableTools.length;
+                availableTools = availableTools.filter(t => allowedDuringUpload.has((t as any).function.name));
+                console.log(`[OpenAI] Pending LOE upload detected — restricted tool surface from ${before} to ${availableTools.length} tools`);
             }
 
             // When the caller is staff, restrict contact lookups to clients they own.
@@ -834,6 +877,153 @@ export class OpenAIService {
                     return JSON.stringify({ status: 'ok', count: industries.length, industries });
                 };
 
+                // Helper: handle the send_invoice_pdf tool call.
+                // Orchestrates the 6-step flow (resolve client → fetch invoice →
+                // generate PDF → send via Meta → log timeline note). Every
+                // failure mode returns a structured status so the AI can surface
+                // a clear message to staff. Dry-run mode (no Meta creds) is
+                // handled transparently inside metaWhatsAppService.sendDocument.
+                const handleSendInvoicePdf = async (toolCall: any): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    const invoiceNum: string | undefined = args.invoice_number;
+                    const clientInput: string | undefined = args.client;
+                    if (!invoiceNum || !clientInput) {
+                        return JSON.stringify({ status: 'error', message: 'Both invoice_number and client are required.' });
+                    }
+                    if (!contactId) {
+                        return JSON.stringify({ status: 'error', message: 'No staff identity on session — cannot log invoice-send note.' });
+                    }
+
+                    // 1. Resolve the client to a Contact GUID. Inlined (rather
+                    //    than reusing resolveClientDetailed) because this helper
+                    //    is hoisted above the scope where that resolver lives,
+                    //    and the logic is small enough not to justify further
+                    //    refactoring right now.
+                    let clientId: string | null = null;
+                    let clientFullname: string = '';
+                    const inputTrimmed = clientInput.trim();
+                    const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                    if (guidRegex.test(inputTrimmed)) {
+                        clientId = inputTrimmed;
+                    } else {
+                        try {
+                            // Phone-shaped input: try contact-by-phone directly,
+                            // then fall back to getContactByPhone. This avoids
+                            // the multi-table priority issue where a phone that
+                            // also matches a systemuser/lead wins over the contact.
+                            const phoneShaped = /^[+0-9\s]+$/.test(inputTrimmed) && inputTrimmed.replace(/\D/g, '').length >= 9;
+                            if (phoneShaped) {
+                                const contactDirect = await dynamicsService.getContactByPhoneAndType(inputTrimmed, 'client');
+                                if (contactDirect) {
+                                    clientId = contactDirect.id;
+                                    clientFullname = contactDirect.fullname || '';
+                                }
+                            }
+                            if (!clientId) {
+                                const byPhone = await dynamicsService.getContactByPhone(inputTrimmed);
+                                if (byPhone?.type === 'client') {
+                                    clientId = byPhone.id;
+                                    clientFullname = byPhone.fullname || '';
+                                }
+                            }
+                            if (!clientId) {
+                                const matches = await dynamicsService.searchContactByName(inputTrimmed, ownerFilter);
+                                console.log(`[send_invoice_pdf] searchContactByName("${inputTrimmed}", owner=${ownerFilter || 'none'}) → ${matches.length} match(es)`);
+                                if (matches.length === 0) {
+                                    return JSON.stringify({ status: 'client_not_found', message: `No client matched "${clientInput}". Ask the staff to clarify — full name or phone number.` });
+                                }
+                                if (matches.length > 1) {
+                                    // Auto-resolve when only one candidate has a usable
+                                    // mobile number — the others physically cannot receive
+                                    // a WhatsApp document, so making the staff disambiguate
+                                    // between them is wasted friction.
+                                    const withMobile = matches.filter((m: any) => m.mobilephone && String(m.mobilephone).trim().length > 0);
+                                    if (withMobile.length === 1) {
+                                        console.log(`[send_invoice_pdf] Auto-resolved ambiguity: only ${withMobile[0].fullname} has a mobile; picking that contact.`);
+                                        clientId = withMobile[0].contactid;
+                                        clientFullname = withMobile[0].fullname || '';
+                                    } else {
+                                        return JSON.stringify({
+                                            status: 'client_ambiguous',
+                                            candidates: matches.map((m: any) => ({ id: m.contactid, fullname: m.fullname, mobilephone: m.mobilephone })),
+                                            message: `Multiple clients match "${clientInput}". Show the candidates (names + phones) to the staff and ask which one. When they pick one, re-call send_invoice_pdf with \`client\` set to that candidate's \`id\` value (the long GUID like "50334bea-1a00-f111-..."). Do NOT pass their name. Do NOT pass their phone number. ONLY the \`id\` GUID will work — anything else will loop back to this same ambiguous response.`,
+                                        });
+                                    }
+                                } else {
+                                    clientId = matches[0].contactid;
+                                    clientFullname = matches[0].fullname || '';
+                                }
+                            }
+                        } catch (e: any) {
+                            return JSON.stringify({ status: 'error', message: `Client lookup failed: ${e?.message || 'unknown error'}` });
+                        }
+                    }
+                    if (!clientId) {
+                        return JSON.stringify({ status: 'client_not_found', message: `No client matched "${clientInput}".` });
+                    }
+
+                    // 2. Fetch the contact's mobile number from Dynamics.
+                    const details = await dynamicsService.getContactDetails(clientId);
+                    const clientPhone: string | undefined = details?.mobilephone || undefined;
+                    if (!clientPhone) {
+                        return JSON.stringify({ status: 'no_whatsapp_number', client_name: clientFullname, message: `${clientFullname || 'The client'} has no mobile number on file, so the PDF cannot be sent. Ask staff to update the client's contact record first.` });
+                    }
+                    if (!clientFullname && details?.fullname) clientFullname = details.fullname;
+
+                    // 3. Fetch the invoice and generate the PDF.
+                    const invoice = await dynamicsService.getInvoiceByNumber(invoiceNum);
+                    if (!invoice) {
+                        return JSON.stringify({ status: 'invoice_not_found', message: `Invoice ${invoiceNum} could not be found in the CRM. Nothing was sent.` });
+                    }
+                    let pdfBuffer: Buffer;
+                    try {
+                        const invoiceData: InvoiceData = mapInvoiceToInvoiceData(invoice);
+                        pdfBuffer = await pdfService.generateInvoicePDF(invoiceData);
+                    } catch (err: any) {
+                        console.error('[send_invoice_pdf] PDF generation failed:', err?.message || err);
+                        return JSON.stringify({ status: 'send_failed', message: `PDF generation failed for invoice ${invoiceNum}. Nothing was sent. Please try again.` });
+                    }
+
+                    // 4. Send via Meta (or stub in dry-run mode).
+                    // Caption includes recipient's first name + sender's name so
+                    // the client sees who at TTT initiated the send. Falls back
+                    // gracefully if either name is missing.
+                    const recipientFirst = clientFullname ? clientFullname.split(/\s+/)[0] : '';
+                    const senderName = (userFullName && userFullName.trim()) || 'the team';
+                    const greeting = recipientFirst ? `Hi ${recipientFirst}` : 'Hi there';
+                    const caption = `${greeting}, ${senderName} from TTT has sent you an invoice. Please find it attached. Thank you.`;
+                    const sendResult = await metaWhatsAppService.sendDocument(
+                        clientPhone,
+                        pdfBuffer,
+                        `${invoiceNum}.pdf`,
+                        caption
+                    );
+
+                    // 5. If Meta reported a real failure (not a dry-run), stop
+                    //    here — no timeline note. Dry-run counts as "would have
+                    //    delivered" so we still log the audit trail.
+                    if (!sendResult.delivered && !sendResult.dryRun) {
+                        return JSON.stringify({ status: 'send_failed', message: `WhatsApp delivery failed: ${sendResult.error || 'unknown error'}. The client was not notified and no timeline note was written.` });
+                    }
+
+                    // 6. Log the send to the client's Contact timeline.
+                    await dynamicsService.logInvoiceSentToContact(clientId, invoiceNum, contactId);
+
+                    const pdfPreviewUrl = `http://localhost:3001/api/pdf/invoice/${invoiceNum}`;
+                    return JSON.stringify({
+                        status: 'sent',
+                        invoice_number: invoiceNum,
+                        client_name: clientFullname || 'the client',
+                        client_phone: clientPhone,
+                        whatsapp_caption: caption,
+                        dry_run: Boolean(sendResult.dryRun),
+                        pdf_preview_url: pdfPreviewUrl,
+                        message: sendResult.dryRun
+                            ? `TEST MODE — no real WhatsApp message was sent. Confirm to the staff that:\n- Invoice ${invoiceNum} has been "sent" to ${clientFullname || 'the client'}.\n- It would have been delivered to: ${clientPhone}\n- PDF preview link: ${pdfPreviewUrl}\n- The caption that would accompany the PDF reads: "${caption}"\nMention all four lines (client name + phone + preview link + caption) verbatim so the staff can verify targeting, content, and message wording.`
+                            : `Invoice ${invoiceNum} has been sent to ${clientFullname || 'the client'} via WhatsApp.`,
+                    });
+                };
+
                 // Helper: handle the upload_letter_of_engagement tool call.
                 // Hoisted to this scope so both the first-round and follow-up
                 // tool loops can use it without duplicating PDF / GUID / staging checks.
@@ -980,7 +1170,7 @@ export class OpenAIService {
                                     const r = await resolveClientDetailed(args.client);
                                     if (r.status === 'found') {
                                         const data = await dynamicsService.getClientInvoices(r.id);
-                                        functionResponse = JSON.stringify({ client: r.fullname, invoices: data });
+                                        functionResponse = JSON.stringify({ client_id: r.id, client_name: r.fullname, invoices: data });
                                     } else if (r.status === 'ambiguous') {
                                         functionResponse = JSON.stringify({
                                             error: 'multiple_matches',
@@ -1009,7 +1199,7 @@ export class OpenAIService {
                                 const r = await resolveClientDetailed(args.client);
                                 if (r.status === 'found') {
                                     const data = await dynamicsService.getClientCases(r.id);
-                                    functionResponse = JSON.stringify({ client: r.fullname, cases: data });
+                                    functionResponse = JSON.stringify({ client_id: r.id, client_name: r.fullname, cases: data });
                                 } else if (r.status === 'ambiguous') {
                                     functionResponse = JSON.stringify({
                                         error: 'multiple_matches',
@@ -1049,41 +1239,9 @@ export class OpenAIService {
                                     message: `Invoice ${invoiceNum} not found.`
                                 });
                             } else {
-                                // Map Dynamics data to InvoiceData
-                                const invoiceData: InvoiceData = {
-                                    invoiceNumber: invoice.new_name,
-                                    invoiceDate: new Date(invoice.createdon).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }),
-                                    consultantName: invoice.riivo_consultantfullname || '',
-                                    customerFullname: invoice.riivo_customerfullname || '',
-                                    customerStreet: invoice.riivo_customerstreet || '',
-                                    customerSuburb: invoice.riivo_customersuburb || '',
-                                    customerProvince: invoice.riivo_customerprovince || '',
-                                    customerCity: invoice.riivo_customercity || '',
-                                    customerCountry: invoice.riivo_customercountry || '',
-                                    customerPostalCode: invoice.riivo_customerponumber || '',
-                                    customerVatNumber: invoice.riivo_customervatnumber || '',
-                                    consultantCompany: invoice.riivo_consultantcompany || '',
-                                    consultantStreet: invoice.riivo_consultantstreet || '',
-                                    consultantSuburb: invoice.riivo_consultantsuburb || '',
-                                    consultantProvince: invoice.riivo_consultantprovince || '',
-                                    consultantCity: invoice.riivo_consultantcity || '',
-                                    consultantCountry: invoice.riivo_consultantcountry || '',
-                                    consultantPostalCode: invoice.riivo_consultantponumber || '',
-                                    consultantVatNumber: invoice.riivo_consultantvatnumber || '',
-                                    sarsReimbursement: invoice.ttt_sarsreimbursement || 0,
-                                    subtotal: invoice.ttt_totalwithinterest || 0,
-                                    vatAmount: invoice.riivo_vattotal || 0,
-                                    totalInclVat: invoice.riivo_totalinclvat || 0,
-                                    accountHolderName: invoice.icon_accountholdername || '',
-                                    bankName: invoice.icon_bank || '',
-                                    accountNumber: invoice.icon_accountnumber || '',
-                                    accountType: invoice.icon_accounttype || '',
-                                    branchNumber: invoice.icon_branchnumber || ''
-                                };
-
-                                // Return a download link - the PDF route will handle generation on-demand
+                                // Return a download link — the /api/pdf route regenerates
+                                // the PDF on demand from the same source data.
                                 console.log(`[PDF] Invoice ${invoiceNum} found, returning download link`);
-
                                 functionResponse = JSON.stringify({
                                     status: "success",
                                     message: `Here's your invoice: [📄 Download ${invoiceNum}.pdf](http://localhost:3001/api/pdf/invoice/${invoiceNum})`,
@@ -1236,15 +1394,36 @@ export class OpenAIService {
                         } else if (functionName === 'get_outstanding_balance') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             let targetId = contactId;
+                            let targetName: string | undefined;
                             if (entityType === 'user' && args.client) {
-                                const resolved = await resolveClientId(args.client);
-                                targetId = resolved || contactId;
+                                const r = await resolveClientDetailed(args.client);
+                                if (r.status === 'found') {
+                                    targetId = r.id;
+                                    targetName = r.fullname;
+                                } else if (r.status === 'ambiguous') {
+                                    functionResponse = JSON.stringify({
+                                        error: 'multiple_matches',
+                                        message: `Multiple clients match "${args.client}". Ask the user which one they mean.`,
+                                        candidates: r.candidates,
+                                    });
+                                } else if (r.status === 'not_found') {
+                                    functionResponse = JSON.stringify({
+                                        error: 'not_found',
+                                        message: `No client found matching "${args.client}".`,
+                                    });
+                                }
                             }
-                            const balance = await dynamicsService.getOpenInvoiceTotal(targetId);
-                            functionResponse = JSON.stringify({
-                                outstanding_amount: `R${balance.total.toFixed(2)}`,
-                                open_invoices: balance.count
-                            });
+                            // Only run the balance lookup if we didn't already short-circuit
+                            // with an error response above.
+                            if (functionResponse === "No data found." || !args.client) {
+                                const balance = await dynamicsService.getOpenInvoiceTotal(targetId);
+                                functionResponse = JSON.stringify({
+                                    client_id: targetId,
+                                    client_name: targetName,
+                                    outstanding_amount: `R${balance.total.toFixed(2)}`,
+                                    open_invoices: balance.count,
+                                });
+                            }
                         } else if (functionName === 'create_lead') {
                             functionResponse = await handleCreateLead(toolCall);
                         } else if (functionName === 'create_contact') {
@@ -1267,7 +1446,7 @@ export class OpenAIService {
                                 functionResponse = JSON.stringify({
                                     status: 'not_found',
                                     scope: ownerFilter ? 'owned_by_you' : 'all_leads',
-                                    message: `No active leads assigned to you match "${args.name}". Ask the staff member whether they'd like to create a new lead (via create_lead) for this person, or check a different spelling.`,
+                                    message: `No active leads assigned to you match "${args.name}". Ask the staff member what they'd like to do next, offering these three options:\n1. Check the spelling or give more details (full name, phone).\n2. See the full list of their leads (call get_my_leads).\n3. Create a new lead for this person (call create_lead — you'll need first name, last name, client_type, lead_type, and industry).\nPresent all three options and let them choose.`,
                                 });
                             }
                         } else if (functionName === 'create_task') {
@@ -1352,6 +1531,8 @@ export class OpenAIService {
                             }
                         } else if (functionName === 'upload_letter_of_engagement') {
                             functionResponse = await handleUploadLoe(toolCall, phoneNumber, contactId);
+                        } else if (functionName === 'send_invoice_pdf') {
+                            functionResponse = await handleSendInvoicePdf(toolCall);
                         } else if (functionName === 'save_document') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             if (entityType === 'user') {
@@ -1458,7 +1639,7 @@ export class OpenAIService {
                                     functionResponse = JSON.stringify({
                                         status: 'not_found',
                                         scope: ownerFilter ? 'owned_by_you' : 'all_leads',
-                                        message: `No active leads assigned to you match "${args.name}". Ask the staff member whether they'd like to create a new lead (via create_lead) for this person, or check a different spelling.`,
+                                        message: `No active leads assigned to you match "${args.name}". Ask the staff member what they'd like to do next, offering these three options:\n1. Check the spelling or give more details (full name, phone).\n2. See the full list of their leads (call get_my_leads).\n3. Create a new lead for this person (call create_lead — you'll need first name, last name, client_type, lead_type, and industry).\nPresent all three options and let them choose.`,
                                     });
                                 }
                             } else if (functionName === 'create_task') {
@@ -1494,8 +1675,131 @@ export class OpenAIService {
                                 functionResponse = data.length > 0
                                     ? JSON.stringify(data)
                                     : "No leads found assigned to you.";
+                            } else if (functionName === 'get_my_clients') {
+                                const data = await dynamicsService.getMyClients(contactId);
+                                functionResponse = data.length > 0
+                                    ? JSON.stringify(data)
+                                    : "No clients found assigned to you.";
+                            } else if (functionName === 'get_client_details') {
+                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                                // Inline GUID-or-resolve pattern (resolveClientId is scoped
+                                // to the first-round closure, not visible here).
+                                const clientInput = (args.client || '').trim();
+                                const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                                let targetId: string | null = null;
+                                if (guidRegex.test(clientInput)) {
+                                    targetId = clientInput;
+                                } else if (clientInput) {
+                                    const byPhone = await dynamicsService.getContactByPhone(clientInput);
+                                    if (byPhone?.type === 'client') targetId = byPhone.id;
+                                    else {
+                                        const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
+                                        if (byName.length > 0) targetId = byName[0].contactid;
+                                    }
+                                }
+                                if (targetId) {
+                                    const details = await dynamicsService.getContactDetails(targetId);
+                                    functionResponse = details ? JSON.stringify(details) : "Client found but could not load details.";
+                                } else {
+                                    functionResponse = "No client found matching that name or phone number.";
+                                }
+                            } else if (functionName === 'get_client_invoices') {
+                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                                const clientInput = (args.client || '').trim();
+                                const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                                let targetId: string | null = entityType === 'client' ? (contactId || null) : null;
+                                let targetName: string | undefined;
+                                if (entityType === 'user' && clientInput) {
+                                    if (guidRegex.test(clientInput)) targetId = clientInput;
+                                    else {
+                                        const byPhone = await dynamicsService.getContactByPhone(clientInput);
+                                        if (byPhone?.type === 'client') { targetId = byPhone.id; targetName = byPhone.fullname; }
+                                        else {
+                                            const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
+                                            if (byName.length > 0) { targetId = byName[0].contactid; targetName = byName[0].fullname; }
+                                        }
+                                    }
+                                }
+                                if (!targetId) {
+                                    functionResponse = JSON.stringify({ error: 'not_found', message: `No client matched "${args.client}". Ask staff for a name, phone, or to call get_my_clients.` });
+                                } else {
+                                    const data = await dynamicsService.getClientInvoices(targetId);
+                                    functionResponse = JSON.stringify({ client_id: targetId, client_name: targetName, invoices: data });
+                                }
+                            } else if (functionName === 'get_client_cases') {
+                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                                const clientInput = (args.client || '').trim();
+                                const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                                let targetId: string | null = entityType === 'client' ? (contactId || null) : null;
+                                let targetName: string | undefined;
+                                if (entityType === 'user' && clientInput) {
+                                    if (guidRegex.test(clientInput)) targetId = clientInput;
+                                    else {
+                                        const byPhone = await dynamicsService.getContactByPhone(clientInput);
+                                        if (byPhone?.type === 'client') { targetId = byPhone.id; targetName = byPhone.fullname; }
+                                        else {
+                                            const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
+                                            if (byName.length > 0) { targetId = byName[0].contactid; targetName = byName[0].fullname; }
+                                        }
+                                    }
+                                }
+                                if (!targetId) {
+                                    functionResponse = JSON.stringify({ error: 'not_found', message: `No client matched "${args.client}".` });
+                                } else {
+                                    const data = await dynamicsService.getClientCases(targetId);
+                                    functionResponse = JSON.stringify({ client_id: targetId, client_name: targetName, cases: data });
+                                }
+                            } else if (functionName === 'get_outstanding_balance') {
+                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                                const clientInput = (args.client || '').trim();
+                                const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                                let targetId: string | null = entityType === 'client' ? (contactId || null) : null;
+                                let targetName: string | undefined;
+                                if (entityType === 'user' && clientInput) {
+                                    if (guidRegex.test(clientInput)) targetId = clientInput;
+                                    else {
+                                        const byPhone = await dynamicsService.getContactByPhone(clientInput);
+                                        if (byPhone?.type === 'client') { targetId = byPhone.id; targetName = byPhone.fullname; }
+                                        else {
+                                            const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
+                                            if (byName.length > 0) { targetId = byName[0].contactid; targetName = byName[0].fullname; }
+                                        }
+                                    }
+                                }
+                                if (!targetId) {
+                                    functionResponse = JSON.stringify({ error: 'not_found', message: `No client matched "${args.client}".` });
+                                } else {
+                                    const balance = await dynamicsService.getOpenInvoiceTotal(targetId);
+                                    functionResponse = JSON.stringify({
+                                        client_id: targetId,
+                                        client_name: targetName,
+                                        outstanding_amount: `R${balance.total.toFixed(2)}`,
+                                        open_invoices: balance.count,
+                                    });
+                                }
+                            } else if (functionName === 'get_case_by_name') {
+                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                                const cases = await dynamicsService.searchCaseByName(args.case_name);
+                                functionResponse = cases.length > 0
+                                    ? JSON.stringify(cases)
+                                    : "No cases found matching that name.";
+                            } else if (functionName === 'get_invoice_pdf') {
+                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                                const invoiceNum = args.invoice_number;
+                                const invoice = await dynamicsService.getInvoiceByNumber(invoiceNum);
+                                if (!invoice) {
+                                    functionResponse = JSON.stringify({ status: 'error', message: `Invoice ${invoiceNum} not found.` });
+                                } else {
+                                    functionResponse = JSON.stringify({
+                                        status: 'success',
+                                        message: `Here's the invoice: [📄 Download ${invoiceNum}.pdf](http://localhost:3001/api/pdf/invoice/${invoiceNum})`,
+                                        pdfLink: `http://localhost:3001/api/pdf/invoice/${invoiceNum}`,
+                                    });
+                                }
                             } else if (functionName === 'upload_letter_of_engagement') {
                                 functionResponse = await handleUploadLoe(toolCall, phoneNumber, contactId);
+                            } else if (functionName === 'send_invoice_pdf') {
+                                functionResponse = await handleSendInvoicePdf(toolCall);
                             } else if (functionName === 'create_lead') {
                                 functionResponse = await handleCreateLead(toolCall);
                             } else if (functionName === 'create_contact') {
