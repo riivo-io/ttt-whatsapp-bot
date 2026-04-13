@@ -10,11 +10,23 @@ interface Message {
 }
 
 type TestContextType = 'client' | 'lead' | 'user';
+type StaffRoleName = 'No Access' | 'Some Access' | 'Full Access';
 
-const CONTEXT_OPTIONS: { type: TestContextType; label: string }[] = [
-  { type: 'client', label: 'Client' },
-  { type: 'lead', label: 'Lead' },
-  { type: 'user', label: 'Staff' },
+type TestOptionKey = 'client' | 'lead' | 'staff_full' | 'staff_some' | 'staff_none';
+
+interface ContextOption {
+  key: TestOptionKey;
+  type: TestContextType;
+  staffRole?: StaffRoleName;
+  label: string;
+}
+
+const CONTEXT_OPTIONS: ContextOption[] = [
+  { key: 'client', type: 'client', label: 'Client' },
+  { key: 'lead', type: 'lead', label: 'Lead' },
+  { key: 'staff_full', type: 'user', staffRole: 'Full Access', label: 'Staff — Full' },
+  { key: 'staff_some', type: 'user', staffRole: 'Some Access', label: 'Staff — Some' },
+  { key: 'staff_none', type: 'user', staffRole: 'No Access', label: 'Staff — None' },
 ];
 
 const WELCOME_MESSAGES: Record<TestContextType, { greeting: string; suggestions: { label: string; message: string }[] }> = {
@@ -48,7 +60,9 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [testContext, setTestContext] = useState<TestContextType>('client');
+  const [testOption, setTestOption] = useState<TestOptionKey>('client');
+  const selectedOption = CONTEXT_OPTIONS.find(o => o.key === testOption)!;
+  const testContext: TestContextType = selectedOption.type;
   const [needsNewSession, setNeedsNewSession] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -60,8 +74,8 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  const switchContext = (type: TestContextType) => {
-    setTestContext(type);
+  const switchContext = (key: TestOptionKey) => {
+    setTestOption(key);
     setMessages([]);
     setInput('');
     setNeedsNewSession(true);
@@ -79,7 +93,7 @@ export default function Home() {
       const response = await fetch('http://localhost:3001/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage, testOverride: { type: testContext, newSession: needsNewSession } }),
+        body: JSON.stringify({ message: userMessage, testOverride: { type: testContext, staffRole: selectedOption.staffRole, newSession: needsNewSession } }),
       });
       if (needsNewSession) setNeedsNewSession(false);
 
@@ -173,11 +187,11 @@ export default function Home() {
       </header>
 
       <div className={styles.contextSwitcher}>
-        {CONTEXT_OPTIONS.map(({ type, label }) => (
+        {CONTEXT_OPTIONS.map(({ key, type, label }) => (
           <button
-            key={type}
-            className={`${styles.contextPill} ${testContext === type ? styles[`contextPill_${type}`] : ''}`}
-            onClick={() => switchContext(type)}
+            key={key}
+            className={`${styles.contextPill} ${testOption === key ? styles[`contextPill_${type}`] : ''}`}
+            onClick={() => switchContext(key)}
           >
             {label}
           </button>
@@ -186,7 +200,7 @@ export default function Home() {
 
       <main className={styles.chatContainer}>
         <div className={`${styles.contextBanner} ${styles[`contextBanner_${testContext}`]}`}>
-          Testing as: {CONTEXT_OPTIONS.find(o => o.type === testContext)?.label}
+          Testing as: {selectedOption.label}
         </div>
         <div className={styles.messages}>
           {messages.length === 0 && (
@@ -245,7 +259,7 @@ export default function Home() {
                               fetch('http://localhost:3001/api/chat', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ message: btn.reply.title, testOverride: { type: testContext } }),
+                                body: JSON.stringify({ message: btn.reply.title, testOverride: { type: testContext, staffRole: selectedOption.staffRole } }),
                               })
                                 .then(res => res.json())
                                 .then(data => {
@@ -315,7 +329,7 @@ export default function Home() {
                     const chatRes = await fetch('http://localhost:3001/api/chat', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ message: `I just uploaded a document: ${file.name}`, testOverride: { type: testContext } }),
+                      body: JSON.stringify({ message: `I just uploaded a document: ${file.name}`, testOverride: { type: testContext, staffRole: selectedOption.staffRole } }),
                     });
                     const chatData = await chatRes.json();
                     if (chatRes.ok) {

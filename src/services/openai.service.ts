@@ -7,6 +7,30 @@ import { hasPendingUpload, savePendingUpload } from '../routes/upload.route';
 
 dotenv.config();
 
+/**
+ * Maps internal tool names to the permission keys stored in role_tools.tool_name.
+ * A staff user can invoke an internal tool only if its permission is in the
+ * session's permitted_tools array. Tools not listed here are NOT staff-gated
+ * (e.g. client-only tools like refer_friend, or unknown-user tools like
+ * verify_identity) and are filtered by role-type instead.
+ */
+const STAFF_TOOL_PERMISSIONS: Record<string, string> = {
+    create_lead: 'create_lead',
+    create_case: 'create_case',
+    create_task: 'create_task',
+    get_task_types: 'create_task',                 // supporting tool for create_task flow
+    search_contact_by_name: 'lookup_client',
+    search_lead_by_name: 'lookup_client',
+    get_my_clients: 'lookup_client',
+    get_client_details: 'lookup_client',
+    get_client_cases: 'view_open_cases',
+    get_case_by_name: 'view_open_cases',
+    get_client_invoices: 'view_outstanding_invoices',
+    get_outstanding_balance: 'view_outstanding_invoices',
+    get_invoice_pdf: 'send_invoice_pdf',
+    save_document: 'upload_letter_of_engagement',
+};
+
 const BASE_SYSTEM_PROMPT = `You are a helpful South African Tax Expert assistant for TTT (The Tax Team).
 Your role is to provide accurate, helpful advice about South African tax matters.
 You also have access to the user's TTT account information (Invoices and Support Cases) via tools.
@@ -28,6 +52,12 @@ You also have access to the user's TTT account information (Invoices and Support
 - If the tool returns no data, inform the user politely that you couldn't find any records.
 - For Invoices: Mention the invoice number, amount, and status.
 - For Cases: Mention the Title (Name), Process, and Stage. **DO NOT** output the Case ID (GUID).
+
+**Tool Errors & Ambiguity — MUST follow these rules**:
+- If a tool response contains \`error: "multiple_matches"\` and a \`candidates\` list, show the candidate names (and mobile numbers if helpful) back to the user and ask which one they mean. Do NOT pick one yourself.
+- If a tool response contains \`error: "not_found"\`, tell the user clearly you couldn't find a match for exactly what they gave you, and ask for more information — full name, phone number, or offer to list their clients.
+- If a tool response contains \`error: "lookup_failed"\` or any other error, state clearly that the CRM had an issue looking that up, and suggest they try again or ask you to list their clients instead.
+- Never silently return an empty result when the real problem was an unresolved lookup. Always say specifically *why* you couldn't complete the action.
 
 **Format Guidelines (CRITICAL)**:
 - Responses MUST be short (under 150 words) and optimized for WhatsApp.
@@ -426,7 +456,7 @@ export class OpenAIService {
         return this.openai;
     }
 
-    async generateResponse(userMessage: string, contactId?: string, phoneNumber?: string, history: { role: 'user' | 'assistant', content: string }[] = [], entityType?: 'client' | 'lead' | 'user'): Promise<string> {
+    async generateResponse(userMessage: string, contactId?: string, phoneNumber?: string, history: { role: 'user' | 'assistant', content: string }[] = [], entityType?: 'client' | 'lead' | 'user', permittedToolKeys: string[] = [], userFullName?: string): Promise<string> {
         const client = this.getClient();
 
         if (!client) {
@@ -442,18 +472,47 @@ export class OpenAIService {
                 ? `\n\n**IMPORTANT: This is the user's FIRST message in this conversation.** Introduce yourself as the TTT Tax Assistant and clearly explain what you can help them with based on their role. Be warm and friendly. List their available capabilities as bullet points so they know exactly what's possible.`
                 : '';
 
+            // First name for friendly greetings ("Hi Luc" rather than "Hi Luc Duval")
+            const firstName = userFullName ? userFullName.trim().split(/\s+/)[0] : '';
+            const nameLine = userFullName ? `\n\n**User's full name:** ${userFullName}. Address them by their first name (${firstName}) in greetings.` : '';
+
             let roleContext = '';
             if (entityType === 'client') {
                 roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. They have full access to their invoices, cases, tax number, consultant callbacks, and opt-out. Address them as a valued client.${isFirstMessage ? `\n\nIn your introduction, let them know you can help with:\n- Viewing their invoices and outstanding balance\n- Checking the status of their tax cases\n- Looking up their tax number\n- Requesting a callback from their consultant\n- Uploading documents (IRP5s, bank statements, etc.)\n- Referring a friend or family member to TTT` : ''}`;
             } else if (entityType === 'lead') {
                 roleContext = `\n\n**User Role: LEAD (Prospective Client)**\nThis is a prospective client (lead) in the onboarding pipeline. They are NOT yet a TTT client.\n\n**CRITICAL RULE: Do NOT answer any tax questions, give tax advice, or provide tax information.** If they ask tax-related questions, politely let them know that tax assistance is available to registered TTT clients, and encourage them to complete their onboarding to become a client. Direct them to sign up at ${process.env.SIGNUP_URL || 'https://app.ttt-tax.co.za/signup'} if needed.\n\nWhat you CAN do for leads:\n- Help them upload onboarding documents (ID, payslips, bank statements, tax certificates)\n- Answer questions about the onboarding process and what documents are needed\n- Explain what TTT offers and the benefits of becoming a client\n- Encourage them to complete their sign-up${isFirstMessage ? `\n\nIn your introduction, welcome them to TTT, let them know you're here to help them get set up, and list what you can assist with. Also mention that once they become a registered client, they'll unlock full access to invoice lookups, case tracking, consultant callbacks, and more.` : ''}`;
             } else if (entityType === 'user') {
-                roleContext = `\n\n**User Role: TTT STAFF**\nThis is an internal TTT staff member. Treat them as a colleague. They have elevated access to look up clients, view cases, create cases, create leads, and create tasks.\n\n**Creating Tasks**:\n- When a staff member asks to create a task, first ask for:\n  1. Which client or lead it's for (then use search_contact_by_name or search_lead_by_name to resolve their ID)\n  2. The task type (call get_task_types to show available options)\n  3. The tax year (e.g. 2025)\n  4. Any notes/description (optional)\n- The primary representative is automatically set to the staff member.\n- Only call create_task once ALL required fields are gathered.${isFirstMessage ? `\n\nIn your introduction, greet them as a colleague and let them know you can help with:\n- Searching for clients by name or phone number\n- Viewing any client's invoices and cases\n- Creating new cases for clients\n- Creating new tasks for clients or leads\n- Creating new leads (prospects)\n- Uploading documents on behalf of clients` : ''}`;
+                // Build the staff capability list DYNAMICALLY from permitted_tools.
+                // This ensures the AI only advertises (and acts on) tools the
+                // user's role actually allows.
+                const capabilityBulletMap: Record<string, string> = {
+                    lookup_client: 'Searching for clients by name or phone number',
+                    view_outstanding_invoices: 'Viewing any client\'s invoices and outstanding balance',
+                    view_open_cases: 'Viewing any client\'s cases',
+                    create_case: 'Creating new cases for clients',
+                    create_task: 'Creating new tasks for clients or leads',
+                    create_lead: 'Creating new leads (prospects)',
+                    create_contact: 'Creating new contacts',
+                    create_invoice: 'Creating invoices',
+                    send_invoice_pdf: 'Sending invoice PDFs to clients',
+                    upload_letter_of_engagement: 'Uploading documents on behalf of clients',
+                };
+                const capabilityBullets = permittedToolKeys
+                    .map(k => capabilityBulletMap[k])
+                    .filter(Boolean)
+                    .map(line => `- ${line}`)
+                    .join('\n');
+
+                const taskInstructions = permittedToolKeys.includes('create_task')
+                    ? `\n\n**Creating Tasks**:\n- When a staff member asks to create a task, first ask for:\n  1. Which client or lead it's for (then use search_contact_by_name or search_lead_by_name to resolve their ID)\n  2. The task type (call get_task_types to show available options)\n  3. The tax year (e.g. 2025)\n  4. Any notes/description (optional)\n- The primary representative is automatically set to the staff member.\n- Only call create_task once ALL required fields are gathered.`
+                    : '';
+
+                roleContext = `\n\n**User Role: TTT STAFF**\nThis is an internal TTT staff member. Treat them as a colleague. Staff ask on behalf of THEIR clients — if they say "my clients" or "my cases", they mean clients/cases they own as the consultant. Freely use the available tools for any reasonable staff request; do not second-guess whether they "should" have access — the available tools list has already been filtered to match their permissions.\n\nYour permitted capabilities for this user:\n${capabilityBullets || '(none)'}\n\nOnly decline if the user explicitly asks for a capability that is clearly NOT in the list above (e.g. they ask you to send an SMS when that's not a listed capability). In that case, politely tell them they don't have access to that specific feature and suggest contacting their administrator. Otherwise, just use the tools available to you.${taskInstructions}${isFirstMessage ? `\n\nIn your introduction, greet them as a colleague and list the capabilities above as bullet points. Do NOT mention any capability not in the list.` : ''}`;
             } else {
                 roleContext = `\n\n**User Role: UNKNOWN**\nThis person's phone number was not found in our system. Greet them warmly and ask them to provide their 13-digit South African ID number so you can look them up using verify_identity. If they can't be found by ID number, let them know a consultant will be in touch, or they can sign up at https://app.ttt-tax.co.za/signup`;
             }
 
-            roleContext += firstMessageInstruction;
+            roleContext += nameLine + firstMessageInstruction;
 
             const systemPrompt = `Current Date: ${currentDate}\n${BASE_SYSTEM_PROMPT}${roleContext}`;
 
@@ -478,13 +537,27 @@ export class OpenAIService {
             if (contactId && entityType === 'client') {
                 availableTools = TOOLS.filter(t => clientTools.includes((t as any).function.name));
             } else if (entityType === 'user') {
-                availableTools = TOOLS.filter(t => staffTools.includes((t as any).function.name));
+                // Staff: start from staffTools, then apply role-based filter using
+                // the permitted_tools list loaded from the session (role_tools table).
+                // If a tool isn't in STAFF_TOOL_PERMISSIONS it's not staff-gated and
+                // stays available. If it is, keep it only if its permission is permitted.
+                availableTools = TOOLS.filter(t => {
+                    const name = (t as any).function.name;
+                    if (!staffTools.includes(name)) return false;
+                    const perm = STAFF_TOOL_PERMISSIONS[name];
+                    if (!perm) return true;
+                    return permittedToolKeys.includes(perm);
+                });
             } else if (entityType === 'lead') {
                 availableTools = TOOLS.filter(t => leadTools.includes((t as any).function.name));
             } else {
                 // Unknown users
                 availableTools = TOOLS.filter(t => unknownTools.includes((t as any).function.name));
             }
+
+            // When the caller is staff, restrict contact lookups to clients they own.
+            // Scoped here so both the first-round and follow-up tool handlers can use it.
+            const ownerFilter = entityType === 'user' ? contactId : undefined;
 
             // 1. First Call: Natural Language or Function Call
             const completion = await client.chat.completions.create({
@@ -511,6 +584,22 @@ export class OpenAIService {
 
                     console.log(`[OpenAI] Executing tool: ${functionName}`);
 
+                    // Defense-in-depth: for staff users, re-check permission at
+                    // handler level in case the AI invokes a tool that wasn't in
+                    // the filtered list (shouldn't happen, but enforce anyway).
+                    if (entityType === 'user') {
+                        const requiredPerm = STAFF_TOOL_PERMISSIONS[functionName];
+                        if (requiredPerm && !permittedToolKeys.includes(requiredPerm)) {
+                            console.warn(`[OpenAI] Blocked tool "${functionName}" — role lacks permission "${requiredPerm}"`);
+                            messages.push({
+                                role: 'tool',
+                                tool_call_id: (toolCall as any).id,
+                                content: `You do not have access to this feature. Please contact your administrator if you believe this is incorrect.`,
+                            } as OpenAI.Chat.Completions.ChatCompletionToolMessageParam);
+                            continue;
+                        }
+                    }
+
                     // Helper: resolve a client name/phone to a contact GUID
                     const resolveClientId = async (clientInput?: string): Promise<string | null> => {
                         if (!clientInput) return null;
@@ -520,10 +609,45 @@ export class OpenAIService {
                         // Try phone first
                         const byPhone = await dynamicsService.getContactByPhone(input);
                         if (byPhone?.type === 'client') return byPhone.id;
-                        // Try name
-                        const byName = await dynamicsService.searchContactByName(input);
+                        // Try name — scoped to staff's own clients if applicable
+                        const byName = await dynamicsService.searchContactByName(input, ownerFilter);
                         if (byName.length > 0) return byName[0].contactid;
                         return null;
+                    };
+
+                    // Detailed resolver: returns status + candidates so the AI can
+                    // disambiguate with the user (e.g. "did you mean X?") or ask
+                    // for more details (full name, phone number).
+                    type ClientResolveResult =
+                        | { status: 'found'; id: string; fullname: string }
+                        | { status: 'ambiguous'; candidates: { id: string; fullname: string; mobilephone: string | null }[] }
+                        | { status: 'not_found'; tried: string }
+                        | { status: 'error'; message: string };
+
+                    const resolveClientDetailed = async (clientInput?: string): Promise<ClientResolveResult> => {
+                        if (!clientInput?.trim()) return { status: 'not_found', tried: '' };
+                        const input = clientInput.trim();
+                        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                        if (guidRegex.test(input)) return { status: 'found', id: input, fullname: '' };
+                        try {
+                            // Try phone first
+                            const byPhone = await dynamicsService.getContactByPhone(input);
+                            if (byPhone?.type === 'client') {
+                                return { status: 'found', id: byPhone.id, fullname: byPhone.fullname || '' };
+                            }
+                            // Try name (contains match) — scoped to staff's own clients if applicable
+                            const matches = await dynamicsService.searchContactByName(input, ownerFilter);
+                            if (matches.length === 0) return { status: 'not_found', tried: input };
+                            if (matches.length === 1) {
+                                return { status: 'found', id: matches[0].contactid, fullname: matches[0].fullname };
+                            }
+                            return {
+                                status: 'ambiguous',
+                                candidates: matches.map(m => ({ id: m.contactid, fullname: m.fullname, mobilephone: m.mobilephone })),
+                            };
+                        } catch (e: any) {
+                            return { status: 'error', message: e?.message || 'Lookup failed' };
+                        }
                     };
 
                     if (contactId) {
@@ -532,25 +656,60 @@ export class OpenAIService {
                             functionResponse = details ? JSON.stringify(details) : "I couldn't retrieve your details at this time.";
                         } else if (functionName === 'get_client_invoices') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            // Staff: resolve client param. Clients: use own ID.
-                            let targetId = contactId;
-                            if (entityType === 'user' && args.client) {
-                                const resolved = await resolveClientId(args.client);
-                                targetId = resolved || contactId;
+                            if (entityType === 'user') {
+                                if (!args.client) {
+                                    functionResponse = "I need a client name or phone number to look up their invoices. Which client?";
+                                } else {
+                                    const r = await resolveClientDetailed(args.client);
+                                    if (r.status === 'found') {
+                                        const data = await dynamicsService.getClientInvoices(r.id);
+                                        functionResponse = JSON.stringify({ client: r.fullname, invoices: data });
+                                    } else if (r.status === 'ambiguous') {
+                                        functionResponse = JSON.stringify({
+                                            error: 'multiple_matches',
+                                            message: `Multiple clients match "${args.client}". Ask the user which one they mean.`,
+                                            candidates: r.candidates,
+                                        });
+                                    } else if (r.status === 'not_found') {
+                                        functionResponse = JSON.stringify({
+                                            error: 'not_found',
+                                            message: `No client found matching "${args.client}". Ask the user to provide the full name, or a phone number, or call get_my_clients to see the full list of their clients.`,
+                                        });
+                                    } else {
+                                        functionResponse = JSON.stringify({
+                                            error: 'lookup_failed',
+                                            message: `Client lookup failed: ${r.message}. Tell the user the CRM had an error.`,
+                                        });
+                                    }
+                                }
+                            } else {
+                                const data = await dynamicsService.getClientInvoices(contactId);
+                                functionResponse = JSON.stringify(data);
                             }
-                            const data = await dynamicsService.getClientInvoices(targetId);
-                            functionResponse = JSON.stringify(data);
                         } else if (functionName === 'get_client_cases') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             if (entityType === 'user' && args.client) {
-                                // Staff looking up a specific client's cases
-                                const resolved = await resolveClientId(args.client);
-                                const data = resolved
-                                    ? await dynamicsService.getClientCases(resolved)
-                                    : [];
-                                functionResponse = resolved
-                                    ? JSON.stringify(data)
-                                    : "Could not find that client.";
+                                const r = await resolveClientDetailed(args.client);
+                                if (r.status === 'found') {
+                                    const data = await dynamicsService.getClientCases(r.id);
+                                    functionResponse = JSON.stringify({ client: r.fullname, cases: data });
+                                } else if (r.status === 'ambiguous') {
+                                    functionResponse = JSON.stringify({
+                                        error: 'multiple_matches',
+                                        message: `Multiple clients match "${args.client}". Ask the user which one they mean.`,
+                                        candidates: r.candidates,
+                                    });
+                                } else if (r.status === 'not_found') {
+                                    functionResponse = JSON.stringify({
+                                        error: 'not_found',
+                                        message: `No client found matching "${args.client}". Ask for the full name or phone number, or call get_my_clients.`,
+                                    });
+                                } else {
+                                    functionResponse = JSON.stringify({
+                                        error: 'lookup_failed',
+                                        message: `Client lookup failed: ${r.message}.`,
+                                    });
+                                }
                             } else if (entityType === 'user') {
                                 // Staff viewing their own assigned cases
                                 const data = await dynamicsService.getStaffCases(contactId);
@@ -690,7 +849,7 @@ export class OpenAIService {
                                         console.log(`[OpenAI] create_case: found by phone: ${byPhone.fullname} (${byPhone.id})`);
                                     } else {
                                         // Try name search
-                                        const byName = await dynamicsService.searchContactByName(clientInput);
+                                        const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
                                         if (byName.length > 0) {
                                             targetContactId = byName[0].contactid;
                                             console.log(`[OpenAI] create_case: found by name: ${byName[0].fullname} (${targetContactId})`);
@@ -733,7 +892,7 @@ export class OpenAIService {
                                 : "No clients found assigned to you.";
                         } else if (functionName === 'search_contact_by_name') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            const results = await dynamicsService.searchContactByName(args.name);
+                            const results = await dynamicsService.searchContactByName(args.name, ownerFilter);
                             functionResponse = results.length > 0
                                 ? JSON.stringify(results)
                                 : "No contacts found matching that name.";
@@ -967,7 +1126,7 @@ export class OpenAIService {
                                 }
                             } else if (functionName === 'search_contact_by_name') {
                                 const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                                const results = await dynamicsService.searchContactByName(args.name);
+                                const results = await dynamicsService.searchContactByName(args.name, ownerFilter);
                                 functionResponse = results.length > 0
                                     ? JSON.stringify(results)
                                     : "No contacts found matching that name.";
@@ -986,7 +1145,7 @@ export class OpenAIService {
                                         if (byPhone && byPhone.type === 'client') {
                                             targetContactId = byPhone.id;
                                         } else {
-                                            const byName = await dynamicsService.searchContactByName(clientInput);
+                                            const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
                                             if (byName.length > 0) targetContactId = byName[0].contactid;
                                         }
                                     }

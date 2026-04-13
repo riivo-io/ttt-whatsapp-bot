@@ -1,0 +1,20 @@
+{
+	"geolocation": {
+		"data": {
+			"city": "Cape Town",
+			"country": {
+				"code": "ZA",
+				"name": "South Africa"
+			},
+			"subdivision": {
+				"code": "WC",
+				"name": "Western Cape"
+			},
+			"timezone": "Africa/Johannesburg",
+			"latitude": -33.914,
+			"longitude": 18.4129,
+			"postalCode": "7925"
+		},
+		"timestamp": 1776061432676
+	}
+}

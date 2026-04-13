@@ -9,7 +9,8 @@
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:web\"",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test:webhook": "ts-node test/simulate-webhook.ts"
+    "test:webhook": "ts-node test/simulate-webhook.ts",
+    "sync:users": "ts-node src/scripts/sync-users-from-dynamics.ts"
   },
   "dependencies": {
     "@azure/msal-node": "^3.8.5",

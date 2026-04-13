@@ -15,6 +15,16 @@ interface Session {
     current_step: string | null;
     last_active: string;
     created_at: string;
+    role_id: string | null;
+    permitted_tools: string[];
+}
+
+export interface StaffRecord {
+    id: string;
+    full_name: string;
+    mobile_number: string | null;
+    role_id: string | null;
+    dynamics_user_id: string;
 }
 
 interface Message {
@@ -76,7 +86,9 @@ class SupabaseService {
     async getOrCreateSession(
         phoneNumber: string,
         crmId: string | null,
-        crmType: string
+        crmType: string,
+        roleId: string | null = null,
+        permittedTools: string[] = []
     ): Promise<Session> {
         // Look for an active session for this phone number
         const { data: existing, error: fetchError } = await this.client
@@ -100,14 +112,23 @@ class SupabaseService {
             const minutesSinceActive = (now - lastActive) / 1000 / 60;
 
             if (minutesSinceActive < SESSION_TIMEOUT_MINUTES) {
-                // Session still active — touch last_active and return
+                // Session still active — touch last_active. Also backfill
+                // role_id / permitted_tools if this is a staff user and the
+                // existing session was created before the role was assigned
+                // (or before these columns existed).
+                const updates: Record<string, any> = { last_active: new Date().toISOString() };
+                if (roleId && !existing.role_id) updates.role_id = roleId;
+                if (permittedTools.length > 0 && (!existing.permitted_tools || existing.permitted_tools.length === 0)) {
+                    updates.permitted_tools = permittedTools;
+                }
+
                 await this.client
                     .from('sessions')
-                    .update({ last_active: new Date().toISOString() })
+                    .update(updates)
                     .eq('id', existing.id);
 
-                console.log(`[Supabase] Resumed session ${existing.id} for ${phoneNumber}`);
-                return existing as Session;
+                console.log(`[Supabase] Resumed session ${existing.id} for ${phoneNumber}${updates.role_id ? ' (backfilled role)' : ''}`);
+                return { ...existing, ...updates } as Session;
             }
 
             // Session expired — mark it
@@ -127,6 +148,8 @@ class SupabaseService {
                 crm_id: crmId,
                 crm_type: crmType,
                 status: 'active',
+                role_id: roleId,
+                permitted_tools: permittedTools,
             })
             .select()
             .single();
@@ -199,6 +222,87 @@ class SupabaseService {
         if (error) {
             console.error('[Supabase] Failed to log CRM audit:', error.message);
         }
+    }
+
+    /**
+     * Look up an internal staff member by their WhatsApp mobile number.
+     * Matches against the users table (synced from Dynamics systemuser).
+     * Tries the number as-given, then with common SA phone prefix variations
+     * (+27 / 0 / 27) so that however it arrives from WhatsApp, we still match.
+     * Returns null if no staff match.
+     */
+    async findStaffByPhone(phoneNumber: string): Promise<StaffRecord | null> {
+        const variants = this.phoneVariants(phoneNumber);
+
+        const { data, error } = await this.client
+            .from('users')
+            .select('id, full_name, mobile_number, role_id, dynamics_user_id')
+            .in('mobile_number', variants)
+            .limit(1)
+            .maybeSingle();
+
+        if (error) {
+            console.error('[Supabase] findStaffByPhone error:', error.message);
+            return null;
+        }
+        return (data as StaffRecord) || null;
+    }
+
+    /**
+     * Load the list of tool permission names that are enabled for a given role.
+     * Used to cache permitted_tools on the session at creation time.
+     */
+    async getPermittedTools(roleId: string): Promise<string[]> {
+        const { data, error } = await this.client
+            .from('role_tools')
+            .select('tool_name')
+            .eq('role_id', roleId)
+            .eq('enabled', true);
+
+        if (error) {
+            console.error('[Supabase] getPermittedTools error:', error.message);
+            return [];
+        }
+        return (data || []).map((r: any) => r.tool_name);
+    }
+
+    /**
+     * Look up a role by its name (e.g. "Full Access", "Some Access", "No Access").
+     * Used by the test-mode context switcher to impersonate different roles.
+     */
+    async getRoleByName(name: string): Promise<{ id: string; name: string } | null> {
+        const { data, error } = await this.client
+            .from('roles')
+            .select('id, name')
+            .eq('name', name)
+            .maybeSingle();
+
+        if (error) {
+            console.error('[Supabase] getRoleByName error:', error.message);
+            return null;
+        }
+        return data;
+    }
+
+    /**
+     * Produce common SA phone-number variants for fuzzy lookup.
+     * e.g. given "0832852913" returns ["0832852913", "+27832852913", "27832852913"].
+     */
+    private phoneVariants(phone: string): string[] {
+        const trimmed = phone.trim().replace(/\s+/g, '');
+        const variants = new Set<string>([trimmed]);
+
+        if (trimmed.startsWith('0') && trimmed.length === 10) {
+            variants.add('+27' + trimmed.slice(1));
+            variants.add('27' + trimmed.slice(1));
+        } else if (trimmed.startsWith('+27') && trimmed.length === 12) {
+            variants.add('0' + trimmed.slice(3));
+            variants.add('27' + trimmed.slice(1));
+        } else if (trimmed.startsWith('27') && trimmed.length === 11) {
+            variants.add('0' + trimmed.slice(2));
+            variants.add('+' + trimmed);
+        }
+        return Array.from(variants);
     }
 
     /**

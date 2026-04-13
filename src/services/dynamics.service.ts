@@ -429,10 +429,12 @@ export class DynamicsService {
         );
     }
 
-    async searchContactByName(name: string): Promise<any[]> {
+    async searchContactByName(name: string, ownerId?: string): Promise<any[]> {
         const token = await this.getToken();
         try {
-            const filter = `contains(fullname,'${name}') and statecode eq 0`;
+            // If ownerId is supplied (staff context), scope to clients owned by that consultant
+            const ownerClause = ownerId ? ` and _ownerid_value eq ${ownerId}` : '';
+            const filter = `contains(fullname,'${name}') and statecode eq 0${ownerClause}`;
             const url = `${this.baseUrl}/api/data/v9.2/contacts?$filter=${encodeURIComponent(filter)}&$select=contactid,fullname,mobilephone&$top=5`;
             const response = await axios.get(url, {
                 headers: {
@@ -921,6 +923,39 @@ export class DynamicsService {
         } catch (error: any) {
             console.error('[Dynamics CRM] Failed to fetch recent messages:', error?.response?.data?.error?.message || error.message);
             return [];
+        }
+    }
+
+    /**
+     * Fetch all active internal staff members from Dynamics.
+     * Used by the sync script to populate the Supabase users table.
+     * Returns only enabled (non-disabled) non-application users.
+     */
+    async getSystemUsers(): Promise<{ systemuserid: string; fullname: string; mobilephone: string | null; internalemailaddress: string | null }[]> {
+        const token = await this.getToken();
+        const results: any[] = [];
+        // OData $filter: isdisabled eq false excludes deactivated accounts;
+        // applicationid eq null excludes service principals / app users.
+        let url: string | null = `${this.baseUrl}/api/data/v9.2/systemusers?$select=systemuserid,fullname,mobilephone,internalemailaddress&$filter=isdisabled eq false and applicationid eq null&$top=500`;
+
+        try {
+            while (url) {
+                const response: any = await axios.get(url, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'OData-MaxVersion': '4.0',
+                        'OData-Version': '4.0',
+                        'Accept': 'application/json',
+                        'Prefer': 'odata.maxpagesize=500'
+                    }
+                });
+                if (response.data.value) results.push(...response.data.value);
+                url = response.data['@odata.nextLink'] || null;
+            }
+            return results;
+        } catch (error: any) {
+            console.error('[Dynamics CRM] Failed to fetch system users:', error?.response?.data?.error?.message || error.message);
+            throw error;
         }
     }
 }
