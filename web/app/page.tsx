@@ -306,7 +306,13 @@ export default function Home() {
                   const file = e.target.files[0];
                   const formData = new FormData();
                   formData.append('file', file);
-                  formData.append('phoneNumber', `0832852913-${testContext}`);
+                  // Must match the senderNumber the chat route builds, which
+                  // appends -{role_lowercase_underscored} for staff sessions.
+                  // Otherwise peekPendingUpload looks under the wrong key.
+                  const roleSuffix = testContext === 'user' && selectedOption.staffRole
+                      ? `-${selectedOption.staffRole.toLowerCase().replace(/ /g, '_')}`
+                      : '';
+                  formData.append('phoneNumber', `0832852913-${testContext}${roleSuffix}`);
 
                   setIsLoading(true);
                   setMessages(prev => [...prev, { role: 'user', content: `[Uploading ${file.name}...]` }]);

@@ -85,4 +85,23 @@ export function hasPendingUpload(phoneNumber: string): boolean {
     return pendingUploads.has(phoneNumber);
 }
 
+/**
+ * Read a staged upload without consuming it. Lets a tool inspect the mime type
+ * (e.g. to enforce PDF-only) before deciding whether to commit it to CRM.
+ */
+export function peekPendingUpload(
+    phoneNumber: string
+): { fileName: string; mimeType: string; buffer: Buffer } | null {
+    const pending = pendingUploads.get(phoneNumber);
+    if (!pending) return null;
+    return { fileName: pending.fileName, mimeType: pending.mimeType, buffer: pending.buffer };
+}
+
+/**
+ * Explicitly clear a staged upload after it has been successfully committed.
+ */
+export function clearPendingUpload(phoneNumber: string): void {
+    pendingUploads.delete(phoneNumber);
+}
+
 export default router;

@@ -3,7 +3,7 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import { dynamicsService } from './dynamics.service';
 import { pdfService, InvoiceData } from './pdf.service';
-import { hasPendingUpload, savePendingUpload } from '../routes/upload.route';
+import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from '../routes/upload.route';
 
 dotenv.config();
 
@@ -20,15 +20,21 @@ const STAFF_TOOL_PERMISSIONS: Record<string, string> = {
     create_task: 'create_task',
     get_task_types: 'create_task',                 // supporting tool for create_task flow
     search_contact_by_name: 'lookup_client',
-    search_lead_by_name: 'lookup_client',
+    search_lead_by_name: 'lookup_lead',
     get_my_clients: 'lookup_client',
+    get_my_leads: 'lookup_lead',
     get_client_details: 'lookup_client',
     get_client_cases: 'view_open_cases',
     get_case_by_name: 'view_open_cases',
     get_client_invoices: 'view_outstanding_invoices',
     get_outstanding_balance: 'view_outstanding_invoices',
     get_invoice_pdf: 'send_invoice_pdf',
-    save_document: 'upload_letter_of_engagement',
+    upload_letter_of_engagement: 'upload_letter_of_engagement',
+    create_contact: 'create_contact',
+    create_invoice: 'create_invoice',
+    // get_industries is a supporting lookup used by both create_lead and create_contact.
+    // Intentionally NOT gated here so it stays available whenever the staff has either
+    // create permission. It only returns harmless reference data on its own.
 };
 
 const BASE_SYSTEM_PROMPT = `You are a helpful South African Tax Expert assistant for TTT (The Tax Team).
@@ -218,7 +224,19 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "get_my_clients",
-            description: "Use when a staff member asks to see their clients, client list, or who they manage. Returns contacts assigned to them.",
+            description: "Use when a staff member asks to see their CLIENTS — confirmed contacts they own. Do NOT use this for leads or prospects. Returns contacts assigned to them.",
+            parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_my_leads",
+            description: "Use when a staff member asks to see their LEADS — prospects in the onboarding pipeline that they own as consultant. Leads and clients are different: clients are confirmed contacts, leads are not yet clients. Returns leads owned by the staff member.",
             parameters: {
                 type: "object",
                 properties: {},
@@ -298,22 +316,31 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "create_lead",
-            description: "Create a new lead (prospect) in the CRM. Gather the lead's first name, last name, and phone number before calling. Optionally collect email and department interest.",
+            description: "Create a new lead (prospect) in the CRM. Before calling, you MUST gather: first name, last name, client_type, lead_type, and the industry. Use get_industries to resolve the industry to a GUID — ask the staff member what industry the lead is in, then call get_industries with a name_filter to find a match. Phone, email, and notes are optional.",
             parameters: {
                 type: "object",
                 properties: {
                     first_name: { type: "string", description: "Lead's first name" },
                     last_name: { type: "string", description: "Lead's last name" },
-                    phone: { type: "string", description: "Lead's phone number" },
-                    email: { type: "string", description: "Lead's email address (optional)" },
-                    department: {
+                    client_type: {
                         type: "string",
-                        enum: ["Insurance", "Tax", "Accounting", "Financial Planning"],
-                        description: "Which service they're interested in (optional)"
+                        enum: ["Individual", "Business", "Private Company", "Closed Corporation", "Business Trust", "Sole Proprietorship"],
+                        description: "What kind of entity the lead is. Ask the staff member."
                     },
+                    lead_type: {
+                        type: "string",
+                        enum: ["Tax", "Accounting", "Long Term Insurance", "Short Term Insurance"],
+                        description: "Which TTT service line this lead is for. Ask the staff member."
+                    },
+                    industry_id: {
+                        type: "string",
+                        description: "GUID of the lead's industry from riivo_industries. MUST be resolved via get_industries first — do not invent."
+                    },
+                    phone: { type: "string", description: "Lead's phone number (optional)" },
+                    email: { type: "string", description: "Lead's email address (optional)" },
                     notes: { type: "string", description: "Any additional notes (optional)" }
                 },
-                required: ["first_name", "last_name", "phone"],
+                required: ["first_name", "last_name", "client_type", "lead_type", "industry_id"],
             },
         },
     },
@@ -406,7 +433,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "search_lead_by_name",
-            description: "Search for a lead by name. Use when staff needs to find a lead to link a task or other record to.",
+            description: "Search for a lead by name. Scoped to leads owned by the calling staff member. If nothing comes back, the tool will tell you and you should offer to create a new lead via create_lead.",
             parameters: {
                 type: "object",
                 properties: {
@@ -435,6 +462,92 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
                     }
                 },
                 required: ["doc_type"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_industries",
+            description: "Search the TTT industry list for a lead or contact. Pass a name_filter (e.g. 'doctor', 'tax') to narrow down. Use this BEFORE create_lead or create_contact so you can resolve the industry name the staff member gave you to a GUID. If multiple matches come back, ask the staff member to disambiguate.",
+            parameters: {
+                type: "object",
+                properties: {
+                    name_filter: {
+                        type: "string",
+                        description: "Substring to match against industry name. Optional — omit to fetch the first 50 industries alphabetically (rarely useful)."
+                    }
+                },
+                required: [],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "create_contact",
+            description: "Create a new contact (client) in the CRM. Before calling, you MUST gather: first name, last name, entity_type, and the industry. Use get_industries to resolve the industry to a GUID. The Consultant (owner) and Primary TTT Representative both default to the staff member calling — do not ask for them.",
+            parameters: {
+                type: "object",
+                properties: {
+                    first_name: { type: "string", description: "Contact's first name" },
+                    last_name: { type: "string", description: "Contact's last name" },
+                    entity_type: {
+                        type: "string",
+                        enum: ["Individual", "Business", "Private Company", "Closed Corporation", "Business Trust", "Sole Proprietorship"],
+                        description: "What kind of entity the contact is. Ask the staff member."
+                    },
+                    industry_id: {
+                        type: "string",
+                        description: "GUID of the contact's industry from riivo_industries. MUST be resolved via get_industries first."
+                    },
+                    phone: { type: "string", description: "Contact's mobile number (optional)" },
+                    email: { type: "string", description: "Contact's email address (optional)" }
+                },
+                required: ["first_name", "last_name", "entity_type", "industry_id"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "create_invoice",
+            description: "Create a new invoice for an existing client. Before calling, you MUST resolve the customer to a Contact GUID via search_contact_by_name (the bot only supports invoicing Contacts, not Accounts). Then ask the staff member which type of invoice it is (Tax or Accounting). The Consultant (owner) defaults to the staff member calling.",
+            parameters: {
+                type: "object",
+                properties: {
+                    customer_contact_id: {
+                        type: "string",
+                        description: "Contact GUID of the customer. MUST come from search_contact_by_name — never invent."
+                    },
+                    invoice_type: {
+                        type: "string",
+                        enum: ["Tax", "Accounting"],
+                        description: "Which type of invoice this is. Ask the staff member."
+                    }
+                },
+                required: ["customer_contact_id", "invoice_type"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "upload_letter_of_engagement",
+            description: "Attach a signed Letter of Engagement (PDF) to a specific lead. Use ONLY after: (1) the staff member has indicated they want to upload an LOE, (2) you've confirmed the target lead via search_lead_by_name, and (3) the staff member has uploaded a file. Will refuse non-PDF files.",
+            parameters: {
+                type: "object",
+                properties: {
+                    lead_id: {
+                        type: "string",
+                        description: "The new_leadid GUID of the lead to attach the LOE to."
+                    },
+                    lead_name: {
+                        type: "string",
+                        description: "The lead's full name (for confirmation in the response)."
+                    }
+                },
+                required: ["lead_id", "lead_name"],
             },
         },
     }
@@ -487,6 +600,7 @@ export class OpenAIService {
                 // user's role actually allows.
                 const capabilityBulletMap: Record<string, string> = {
                     lookup_client: 'Searching for clients by name or phone number',
+                    lookup_lead: 'Searching for leads (prospects) by name',
                     view_outstanding_invoices: 'Viewing any client\'s invoices and outstanding balance',
                     view_open_cases: 'Viewing any client\'s cases',
                     create_case: 'Creating new cases for clients',
@@ -495,7 +609,7 @@ export class OpenAIService {
                     create_contact: 'Creating new contacts',
                     create_invoice: 'Creating invoices',
                     send_invoice_pdf: 'Sending invoice PDFs to clients',
-                    upload_letter_of_engagement: 'Uploading documents on behalf of clients',
+                    upload_letter_of_engagement: 'Uploading signed Letters of Engagement for leads',
                 };
                 const capabilityBullets = permittedToolKeys
                     .map(k => capabilityBulletMap[k])
@@ -514,6 +628,19 @@ export class OpenAIService {
 
             roleContext += nameLine + firstMessageInstruction;
 
+            // If there's a pending file upload, append upload-specific guidance.
+            // MUST happen before systemPrompt is built, otherwise the AI never
+            // sees the nudge and defaults to the wrong tool (e.g. search_contact_by_name
+            // instead of search_lead_by_name for an LOE upload).
+            if (phoneNumber && hasPendingUpload(phoneNumber)) {
+                if (entityType === 'user') {
+                    // Staff have only one upload path: signed LOE for a lead.
+                    roleContext += `\n\n**PENDING DOCUMENT — IMPORTANT**: The staff member has just uploaded a file. The ONLY document upload available to staff is a signed Letter of Engagement, which attaches to a LEAD (not a contact/client). Follow this flow exactly:\n1. Ask which lead the LOE is for if not already clear.\n2. Use **search_lead_by_name** (NOT search_contact_by_name — leads and clients are different entities). If multiple matches, ask the staff to disambiguate.\n3. Call **upload_letter_of_engagement** with the resolved lead_id.\nThe file must be a PDF. Do not use save_document — that tool is not available to staff.`;
+                } else {
+                    roleContext += `\n\n**PENDING DOCUMENT**: The user has uploaded a file. Ask them what type of document it is: ID Document, Payslip, Bank Statement, Tax Certificate, or Other. Then call save_document with the doc_type.`;
+                }
+            }
+
             const systemPrompt = `Current Date: ${currentDate}\n${BASE_SYSTEM_PROMPT}${roleContext}`;
 
             const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -524,14 +651,9 @@ export class OpenAIService {
 
             // Filter tools by role
             const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'opt_out_whatsapp', 'refer_friend', 'save_document'];
-            const staffTools = ['get_my_clients', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'save_document', 'create_task', 'get_task_types', 'search_lead_by_name'];
+            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'upload_letter_of_engagement'];
             const leadTools = ['save_document'];
             const unknownTools = ['verify_identity'];
-
-            // If there's a pending file upload, tell the AI to classify it
-            if (phoneNumber && hasPendingUpload(phoneNumber)) {
-                roleContext += `\n\n**PENDING DOCUMENT**: The user has uploaded a file. Ask them what type of document it is: ID Document, Payslip, Bank Statement, Tax Certificate, or Other.${entityType === 'user' ? ' Also ask which client this document is for.' : ''} Then call save_document with the doc_type${entityType === 'user' ? ' and client' : ''}.`;
-            }
 
             let availableTools: typeof TOOLS | undefined;
             if (contactId && entityType === 'client') {
@@ -575,6 +697,201 @@ export class OpenAIService {
             if (responseMessage?.tool_calls) {
                 // Append the assistant's decision to call tools to history
                 messages.push(responseMessage);
+
+                // ---- Choice option-set value maps (Power Apps Choice → integer) ----
+                // Lead's riivo_clienttype and Contact's riivo_clienttypeindbus share
+                // the global "Client Type" choice set.
+                const CLIENT_TYPE_VALUES: Record<string, number> = {
+                    'Individual': 0,
+                    'Business': 1,
+                    'Private Company': 2,
+                    'Closed Corporation': 3,
+                    'Business Trust': 4,
+                    'Sole Proprietorship': 5,
+                };
+                // Lead's riivo_leadtype is the global "Lead Types" choice set.
+                const LEAD_TYPE_VALUES: Record<string, number> = {
+                    'Tax': 100000000,
+                    'Accounting': 100000001,
+                    'Long Term Insurance': 463630001,
+                    'Short Term Insurance': 463630002,
+                };
+                // Invoice's riivo_invoicetype.
+                const INVOICE_TYPE_VALUES: Record<string, number> = {
+                    'Tax': 100000000,
+                    'Accounting': 100000001,
+                };
+
+                // Helper: dispatch create_lead. Hoisted so the follow-up loop can call it too.
+                const handleCreateLead = async (toolCall: any): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    if (!contactId) {
+                        return JSON.stringify({ status: 'error', message: 'No staff identity on session — cannot set lead owner.' });
+                    }
+                    const clientTypeValue = CLIENT_TYPE_VALUES[args.client_type];
+                    const leadTypeValue = LEAD_TYPE_VALUES[args.lead_type];
+                    if (clientTypeValue === undefined) {
+                        return JSON.stringify({ status: 'error', message: `Unknown client_type "${args.client_type}". Must be one of: ${Object.keys(CLIENT_TYPE_VALUES).join(', ')}.` });
+                    }
+                    if (leadTypeValue === undefined) {
+                        return JSON.stringify({ status: 'error', message: `Unknown lead_type "${args.lead_type}". Must be one of: ${Object.keys(LEAD_TYPE_VALUES).join(', ')}.` });
+                    }
+                    const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                    if (!args.industry_id || !guidRegex.test(String(args.industry_id))) {
+                        return JSON.stringify({ status: 'error', message: 'industry_id must be a GUID returned by get_industries. Run get_industries first to resolve the industry name.' });
+                    }
+                    const result = await dynamicsService.createLead({
+                        firstName: args.first_name,
+                        lastName: args.last_name,
+                        phone: args.phone,
+                        email: args.email,
+                        notes: args.notes,
+                        clientType: clientTypeValue,
+                        leadType: leadTypeValue,
+                        industryId: args.industry_id,
+                        ownerSystemUserId: contactId,
+                    });
+                    if (result) {
+                        return JSON.stringify({
+                            status: 'success',
+                            lead_id: result.new_leadid,
+                            message: `Lead ${args.first_name} ${args.last_name} created successfully.`,
+                        });
+                    }
+                    return JSON.stringify({ status: 'error', message: 'Failed to create the lead. Check the server logs for the Dynamics error.' });
+                };
+
+                // Helper: dispatch create_contact.
+                const handleCreateContact = async (toolCall: any): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    if (!contactId) {
+                        return JSON.stringify({ status: 'error', message: 'No staff identity on session — cannot set contact owner.' });
+                    }
+                    const entityTypeValue = CLIENT_TYPE_VALUES[args.entity_type];
+                    if (entityTypeValue === undefined) {
+                        return JSON.stringify({ status: 'error', message: `Unknown entity_type "${args.entity_type}". Must be one of: ${Object.keys(CLIENT_TYPE_VALUES).join(', ')}.` });
+                    }
+                    const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                    if (!args.industry_id || !guidRegex.test(String(args.industry_id))) {
+                        return JSON.stringify({ status: 'error', message: 'industry_id must be a GUID returned by get_industries.' });
+                    }
+                    const result = await dynamicsService.createContact({
+                        firstName: args.first_name,
+                        lastName: args.last_name,
+                        entityType: entityTypeValue,
+                        industryId: args.industry_id,
+                        ownerSystemUserId: contactId,
+                        primaryRepSystemUserId: contactId,
+                        phone: args.phone,
+                        email: args.email,
+                    });
+                    if (result?.contactid) {
+                        return JSON.stringify({
+                            status: 'success',
+                            contact_id: result.contactid,
+                            message: `Contact ${args.first_name} ${args.last_name} created successfully.`,
+                        });
+                    }
+                    return JSON.stringify({ status: 'error', message: 'Failed to create the contact. Check the server logs for the Dynamics error.' });
+                };
+
+                // Helper: dispatch create_invoice.
+                const handleCreateInvoice = async (toolCall: any): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    if (!contactId) {
+                        return JSON.stringify({ status: 'error', message: 'No staff identity on session — cannot set invoice owner.' });
+                    }
+                    const invoiceTypeValue = INVOICE_TYPE_VALUES[args.invoice_type];
+                    if (invoiceTypeValue === undefined) {
+                        return JSON.stringify({ status: 'error', message: `Unknown invoice_type "${args.invoice_type}". Must be one of: ${Object.keys(INVOICE_TYPE_VALUES).join(', ')}.` });
+                    }
+                    const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                    if (!args.customer_contact_id || !guidRegex.test(String(args.customer_contact_id))) {
+                        return JSON.stringify({ status: 'error', message: 'customer_contact_id must be a Contact GUID resolved via search_contact_by_name.' });
+                    }
+                    const result = await dynamicsService.createInvoice({
+                        customerContactId: args.customer_contact_id,
+                        invoiceType: invoiceTypeValue,
+                        ownerSystemUserId: contactId,
+                    });
+                    if (result?.new_invoicesid) {
+                        return JSON.stringify({
+                            status: 'success',
+                            invoice_id: result.new_invoicesid,
+                            message: `${args.invoice_type} invoice created successfully.`,
+                        });
+                    }
+                    return JSON.stringify({ status: 'error', message: 'Failed to create the invoice. Check the server logs for the Dynamics error.' });
+                };
+
+                // Helper: dispatch get_industries with optional name filter.
+                const handleGetIndustries = async (toolCall: any): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    const industries = await dynamicsService.getIndustries(args.name_filter);
+                    if (industries.length === 0) {
+                        return JSON.stringify({ status: 'no_match', message: `No industries matched "${args.name_filter || '(no filter)'}". Ask the staff member to try a different keyword or use 'Other'.` });
+                    }
+                    return JSON.stringify({ status: 'ok', count: industries.length, industries });
+                };
+
+                // Helper: handle the upload_letter_of_engagement tool call.
+                // Hoisted to this scope so both the first-round and follow-up
+                // tool loops can use it without duplicating PDF / GUID / staging checks.
+                const handleUploadLoe = async (
+                    toolCall: any,
+                    phone: string | undefined,
+                    triggeredBy: string | undefined
+                ): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    if (!phone) {
+                        return JSON.stringify({ status: 'error', error: 'no_phone', message: 'Cannot upload — no phone number on session.' });
+                    }
+                    const staged = peekPendingUpload(phone);
+                    if (!staged) {
+                        return JSON.stringify({ status: 'error', error: 'no_pending_upload', message: 'No file is staged. Ask the staff member to upload the signed LOE PDF first.' });
+                    }
+                    if (staged.mimeType !== 'application/pdf') {
+                        return JSON.stringify({
+                            status: 'error',
+                            error: 'wrong_file_type',
+                            message: `Letters of Engagement must be PDF. The uploaded file is ${staged.mimeType || 'an unknown type'}. Please ask the staff member to resend it as a PDF.`,
+                        });
+                    }
+                    const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                    if (!args.lead_id || !guidRegex.test(String(args.lead_id))) {
+                        return JSON.stringify({ status: 'error', error: 'invalid_lead_id', message: 'lead_id must be the GUID returned from search_lead_by_name. Run that lookup first.' });
+                    }
+                    const result = await dynamicsService.uploadLoeToLead(
+                        args.lead_id,
+                        staged.fileName,
+                        staged.buffer,
+                        triggeredBy || phone
+                    );
+                    if (!result.success) {
+                        // Special-case: LOE already on file. We leave the staged
+                        // upload in place so the staff member can re-target a
+                        // different lead without re-uploading the same PDF.
+                        if (result.alreadyReceived) {
+                            return JSON.stringify({
+                                status: 'already_received',
+                                lead_name: result.leadName || args.lead_name,
+                                message: `A signed Letter of Engagement has already been submitted for ${result.leadName || args.lead_name}. No new upload was made. Ask the staff member whether they meant a different lead.`,
+                            });
+                        }
+                        return JSON.stringify({ status: 'error', error: 'attach_failed', message: `Could not attach the LOE to the lead: ${result.error || 'unknown error'}.` });
+                    }
+                    clearPendingUpload(phone);
+                    if (!result.flagSet) {
+                        return JSON.stringify({
+                            status: 'partial_success',
+                            message: `LOE attached to ${args.lead_name}'s lead record, but the LOE Received flag could not be set. Please flip it manually in the CRM.`,
+                        });
+                    }
+                    return JSON.stringify({
+                        status: 'success',
+                        message: `Signed LOE for ${args.lead_name} has been attached to the lead timeline and the LOE Received flag is now set.`,
+                    });
+                };
 
                 // Execute each tool call
                 for (const toolCall of responseMessage.tool_calls) {
@@ -890,6 +1207,11 @@ export class OpenAIService {
                             functionResponse = data.length > 0
                                 ? JSON.stringify(data)
                                 : "No clients found assigned to you.";
+                        } else if (functionName === 'get_my_leads') {
+                            const data = await dynamicsService.getMyLeads(contactId);
+                            functionResponse = data.length > 0
+                                ? JSON.stringify(data)
+                                : "No leads found assigned to you.";
                         } else if (functionName === 'search_contact_by_name') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             const results = await dynamicsService.searchContactByName(args.name, ownerFilter);
@@ -924,24 +1246,13 @@ export class OpenAIService {
                                 open_invoices: balance.count
                             });
                         } else if (functionName === 'create_lead') {
-                            const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            const result = await dynamicsService.createLead({
-                                firstName: args.first_name,
-                                lastName: args.last_name,
-                                phone: args.phone,
-                                email: args.email,
-                                department: args.department,
-                                notes: args.notes,
-                            });
-                            if (result) {
-                                functionResponse = JSON.stringify({
-                                    status: "success",
-                                    lead_id: result.new_leadid,
-                                    message: `Lead ${args.first_name} ${args.last_name} created successfully.`
-                                });
-                            } else {
-                                functionResponse = JSON.stringify({ status: "error", message: "Failed to create the lead." });
-                            }
+                            functionResponse = await handleCreateLead(toolCall);
+                        } else if (functionName === 'create_contact') {
+                            functionResponse = await handleCreateContact(toolCall);
+                        } else if (functionName === 'create_invoice') {
+                            functionResponse = await handleCreateInvoice(toolCall);
+                        } else if (functionName === 'get_industries') {
+                            functionResponse = await handleGetIndustries(toolCall);
                         } else if (functionName === 'get_task_types') {
                             const taskTypes = await dynamicsService.getTaskTypes();
                             functionResponse = taskTypes.length > 0
@@ -949,10 +1260,16 @@ export class OpenAIService {
                                 : "No task types found.";
                         } else if (functionName === 'search_lead_by_name') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            const results = await dynamicsService.searchLeadByName(args.name);
-                            functionResponse = results.length > 0
-                                ? JSON.stringify(results)
-                                : "No leads found matching that name.";
+                            const results = await dynamicsService.searchLeadByName(args.name, ownerFilter);
+                            if (results.length > 0) {
+                                functionResponse = JSON.stringify(results);
+                            } else {
+                                functionResponse = JSON.stringify({
+                                    status: 'not_found',
+                                    scope: ownerFilter ? 'owned_by_you' : 'all_leads',
+                                    message: `No active leads assigned to you match "${args.name}". Ask the staff member whether they'd like to create a new lead (via create_lead) for this person, or check a different spelling.`,
+                                });
+                            }
                         } else if (functionName === 'create_task') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             const result = await dynamicsService.createTask({
@@ -980,6 +1297,38 @@ export class OpenAIService {
                             const nameParts = (args.friend_name || '').trim().split(/\s+/);
                             const firstName = nameParts[0] || '';
                             const lastName = nameParts.slice(1).join(' ') || firstName;
+
+                            // Map the client-facing service enum to the riivo_leadtype
+                            // Choice value. "Insurance" / "Financial Planning" / "Not sure"
+                            // fall through to Tax as a safe default — TTT staff can re-route
+                            // the lead afterwards if needed. Keeping this here (not in the
+                            // dynamics method) so the staff create_lead tool stays strict.
+                            const REFER_LEAD_TYPE_MAP: Record<string, number> = {
+                                'Tax': 100000000,
+                                'Accounting': 100000001,
+                                'Insurance': 463630002,        // defaulting to Short Term Insurance
+                                'Financial Planning': 100000001,
+                                'Not sure': 100000000,
+                            };
+                            const leadTypeValue = REFER_LEAD_TYPE_MAP[args.service] ?? 100000000;
+
+                            // Inherit owner from the referring client so the new lead has
+                            // a populated ownerid (Lead.ownerid is now Business Required).
+                            // If we can't resolve it, the create will fail at Dynamics —
+                            // log a clear error rather than guess a system user.
+                            let ownerSystemUserId: string | undefined;
+                            if (contactId) {
+                                ownerSystemUserId = (await dynamicsService.getContactOwnerId(contactId)) || undefined;
+                                if (!ownerSystemUserId) {
+                                    console.warn(`[refer_friend] Could not resolve owner for referring contact ${contactId}; lead create will likely fail.`);
+                                }
+                            }
+
+                            // "Other" industry — keeps Industry populated without asking
+                            // the client. Hardcoded GUID from riivo_industries (label "Other").
+                            // If TTT changes that record, update this constant.
+                            const OTHER_INDUSTRY_ID = '02c54e15-95ce-f011-8543-000d3a69c99c';
+
                             const result = await dynamicsService.createLead({
                                 firstName,
                                 lastName,
@@ -988,6 +1337,10 @@ export class OpenAIService {
                                 department: args.service,
                                 notes: `Referred by existing client. Interested in: ${args.service || 'Not specified'}`,
                                 referredByContactId: contactId,
+                                clientType: 0,                  // Individual — referrals default to person
+                                leadType: leadTypeValue,
+                                industryId: OTHER_INDUSTRY_ID,
+                                ownerSystemUserId,
                             });
                             if (result) {
                                 functionResponse = JSON.stringify({
@@ -997,32 +1350,32 @@ export class OpenAIService {
                             } else {
                                 functionResponse = JSON.stringify({ status: "error", message: "Failed to create the referral." });
                             }
+                        } else if (functionName === 'upload_letter_of_engagement') {
+                            functionResponse = await handleUploadLoe(toolCall, phoneNumber, contactId);
                         } else if (functionName === 'save_document') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            if (!phoneNumber || !hasPendingUpload(phoneNumber)) {
+                            if (entityType === 'user') {
+                                // Staff have no save_document path — the only staff
+                                // upload is upload_letter_of_engagement. Reject defensively.
+                                functionResponse = JSON.stringify({ status: "error", message: "Staff cannot use save_document. Use upload_letter_of_engagement to attach a signed LOE to a lead." });
+                            } else if (!phoneNumber || !hasPendingUpload(phoneNumber)) {
                                 functionResponse = JSON.stringify({ status: "error", message: "No pending document upload found. Ask the user to upload a file first." });
                             } else {
-                                // Resolve which entity to attach the doc to
                                 let targetEntity: any = null;
-                                if (entityType === 'user' && args.client) {
-                                    const resolved = await resolveClientId(args.client);
-                                    if (resolved) {
-                                        targetEntity = { id: resolved, type: 'client' };
-                                    }
-                                } else if (entityType === 'client' && contactId) {
+                                if (entityType === 'client' && contactId) {
                                     targetEntity = { id: contactId, type: 'client' };
                                 } else if (entityType === 'lead' && contactId) {
                                     targetEntity = { id: contactId, type: 'lead' };
                                 }
 
                                 if (!targetEntity) {
-                                    functionResponse = JSON.stringify({ status: "error", message: "Could not determine which client to attach the document to." });
+                                    functionResponse = JSON.stringify({ status: "error", message: "Could not determine which record to attach the document to." });
                                 } else {
                                     const result = await savePendingUpload(phoneNumber, args.doc_type, targetEntity);
                                     if (result.success) {
                                         functionResponse = JSON.stringify({
                                             status: "success",
-                                            message: `Your ${args.doc_type.toLowerCase()} has been saved to ${entityType === 'user' ? 'the client\'s' : 'your'} profile and attached to ${entityType === 'user' ? 'their' : 'your'} record. ${entityType === 'client' ? 'Your consultant has been notified.' : ''}`
+                                            message: `Your ${args.doc_type.toLowerCase()} has been saved to your profile. ${entityType === 'client' ? 'Your consultant has been notified.' : ''}`
                                         });
                                     } else {
                                         functionResponse = JSON.stringify({ status: "error", message: "Failed to save the document. Please try uploading again." });
@@ -1098,10 +1451,16 @@ export class OpenAIService {
                                     : "No task types found.";
                             } else if (functionName === 'search_lead_by_name') {
                                 const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                                const results = await dynamicsService.searchLeadByName(args.name);
-                                functionResponse = results.length > 0
-                                    ? JSON.stringify(results)
-                                    : "No leads found matching that name.";
+                                const results = await dynamicsService.searchLeadByName(args.name, ownerFilter);
+                                if (results.length > 0) {
+                                    functionResponse = JSON.stringify(results);
+                                } else {
+                                    functionResponse = JSON.stringify({
+                                        status: 'not_found',
+                                        scope: ownerFilter ? 'owned_by_you' : 'all_leads',
+                                        message: `No active leads assigned to you match "${args.name}". Ask the staff member whether they'd like to create a new lead (via create_lead) for this person, or check a different spelling.`,
+                                    });
+                                }
                             } else if (functionName === 'create_task') {
                                 const args = JSON.parse((toolCall as any).function.arguments || '{}');
                                 const result = await dynamicsService.createTask({
@@ -1130,6 +1489,21 @@ export class OpenAIService {
                                 functionResponse = results.length > 0
                                     ? JSON.stringify(results)
                                     : "No contacts found matching that name.";
+                            } else if (functionName === 'get_my_leads') {
+                                const data = await dynamicsService.getMyLeads(contactId);
+                                functionResponse = data.length > 0
+                                    ? JSON.stringify(data)
+                                    : "No leads found assigned to you.";
+                            } else if (functionName === 'upload_letter_of_engagement') {
+                                functionResponse = await handleUploadLoe(toolCall, phoneNumber, contactId);
+                            } else if (functionName === 'create_lead') {
+                                functionResponse = await handleCreateLead(toolCall);
+                            } else if (functionName === 'create_contact') {
+                                functionResponse = await handleCreateContact(toolCall);
+                            } else if (functionName === 'create_invoice') {
+                                functionResponse = await handleCreateInvoice(toolCall);
+                            } else if (functionName === 'get_industries') {
+                                functionResponse = await handleGetIndustries(toolCall);
                             } else if (functionName === 'create_case') {
                                 const args = JSON.parse((toolCall as any).function.arguments || '{}');
                                 const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

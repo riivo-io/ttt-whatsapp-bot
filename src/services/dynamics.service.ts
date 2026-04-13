@@ -3,6 +3,8 @@ import * as msal from '@azure/msal-node';
 import dotenv from 'dotenv';
 import { CrmEntity } from '../types/crm.types';
 import { supabaseService } from './supabase.service';
+import { mistralService } from './mistral.service';
+import { loeExtractorService, LoeExtractedFields } from './loe-extractor.service';
 
 dotenv.config();
 
@@ -15,6 +17,11 @@ export interface LocalCrmEntity {
 }
 
 const AUDIT_FIELDS = ['ttt_ai_triggered_by', 'ttt_ai_model', 'ttt_ai_generated_at'];
+
+// Boolean field on the new_lead entity indicating a signed Letter of
+// Engagement has been received. Schema name in Dynamics is riivo_LoEReceived;
+// the Web API uses the lowercased logical name.
+const LEAD_LOE_RECEIVED_FIELD = 'riivo_loereceived';
 
 export class DynamicsService {
     private cca: msal.ConfidentialClientApplication;
@@ -225,6 +232,25 @@ export class DynamicsService {
         );
     }
 
+    /**
+     * List active Leads owned by the staff member. Distinct from getMyClients
+     * (which returns Contacts) — Leads are prospects in the onboarding pipeline,
+     * Contacts are confirmed clients.
+     */
+    async getMyLeads(userId: string): Promise<any[]> {
+        const rows = await this.getList(
+            'new_leads',
+            `_ownerid_value eq ${userId} and statecode eq 0`,
+            ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', 'ttt_email']
+        );
+        return rows.map((l: any) => ({
+            new_leadid: l.new_leadid,
+            fullname: `${l.ttt_firstname || ''} ${l.ttt_lastname || ''}`.trim(),
+            mobilephone: l.ttt_mobilephone,
+            email: l.ttt_email,
+        }));
+    }
+
     async getClientInvoices(contactId: string): Promise<any[]> {
         return this.getList(
             'new_invoiceses',
@@ -385,6 +411,21 @@ export class DynamicsService {
     /**
      * Look up a CRM entity by its ID and type (used when resuming from a cached Supabase session).
      */
+    /**
+     * Look up the owning systemuser GUID for a given contact. Used by the
+     * referral flow so that a lead created via refer_friend inherits the
+     * referring client's consultant as its owner (which keeps the new required
+     * Lead.ownerid field populated without asking the client to nominate one).
+     */
+    async getContactOwnerId(contactId: string): Promise<string | null> {
+        const contact = await this.searchEntity(
+            'contacts',
+            `contactid eq ${contactId} and statecode eq 0`,
+            ['contactid', '_ownerid_value']
+        );
+        return contact?._ownerid_value || null;
+    }
+
     async getEntityById(crmId: string, crmType: string): Promise<any | null> {
         try {
             if (crmType === 'contact' || crmType === 'client') {
@@ -579,6 +620,14 @@ export class DynamicsService {
         department?: string;
         notes?: string;
         referredByContactId?: string;
+        // New required fields for staff-driven lead creation. Optional in the
+        // signature so the existing refer_friend flow still compiles, but
+        // Dynamics will reject the POST if they are missing because the fields
+        // are marked Business Required at the table level.
+        clientType?: number;        // riivo_clienttype Choice (0=Individual,1=Business,2=Private Company,3=Closed Corp,4=Business Trust,5=Sole Prop)
+        leadType?: number;          // riivo_leadtype Choice (100000000=Tax,100000001=Accounting,463630001=Long Term Insurance,463630002=Short Term Insurance)
+        industryId?: string;        // riivo_industries GUID for riivo_Industry_lookup
+        ownerSystemUserId?: string; // systemuser GUID for ownerid
     }): Promise<any | null> {
         const payload: any = {
             'ttt_firstname': params.firstName,
@@ -588,6 +637,10 @@ export class DynamicsService {
         if (params.email) payload['ttt_email'] = params.email;
         if (params.department) payload['riivo_requestedservice'] = params.department;
         if (params.notes) payload['riivo_notes'] = params.notes;
+        if (typeof params.clientType === 'number') payload['riivo_clienttype'] = params.clientType;
+        if (typeof params.leadType === 'number') payload['riivo_leadtype'] = params.leadType;
+        if (params.industryId) payload['riivo_Industry_lookup@odata.bind'] = `/riivo_industries(${params.industryId})`;
+        if (params.ownerSystemUserId) payload['ownerid@odata.bind'] = `/systemusers(${params.ownerSystemUserId})`;
 
         try {
             const triggeredBy = params.referredByContactId || params.phone || 'unknown';
@@ -604,6 +657,119 @@ export class DynamicsService {
         } catch (error: any) {
             console.error('[Dynamics CRM] Failed to create lead:', error?.response?.data?.error?.message || error.message);
             return null;
+        }
+    }
+
+    /**
+     * Create a Contact in Dynamics. All fields below are Business Required on
+     * the Contact table, so omitting any of them will cause Dataverse to reject
+     * the POST. The chat layer (create_contact tool) is responsible for
+     * gathering them all from the staff member before calling.
+     */
+    async createContact(params: {
+        firstName: string;
+        lastName: string;
+        entityType: number;          // riivo_clienttypeindbus Choice (same global Client Type values 0-5)
+        industryId: string;          // riivo_industries GUID for riivo_IndustryId
+        ownerSystemUserId: string;   // systemuser GUID for ownerid
+        primaryRepSystemUserId: string; // systemuser GUID for icon_PrimaryTTTRepresentative
+        phone?: string;
+        email?: string;
+    }): Promise<{ contactid?: string } | null> {
+        const payload: any = {
+            firstname: params.firstName,
+            lastname: params.lastName,
+            riivo_clienttypeindbus: params.entityType,
+            'riivo_IndustryId@odata.bind': `/riivo_industries(${params.industryId})`,
+            'ownerid@odata.bind': `/systemusers(${params.ownerSystemUserId})`,
+            'icon_PrimaryTTTRepresentative@odata.bind': `/systemusers(${params.primaryRepSystemUserId})`,
+        };
+        if (params.phone) payload.mobilephone = params.phone;
+        if (params.email) payload.emailaddress1 = params.email;
+
+        try {
+            const response = await this.crmPost('contacts', payload, params.ownerSystemUserId);
+            const contactid = response.data?.contactid;
+            console.log(`[Dynamics CRM] Created contact: ${params.firstName} ${params.lastName} (${contactid})`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'contacts',
+                crmRecordId: contactid,
+                action: 'create',
+                payload,
+                triggeredBy: params.ownerSystemUserId,
+            });
+            return { contactid };
+        } catch (error: any) {
+            console.error('[Dynamics CRM] Failed to create contact:', error?.response?.data?.error?.message || error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Create an Invoice in Dynamics. The Customer field on the new_invoice
+     * entity is a polymorphic Customer lookup — bot is currently scoped to
+     * Contact-only customers (Account customers can be added later by binding
+     * ttt_Customer_account instead).
+     */
+    async createInvoice(params: {
+        customerContactId: string;   // contact GUID for ttt_Customer
+        invoiceType: number;         // riivo_invoicetype Choice (100000000=Tax, 100000001=Accounting)
+        ownerSystemUserId: string;   // systemuser GUID for ownerid
+    }): Promise<{ new_invoicesid?: string } | null> {
+        const payload: any = {
+            'ttt_Customer_contact@odata.bind': `/contacts(${params.customerContactId})`,
+            riivo_invoicetype: params.invoiceType,
+            'ownerid@odata.bind': `/systemusers(${params.ownerSystemUserId})`,
+        };
+
+        try {
+            const response = await this.crmPost('new_invoices', payload, params.ownerSystemUserId);
+            const invoiceId = response.data?.new_invoicesid;
+            console.log(`[Dynamics CRM] Created invoice ${invoiceId} for contact ${params.customerContactId}`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'new_invoices',
+                crmRecordId: invoiceId,
+                action: 'create',
+                payload,
+                triggeredBy: params.ownerSystemUserId,
+            });
+            return { new_invoicesid: invoiceId };
+        } catch (error: any) {
+            console.error('[Dynamics CRM] Failed to create invoice:', error?.response?.data?.error?.message || error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Lookup industries from the riivo_industries table. Used both as a picker
+     * for staff creating leads/contacts and to validate an industry GUID.
+     * Optional nameFilter does a case-insensitive contains match (server-side)
+     * so we don't have to ship 60+ rows over the wire each time.
+     */
+    async getIndustries(nameFilter?: string): Promise<{ id: string; name: string }[]> {
+        const token = await this.getToken();
+        try {
+            const filters = ['statecode eq 0', 'statuscode eq 1'];
+            if (nameFilter && nameFilter.trim()) {
+                const safe = nameFilter.replace(/'/g, "''");
+                filters.push(`contains(riivo_industry,'${safe}')`);
+            }
+            const url = `${this.baseUrl}/api/data/v9.2/riivo_industries?$filter=${encodeURIComponent(filters.join(' and '))}&$select=riivo_industryid,riivo_industry&$orderby=riivo_industry&$top=50`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                },
+            });
+            return (response.data.value || []).map((i: any) => ({
+                id: i.riivo_industryid,
+                name: i.riivo_industry,
+            }));
+        } catch (error: any) {
+            console.error('[Dynamics CRM] Failed to fetch industries:', error?.response?.data?.error?.message || error.message);
+            return [];
         }
     }
 
@@ -664,6 +830,158 @@ export class DynamicsService {
         } catch (error: any) {
             console.error('[Dynamics CRM] Logging failed:', error?.response?.data?.error?.message || error.message);
         }
+    }
+
+    /**
+     * Attach a signed Letter of Engagement (PDF) as an annotation on a Lead
+     * and flip the LOE-received flag on that Lead. Used by the staff
+     * upload_letter_of_engagement tool. PDF-only enforcement happens upstream
+     * in the tool handler — this method assumes the caller has validated the
+     * mime type.
+     */
+    async uploadLoeToLead(
+        leadId: string,
+        fileName: string,
+        fileBuffer: Buffer,
+        triggeredBy: string
+    ): Promise<{ success: boolean; annotationId?: string; flagSet: boolean; ocrPageCount?: number; alreadyReceived?: boolean; leadName?: string; error?: string }> {
+        // Guard against duplicate LOE uploads: if this lead already has
+        // riivo_LoEReceived = true, bail out before we run OCR or touch the
+        // timeline. Keeps the CRM clean and stops us charging Mistral credits
+        // for re-processing a signed LOE that's already on file.
+        try {
+            const existing = await this.searchEntity(
+                'new_leads',
+                `new_leadid eq ${leadId}`,
+                ['new_leadid', LEAD_LOE_RECEIVED_FIELD, 'ttt_firstname', 'ttt_lastname']
+            );
+            if (existing && existing[LEAD_LOE_RECEIVED_FIELD] === true) {
+                const name = `${existing.ttt_firstname || ''} ${existing.ttt_lastname || ''}`.trim() || 'this lead';
+                console.log(`[Dynamics CRM] LOE upload blocked — lead ${leadId} (${name}) already has LOE Received = true`);
+                return {
+                    success: false,
+                    flagSet: true,
+                    alreadyReceived: true,
+                    leadName: name,
+                    error: 'loe_already_received',
+                };
+            }
+        } catch (err: any) {
+            // Non-fatal — if we can't read the lead state, fall through to the
+            // upload attempt. Better to risk a duplicate than block a legit upload.
+            console.warn(`[Dynamics CRM] Could not check existing LOE status for lead ${leadId}:`, err?.message || err);
+        }
+
+        const base64Content = fileBuffer.toString('base64');
+
+        // Run OCR FIRST (before the annotation POST) so that:
+        //  (a) if the PDF is unreadable, we can fail fast and not pollute the
+        //      lead timeline with an attached but unprocessable document;
+        //  (b) we have the extracted markdown ready to embed in the annotation
+        //      notetext, which keeps the OCR output co-located with the file.
+        // OCR is non-fatal — if Mistral is misconfigured or errors, we log and
+        // proceed with the upload anyway. The signed LOE itself is the critical
+        // artefact; the extracted data is a nice-to-have until field-mapping
+        // is wired up (waiting on field list from TTT).
+        let ocrMarkdown: string | null = null;
+        let ocrPageCount: number | undefined;
+        let extracted: LoeExtractedFields = {};
+        if (mistralService.isConfigured()) {
+            try {
+                const ocrResult = await mistralService.ocrDocument(fileName, fileBuffer, 'application/pdf');
+                ocrMarkdown = ocrResult.fullMarkdown;
+                ocrPageCount = ocrResult.pageCount;
+                console.log(`[Dynamics CRM] OCR'd LOE ${fileName} → ${ocrPageCount} pages, ${ocrMarkdown.length} chars`);
+
+                // Extract banking details and merge into the PATCH payload below.
+                // Extractor never throws — returns {} on failure — so a bad LLM
+                // run does not block the upload itself.
+                extracted = await loeExtractorService.extractBankingDetails(ocrMarkdown);
+            } catch (err: any) {
+                console.warn(`[Dynamics CRM] LOE OCR failed (proceeding with upload): ${err?.message || err}`);
+            }
+        } else {
+            console.log('[Dynamics CRM] LOE OCR skipped — MISTRAL_API_KEY not set');
+        }
+
+        const noteParts = ['Signed LOE received via WhatsApp Bot.'];
+        if (ocrMarkdown) {
+            // Truncate to keep annotation notetext reasonable. Full markdown
+            // is also written to server logs above for debugging.
+            const trimmed = ocrMarkdown.length > 8000
+                ? ocrMarkdown.slice(0, 8000) + '\n\n...[truncated]'
+                : ocrMarkdown;
+            noteParts.push('', '--- OCR EXTRACTION ---', trimmed);
+        }
+
+        const annotationPayload: any = {
+            subject: 'Signed Letter of Engagement',
+            filename: fileName,
+            mimetype: 'application/pdf',
+            documentbody: base64Content,
+            notetext: noteParts.join('\n'),
+            'objectid_new_lead@odata.bind': `/new_leads(${leadId})`,
+            objecttypecode: 'new_lead',
+        };
+
+        let annotationId: string | undefined;
+        try {
+            const response = await this.crmPost('annotations', annotationPayload, triggeredBy);
+            annotationId = response.data?.annotationid;
+            console.log(`[Dynamics CRM] Attached LOE ${fileName} to lead ${leadId} (annotation ${annotationId})`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'annotations',
+                crmRecordId: annotationId,
+                action: 'create',
+                payload: {
+                    subject: annotationPayload.subject,
+                    filename: annotationPayload.filename,
+                    mimetype: annotationPayload.mimetype,
+                    objecttypecode: annotationPayload.objecttypecode,
+                    lead_id: leadId,
+                },
+                triggeredBy,
+            });
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error('[Dynamics CRM] LOE annotation failed:', errMsg);
+            return { success: false, flagSet: false, error: errMsg };
+        }
+
+        // Annotation succeeded — now PATCH the Lead with:
+        //   (a) the LOE Received flag (always),
+        //   (b) any banking fields the OCR extractor was confident about.
+        // Done in a single PATCH so the lead is consistent (we don't end up
+        // with the flag flipped but the bank details missing, or vice versa).
+        let flagSet = false;
+        const leadPatchPayload: Record<string, any> = { [LEAD_LOE_RECEIVED_FIELD]: true };
+        if (extracted.bankName)        leadPatchPayload.riivo_bankname = extracted.bankName;
+        if (extracted.accountName)     leadPatchPayload.riivo_accountname = extracted.accountName;
+        if (extracted.accountNumber)   leadPatchPayload.riivo_accountnumber = extracted.accountNumber;
+        if (extracted.accountType)     leadPatchPayload.riivo_accounttype = extracted.accountType;
+        if (extracted.branchNameCode)  leadPatchPayload.riivo_branchnamecode = extracted.branchNameCode;
+
+        try {
+            await this.crmPatch(
+                'new_leads',
+                `${this.baseUrl}/api/data/v9.2/new_leads(${leadId})`,
+                leadPatchPayload,
+                triggeredBy
+            );
+            flagSet = true;
+            await supabaseService.logCrmWrite({
+                crmEntity: 'new_leads',
+                crmRecordId: leadId,
+                action: 'update',
+                payload: leadPatchPayload,
+                triggeredBy,
+            });
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[Dynamics CRM] Failed to PATCH lead ${leadId} with LOE fields:`, errMsg);
+        }
+
+        return { success: true, annotationId, flagSet, ocrPageCount };
     }
 
     async uploadDocument(
@@ -864,11 +1182,25 @@ export class DynamicsService {
         }
     }
 
-    async searchLeadByName(name: string): Promise<any[]> {
+    async searchLeadByName(name: string, ownerId?: string): Promise<any[]> {
         const token = await this.getToken();
         try {
-            const filter = `contains(ttt_firstname,'${name}') or contains(ttt_lastname,'${name}')`;
-            const url = `${this.baseUrl}/api/data/v9.2/new_leads?$filter=${encodeURIComponent(filter + " and statecode eq 0")}&$select=new_leadid,ttt_firstname,ttt_lastname,ttt_mobilephone&$top=5`;
+            // Lead has no computed fullname field (unlike Contact), so a single
+            // contains() against firstname OR lastname misses anything where the
+            // staff member typed both names. Split on whitespace and AND each
+            // token's (firstname OR lastname) clause together so "Rosie Brouckaert"
+            // matches a lead with firstname=Rosie, lastname=Brouckaert.
+            const tokens = name.trim().split(/\s+/).filter(Boolean);
+            const tokenClauses = tokens.map(tok => {
+                const safe = tok.replace(/'/g, "''");
+                return `(contains(ttt_firstname,'${safe}') or contains(ttt_lastname,'${safe}'))`;
+            });
+            // Scope to the caller's own leads when ownerId is provided (staff flow).
+            // Matches the behaviour of searchContactByName so staff-driven searches
+            // consistently return "my leads" instead of the whole org's pipeline.
+            const ownerClause = ownerId ? ` and _ownerid_value eq ${ownerId}` : '';
+            const filter = `${tokenClauses.join(' and ')} and statecode eq 0${ownerClause}`;
+            const url = `${this.baseUrl}/api/data/v9.2/new_leads?$filter=${encodeURIComponent(filter)}&$select=new_leadid,ttt_firstname,ttt_lastname,ttt_mobilephone&$top=5`;
             const response = await axios.get(url, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
