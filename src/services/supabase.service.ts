@@ -35,6 +35,39 @@ interface Message {
     timestamp: string;
 }
 
+export interface PendingLoeRow {
+    id: string;
+    session_id: string;
+    lead_id: string;
+    lead_name: string | null;
+    file_name: string;
+    file_buffer: Buffer;
+    // Banking
+    bank_name: string | null;
+    account_name: string | null;
+    account_number: string | null;
+    account_type: string | null;
+    branch_name_code: string | null;
+    // Signing
+    signed_at: string | null;
+    signed_at_consultant: string | null;
+    signed_date: string | null;
+    // Client details
+    client_first_name: string | null;
+    client_last_name: string | null;
+    id_number: string | null;
+    income_tax_number: string | null;
+    physical_address: string | null;
+    email_address: string | null;
+    contact_number: string | null;
+    industry: string | null;
+    // OCR metadata
+    ocr_markdown: string | null;
+    ocr_page_count: number | null;
+    status: string;
+    created_at: string;
+}
+
 class SupabaseService {
     private client: SupabaseClient;
 
@@ -324,6 +357,175 @@ class SupabaseService {
 
         if (error) {
             console.error('[Supabase] Failed to update session state:', error.message);
+        }
+    }
+    // -------------------------------------------------------------------------
+    // Pending LOE data — staging for OCR-extracted fields before CRM write
+    // -------------------------------------------------------------------------
+
+    /**
+     * Stage extracted LOE data for staff review. Nothing is written to CRM
+     * until the staff member explicitly confirms via confirm_loe_upload.
+     */
+    async savePendingLoeData(params: {
+        sessionId: string;
+        leadId: string;
+        leadName: string | null;
+        fileName: string;
+        fileBuffer: Buffer;
+        bankName?: string;
+        accountName?: string;
+        accountNumber?: string;
+        accountType?: string;
+        branchNameCode?: string;
+        signedAt?: string;
+        signedAtConsultant?: string;
+        signedDate?: string;
+        clientFirstName?: string;
+        clientLastName?: string;
+        idNumber?: string;
+        incomeTaxNumber?: string;
+        physicalAddress?: string;
+        emailAddress?: string;
+        contactNumber?: string;
+        industry?: string;
+        ocrMarkdown?: string;
+        ocrPageCount?: number;
+    }): Promise<string | null> {
+        // Expire any previous pending LOE for this session (start-over scenario)
+        await this.client
+            .from('pending_loe_data')
+            .update({ status: 'expired' })
+            .eq('session_id', params.sessionId)
+            .eq('status', 'pending_review');
+
+        const { data, error } = await this.client
+            .from('pending_loe_data')
+            .insert({
+                session_id: params.sessionId,
+                lead_id: params.leadId,
+                lead_name: params.leadName,
+                file_name: params.fileName,
+                file_buffer: params.fileBuffer,
+                bank_name: params.bankName || null,
+                account_name: params.accountName || null,
+                account_number: params.accountNumber || null,
+                account_type: params.accountType || null,
+                branch_name_code: params.branchNameCode || null,
+                signed_at: params.signedAt || null,
+                signed_at_consultant: params.signedAtConsultant || null,
+                signed_date: params.signedDate || null,
+                client_first_name: params.clientFirstName || null,
+                client_last_name: params.clientLastName || null,
+                id_number: params.idNumber || null,
+                income_tax_number: params.incomeTaxNumber || null,
+                physical_address: params.physicalAddress || null,
+                email_address: params.emailAddress || null,
+                contact_number: params.contactNumber || null,
+                industry: params.industry || null,
+                ocr_markdown: params.ocrMarkdown || null,
+                ocr_page_count: params.ocrPageCount || null,
+            })
+            .select('id')
+            .single();
+
+        if (error) {
+            console.error('[Supabase] Failed to save pending LOE data:', error.message);
+            return null;
+        }
+        console.log(`[Supabase] Staged LOE data for session ${params.sessionId}, lead ${params.leadId} (row ${data.id})`);
+        return data.id;
+    }
+
+    /**
+     * Retrieve the pending LOE data for a session. Returns null if none exists
+     * or if the row has expired / already been confirmed.
+     */
+    async getPendingLoeData(sessionId: string): Promise<PendingLoeRow | null> {
+        const { data, error } = await this.client
+            .from('pending_loe_data')
+            .select('*')
+            .eq('session_id', sessionId)
+            .eq('status', 'pending_review')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (error) {
+            console.error('[Supabase] Failed to fetch pending LOE data:', error.message);
+            return null;
+        }
+        return data as PendingLoeRow | null;
+    }
+
+    /**
+     * Update a single extracted field on the pending LOE row. Used when staff
+     * corrects an OCR mistake before confirming.
+     */
+    async updatePendingLoeField(
+        sessionId: string,
+        fieldName: string,
+        newValue: string
+    ): Promise<boolean> {
+        const allowedFields = [
+            'bank_name', 'account_name', 'account_number', 'account_type',
+            'branch_name_code', 'signed_at', 'signed_at_consultant', 'signed_date',
+            'client_first_name', 'client_last_name', 'id_number', 'income_tax_number',
+            'physical_address', 'email_address', 'contact_number', 'industry',
+        ];
+        if (!allowedFields.includes(fieldName)) {
+            console.error(`[Supabase] Rejected LOE field update: "${fieldName}" is not an allowed field`);
+            return false;
+        }
+
+        const { error } = await this.client
+            .from('pending_loe_data')
+            .update({ [fieldName]: newValue })
+            .eq('session_id', sessionId)
+            .eq('status', 'pending_review');
+
+        if (error) {
+            console.error(`[Supabase] Failed to update LOE field ${fieldName}:`, error.message);
+            return false;
+        }
+        console.log(`[Supabase] Updated pending LOE field ${fieldName} for session ${sessionId}`);
+        return true;
+    }
+
+    /**
+     * Mark the pending LOE as confirmed and return the full row so the caller
+     * can write it to CRM. The row is NOT deleted yet — that happens after
+     * the CRM write succeeds (via deletePendingLoe).
+     */
+    async confirmPendingLoe(sessionId: string): Promise<PendingLoeRow | null> {
+        const { data, error } = await this.client
+            .from('pending_loe_data')
+            .update({ status: 'confirmed' })
+            .eq('session_id', sessionId)
+            .eq('status', 'pending_review')
+            .select('*')
+            .single();
+
+        if (error) {
+            console.error('[Supabase] Failed to confirm pending LOE:', error.message);
+            return null;
+        }
+        console.log(`[Supabase] Confirmed LOE for session ${sessionId}, lead ${data.lead_id}`);
+        return data as PendingLoeRow;
+    }
+
+    /**
+     * Delete the pending LOE row after successful CRM write. Called as the
+     * final cleanup step.
+     */
+    async deletePendingLoe(sessionId: string): Promise<void> {
+        const { error } = await this.client
+            .from('pending_loe_data')
+            .delete()
+            .eq('session_id', sessionId);
+
+        if (error) {
+            console.error('[Supabase] Failed to delete pending LOE:', error.message);
         }
     }
 }

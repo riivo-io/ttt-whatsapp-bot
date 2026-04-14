@@ -4,6 +4,9 @@ import dotenv from 'dotenv';
 import { dynamicsService } from './dynamics.service';
 import { pdfService, InvoiceData, mapInvoiceToInvoiceData } from './pdf.service';
 import { metaWhatsAppService } from './meta.service';
+import { mistralService } from './mistral.service';
+import { loeExtractorService } from './loe-extractor.service';
+import { supabaseService } from './supabase.service';
 import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from '../routes/upload.route';
 
 dotenv.config();
@@ -32,6 +35,8 @@ const STAFF_TOOL_PERMISSIONS: Record<string, string> = {
     get_invoice_pdf: 'send_invoice_pdf',
     send_invoice_pdf: 'send_invoice_pdf',
     upload_letter_of_engagement: 'upload_letter_of_engagement',
+    confirm_loe_upload: 'upload_letter_of_engagement',
+    update_loe_field: 'upload_letter_of_engagement',
     create_contact: 'create_contact',
     create_invoice: 'create_invoice',
     // get_industries is a supporting lookup used by both create_lead and create_contact.
@@ -78,7 +83,7 @@ You also have access to the user's TTT account information (Invoices and Support
 - Use max 3 bullet points if listing.
 - Short sentences.
 - No "Hope this helps" or generic closers.
-- NEVER write a message that sounds like you will send another message after (e.g. "Please hold on a moment", "Let me check that for you", "One moment please"). Every message you send is FINAL — the user will not receive a follow-up unless they message again. If you are calling a tool, the result will be included in your response automatically — do not promise a follow-up.
+- **ABSOLUTE RULE — NO FOLLOW-UP PROMISES**: NEVER write a message that implies a second message is coming. This includes ANY of these phrases or anything similar: "One moment please", "Let me check", "Let me search", "Let me review", "Let me extract", "I'll look into that", "Please wait", "Hold on", "Give me a second", "I'll get back to you", "Let me find", "I'm looking into", "I'll process that". EVERY message you send is the FINAL AND ONLY response. There is NO follow-up. The user will wait FOREVER for a message that will never come. If you need to call a tool, call it SILENTLY — do not announce it, do not narrate it, do not promise results. The tool result will be included in your response automatically. Just call the tool and respond with the FINAL answer. If the tool hasn't been called yet (e.g. you need more info from the user first), ask the question directly without promising to "then check" or "then look up" anything.
 - Use South African English spelling (e.g. colour, favour, organise, analyse, centre, licence, practise, defence, catalogue, cheque).
 
 **Tax Guidelines**:
@@ -558,7 +563,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
         type: "function",
         function: {
             name: "upload_letter_of_engagement",
-            description: "Attach a signed Letter of Engagement (PDF) to a specific lead. Use ONLY after: (1) the staff member has indicated they want to upload an LOE, (2) you've confirmed the target lead via search_lead_by_name, and (3) the staff member has uploaded a file. Will refuse non-PDF files.",
+            description: "Start the LOE upload flow. Runs OCR on the uploaded PDF, extracts banking and signing details, and stages them for staff review. Does NOT write to CRM yet — the staff must confirm the extracted data first (via confirm_loe_upload) or correct fields (via update_loe_field). Use ONLY after: (1) the staff member has uploaded a PDF, (2) you've confirmed the target lead via search_lead_by_name. Will refuse non-PDF files.",
             parameters: {
                 type: "object",
                 properties: {
@@ -572,6 +577,40 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
                     }
                 },
                 required: ["lead_id", "lead_name"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "confirm_loe_upload",
+            description: "Staff has reviewed the extracted LOE data and confirms it is correct. This writes everything to the CRM: the PDF file to the Lead's Signed Letter of Engagement field, the banking/signing fields to the Lead record, and flips LOE Received to true. No parameters needed — reads from the staged data in the current session. Only call this AFTER showing the extracted fields and the staff saying 'yes', 'confirm', 'looks good', or similar.",
+            parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "update_loe_field",
+            description: "Staff wants to correct an extracted LOE field before confirming. Updates the staged data. After updating, show all fields again and ask to confirm or correct more.",
+            parameters: {
+                type: "object",
+                properties: {
+                    field_name: {
+                        type: "string",
+                        enum: ["client_first_name", "client_last_name", "id_number", "income_tax_number", "physical_address", "email_address", "contact_number", "industry", "bank_name", "account_name", "account_number", "account_type", "branch_name_code", "signed_at", "signed_at_consultant", "signed_date"],
+                        description: "Which field to update."
+                    },
+                    new_value: {
+                        type: "string",
+                        description: "The corrected value."
+                    }
+                },
+                required: ["field_name", "new_value"],
             },
         },
     }
@@ -593,7 +632,7 @@ export class OpenAIService {
         return this.openai;
     }
 
-    async generateResponse(userMessage: string, contactId?: string, phoneNumber?: string, history: { role: 'user' | 'assistant', content: string }[] = [], entityType?: 'client' | 'lead' | 'user', permittedToolKeys: string[] = [], userFullName?: string): Promise<string> {
+    async generateResponse(userMessage: string, contactId?: string, phoneNumber?: string, history: { role: 'user' | 'assistant', content: string }[] = [], entityType?: 'client' | 'lead' | 'user', permittedToolKeys: string[] = [], userFullName?: string, sessionId?: string): Promise<string> {
         const client = this.getClient();
 
         if (!client) {
@@ -652,13 +691,34 @@ export class OpenAIService {
 
             roleContext += nameLine + firstMessageInstruction;
 
-            // If there's a pending file upload, append upload-specific guidance.
-            // MUST happen before systemPrompt is built, otherwise the AI never
-            // sees the nudge and defaults to the wrong tool (e.g. search_contact_by_name
-            // instead of search_lead_by_name for an LOE upload).
-            if (phoneNumber && hasPendingUpload(phoneNumber)) {
+            // Check for pending LOE review data BEFORE building the system prompt.
+            // This result is reused for both the prompt nudge and the tool-surface
+            // restriction further down.
+            let pendingLoeData: any = null;
+            if (entityType === 'user' && sessionId) {
+                pendingLoeData = await supabaseService.getPendingLoeData(sessionId);
+            }
+
+            // If there's a pending file upload or pending LOE review, append
+            // upload-specific guidance. MUST happen before systemPrompt is built.
+            if (pendingLoeData && entityType === 'user') {
+                // Phase 2: OCR done, fields staged, awaiting staff review
+                const fieldDisplay = (() => {
+                    const lines: string[] = [];
+                    const f = (label: string, val: any) => lines.push(`• ${label}: ${val || '(not found)'}`);
+                    f('Bank Name', pendingLoeData.bank_name);
+                    f('Account Name', pendingLoeData.account_name);
+                    f('Account Number', pendingLoeData.account_number);
+                    f('Account Type', pendingLoeData.account_type);
+                    f('Branch Name/Code', pendingLoeData.branch_name_code);
+                    f('Signed At (Client)', pendingLoeData.signed_at);
+                    f('Signed At (Consultant)', pendingLoeData.signed_at_consultant);
+                    return lines.join('\n');
+                })();
+                roleContext += `\n\n**LOE REVIEW IN PROGRESS — IMPORTANT**: Extracted data from the signed LOE for ${pendingLoeData.lead_name || 'the lead'} is awaiting review. Here are the current values:\n\n${fieldDisplay}\n\nShow these to the staff and ask if they are correct. If the staff confirms (says "yes", "confirm", "looks good"), call confirm_loe_upload. If they want to correct a field (e.g. "bank name should be Capitec"), call update_loe_field with the field_name and new_value. Available field names: bank_name, account_name, account_number, account_type, branch_name_code, signed_at, signed_at_consultant.\n\nAvailable field names for update_loe_field: client_first_name, client_last_name, id_number, income_tax_number, physical_address, email_address, contact_number, industry, bank_name, account_name, account_number, account_type, branch_name_code, signed_at, signed_at_consultant, signed_date.\n\nDo NOT use any other tools until this review is complete.`;
+            } else if (phoneNumber && hasPendingUpload(phoneNumber)) {
                 if (entityType === 'user') {
-                    // Staff have only one upload path: signed LOE for a lead.
+                    // Phase 1: file staged, need to identify lead and run OCR
                     roleContext += `\n\n**PENDING DOCUMENT — IMPORTANT**: The staff member has just uploaded a file. The ONLY document upload available to staff is a signed Letter of Engagement, which attaches to a LEAD (not a contact/client). Follow this flow exactly:\n1. Ask which lead the LOE is for if not already clear.\n2. Use **search_lead_by_name** (NOT search_contact_by_name — leads and clients are different entities). If multiple matches, ask the staff to disambiguate.\n3. Call **upload_letter_of_engagement** with the resolved lead_id.\nThe file must be a PDF. Do not use save_document — that tool is not available to staff.`;
                 } else {
                     roleContext += `\n\n**PENDING DOCUMENT**: The user has uploaded a file. Ask them what type of document it is: ID Document, Payslip, Bank Statement, Tax Certificate, or Other. Then call save_document with the doc_type.`;
@@ -675,7 +735,7 @@ export class OpenAIService {
 
             // Filter tools by role
             const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'opt_out_whatsapp', 'refer_friend', 'save_document'];
-            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'upload_letter_of_engagement'];
+            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field'];
             const leadTools = ['save_document'];
             const unknownTools = ['verify_identity'];
 
@@ -701,19 +761,31 @@ export class OpenAIService {
                 availableTools = TOOLS.filter(t => unknownTools.includes((t as any).function.name));
             }
 
-            // When a staff member has a pending document upload, the only valid
-            // next action is "identify the target lead and attach the LOE". Strip
-            // contact-lookup and client-data tools from the available list so the
-            // AI physically cannot pick the wrong path (e.g. search_contact_by_name
-            // for what is meant to be a lead lookup). Prompt-only guidance wasn't
-            // enough — gpt-4o-mini kept reaching for search_contact_by_name.
-            if (entityType === 'user' && phoneNumber && hasPendingUpload(phoneNumber) && availableTools) {
+            // Restrict tool surface during the LOE upload flow. Two phases:
+            //
+            // Phase 1: file staged in memory (hasPendingUpload) — staff needs to
+            //   identify the lead and trigger OCR. Only lead-search + upload tools.
+            //
+            // Phase 2: data staged in Supabase (pending_review row) — staff is
+            //   reviewing extracted fields. Only confirm/update/re-upload tools.
+            //
+            // pendingLoeData was already fetched above (before prompt construction).
+            if (pendingLoeData && entityType === 'user' && availableTools) {
+                const allowedDuringReview = new Set([
+                    'confirm_loe_upload',
+                    'update_loe_field',
+                    'upload_letter_of_engagement',  // start over with a different lead
+                ]);
+                const before = availableTools.length;
+                availableTools = availableTools.filter(t => allowedDuringReview.has((t as any).function.name));
+                console.log(`[OpenAI] LOE pending review — restricted tool surface from ${before} to ${availableTools.length} tools`);
+            } else if (!pendingLoeData && entityType === 'user' && phoneNumber && hasPendingUpload(phoneNumber) && availableTools) {
                 const allowedDuringUpload = new Set([
                     'search_lead_by_name',
                     'get_my_leads',
                     'upload_letter_of_engagement',
-                    'create_lead',           // fallback if the lead doesn't exist yet
-                    'get_industries',        // supporting tool for create_lead
+                    'create_lead',
+                    'get_industries',
                 ]);
                 const before = availableTools.length;
                 availableTools = availableTools.filter(t => allowedDuringUpload.has((t as any).function.name));
@@ -1024,9 +1096,34 @@ export class OpenAIService {
                     });
                 };
 
-                // Helper: handle the upload_letter_of_engagement tool call.
-                // Hoisted to this scope so both the first-round and follow-up
-                // tool loops can use it without duplicating PDF / GUID / staging checks.
+                // Helper: format pending LOE fields for display to the staff member.
+                const formatLoeFields = (row: any): string => {
+                    const lines: string[] = [];
+                    const f = (label: string, val: any) => lines.push(`• ${label}: ${val || '(not found)'}`);
+                    // Client details
+                    f('First Name', row.client_first_name);
+                    f('Last Name', row.client_last_name);
+                    f('ID Number', row.id_number);
+                    f('Income Tax Number', row.income_tax_number);
+                    f('Physical Address', row.physical_address);
+                    f('Email', row.email_address);
+                    f('Contact Number', row.contact_number);
+                    f('Industry', row.industry);
+                    // Banking
+                    f('Bank Name', row.bank_name);
+                    f('Account Name', row.account_name);
+                    f('Account Number', row.account_number);
+                    f('Account Type', row.account_type);
+                    f('Branch Name/Code', row.branch_name_code);
+                    // Signing
+                    f('Signed At (Client)', row.signed_at);
+                    f('Signed At (Consultant)', row.signed_at_consultant);
+                    f('Signed Date', row.signed_date);
+                    return lines.join('\n');
+                };
+
+                // Helper: handle upload_letter_of_engagement — OCR → extract → stage in Supabase.
+                // Does NOT write to CRM. Returns the extracted fields for staff review.
                 const handleUploadLoe = async (
                     toolCall: any,
                     phone: string | undefined,
@@ -1035,6 +1132,9 @@ export class OpenAIService {
                     const args = JSON.parse(toolCall.function.arguments || '{}');
                     if (!phone) {
                         return JSON.stringify({ status: 'error', error: 'no_phone', message: 'Cannot upload — no phone number on session.' });
+                    }
+                    if (!sessionId) {
+                        return JSON.stringify({ status: 'error', message: 'No session ID available — cannot stage LOE data.' });
                     }
                     const staged = peekPendingUpload(phone);
                     if (!staged) {
@@ -1051,35 +1151,192 @@ export class OpenAIService {
                     if (!args.lead_id || !guidRegex.test(String(args.lead_id))) {
                         return JSON.stringify({ status: 'error', error: 'invalid_lead_id', message: 'lead_id must be the GUID returned from search_lead_by_name. Run that lookup first.' });
                     }
-                    const result = await dynamicsService.uploadLoeToLead(
-                        args.lead_id,
-                        staged.fileName,
-                        staged.buffer,
-                        triggeredBy || phone
-                    );
-                    if (!result.success) {
-                        // Special-case: LOE already on file. We leave the staged
-                        // upload in place so the staff member can re-target a
-                        // different lead without re-uploading the same PDF.
-                        if (result.alreadyReceived) {
-                            return JSON.stringify({
-                                status: 'already_received',
-                                lead_name: result.leadName || args.lead_name,
-                                message: `A signed Letter of Engagement has already been submitted for ${result.leadName || args.lead_name}. No new upload was made. Ask the staff member whether they meant a different lead.`,
-                            });
-                        }
-                        return JSON.stringify({ status: 'error', error: 'attach_failed', message: `Could not attach the LOE to the lead: ${result.error || 'unknown error'}.` });
+
+                    // Check if LOE already received — warn but don't block.
+                    // The staff may legitimately be replacing an old LOE.
+                    const check = await dynamicsService.checkLoeAlreadyReceived(args.lead_id);
+                    // If already received, we still proceed with OCR but flag it
+                    // in the response so the AI asks the staff if they want to continue.
+                    let alreadyReceivedWarning = '';
+                    if (check.alreadyReceived) {
+                        alreadyReceivedWarning = `NOTE: An LOE has already been received for ${check.leadName || args.lead_name}. Proceeding will overwrite the existing data. Let the staff member know and ask if they want to continue.`;
+                        console.log(`[LOE] Lead ${args.lead_id} already has LOE Received = true — proceeding with re-upload`);
                     }
+
+                    // Run OCR
+                    let ocrMarkdown: string | null = null;
+                    let ocrPageCount: number | undefined;
+                    if (mistralService.isConfigured()) {
+                        try {
+                            const ocrResult = await mistralService.ocrDocument(staged.fileName, staged.buffer, 'application/pdf');
+                            ocrMarkdown = ocrResult.fullMarkdown;
+                            ocrPageCount = ocrResult.pageCount;
+                            console.log(`[LOE] OCR'd ${staged.fileName} → ${ocrPageCount} pages, ${ocrMarkdown.length} chars`);
+                        } catch (err: any) {
+                            console.warn(`[LOE] OCR failed: ${err?.message || err}`);
+                        }
+                    } else {
+                        console.log('[LOE] OCR skipped — MISTRAL_API_KEY not set');
+                    }
+
+                    // Log the raw OCR output so we can verify what Mistral saw
+                    if (ocrMarkdown) {
+                        console.log(`[LOE] --- OCR RAW TEXT START ---`);
+                        console.log(ocrMarkdown.slice(0, 3000));
+                        if (ocrMarkdown.length > 3000) console.log(`[LOE] ... (${ocrMarkdown.length - 3000} more chars truncated from log)`);
+                        console.log(`[LOE] --- OCR RAW TEXT END ---`);
+                    }
+
+                    // Extract fields
+                    const extracted = ocrMarkdown
+                        ? await loeExtractorService.extractBankingDetails(ocrMarkdown)
+                        : {};
+                    console.log(`[LOE] Extracted fields:`, JSON.stringify(extracted, null, 2));
+
+                    // Stage everything in Supabase for review
+                    const pendingId = await supabaseService.savePendingLoeData({
+                        sessionId,
+                        leadId: args.lead_id,
+                        leadName: args.lead_name || null,
+                        fileName: staged.fileName,
+                        fileBuffer: staged.buffer,
+                        // Banking
+                        bankName: extracted.bankName,
+                        accountName: extracted.accountName,
+                        accountNumber: extracted.accountNumber,
+                        accountType: extracted.accountType,
+                        branchNameCode: extracted.branchNameCode,
+                        // Signing
+                        signedAt: extracted.signedAt,
+                        signedAtConsultant: extracted.signedAtConsultant,
+                        signedDate: extracted.signedDate,
+                        // Client details
+                        clientFirstName: extracted.clientFirstName,
+                        clientLastName: extracted.clientLastName,
+                        idNumber: extracted.idNumber,
+                        incomeTaxNumber: extracted.incomeTaxNumber,
+                        physicalAddress: extracted.physicalAddress,
+                        emailAddress: extracted.emailAddress,
+                        contactNumber: extracted.contactNumber,
+                        industry: extracted.industry,
+                        // OCR
+                        ocrMarkdown: ocrMarkdown || undefined,
+                        ocrPageCount,
+                    });
+
+                    if (!pendingId) {
+                        return JSON.stringify({ status: 'error', message: 'Failed to stage LOE data for review. Please try again.' });
+                    }
+
+                    // Clear the in-memory pending upload — data is now in Supabase
                     clearPendingUpload(phone);
-                    if (!result.flagSet) {
+
+                    // Return the extracted fields for the AI to show to staff
+                    const pending = await supabaseService.getPendingLoeData(sessionId);
+                    const fieldDisplay = pending ? formatLoeFields(pending) : '(no fields extracted)';
+
+                    return JSON.stringify({
+                        status: 'pending_review',
+                        lead_name: args.lead_name,
+                        fields: fieldDisplay,
+                        already_received_warning: alreadyReceivedWarning || undefined,
+                        message: `${alreadyReceivedWarning ? alreadyReceivedWarning + '\n\n' : ''}I've extracted the following details from the LOE for ${args.lead_name}:\n\n${fieldDisplay}\n\nPlease review these details. If anything is incorrect, tell me which field to update (e.g. "bank name should be Capitec"). Once everything looks correct, say "confirm" to write to the CRM.`,
+                    });
+                };
+
+                // Helper: handle confirm_loe_upload — write staged data to CRM.
+                const handleConfirmLoe = async (): Promise<string> => {
+                    if (!sessionId) {
+                        return JSON.stringify({ status: 'error', message: 'No session ID available.' });
+                    }
+                    const row = await supabaseService.confirmPendingLoe(sessionId);
+                    if (!row) {
+                        return JSON.stringify({ status: 'error', message: 'No pending LOE data found to confirm. Upload a document first.' });
+                    }
+
+                    const triggeredBy = contactId || 'unknown';
+
+                    // Step 1: Upload the PDF file to the Lead's file column
+                    const fileResult = await dynamicsService.uploadLoeFileToCrm(
+                        row.lead_id,
+                        row.file_name,
+                        row.file_buffer,
+                        triggeredBy
+                    );
+                    if (!fileResult.success) {
+                        return JSON.stringify({ status: 'error', message: `Failed to upload LOE PDF to CRM: ${fileResult.error}. The data has NOT been written. Please try again.` });
+                    }
+
+                    // Step 2: Write confirmed fields + flip LOE Received flag
+                    const fieldResult = await dynamicsService.writeLoeFieldsToLead(
+                        row.lead_id,
+                        {
+                            bankName: row.bank_name,
+                            accountName: row.account_name,
+                            accountNumber: row.account_number,
+                            accountType: row.account_type,
+                            branchNameCode: row.branch_name_code,
+                            signedAt: row.signed_at,
+                            signedAtConsultant: row.signed_at_consultant,
+                            signedDate: row.signed_date,
+                            clientFirstName: row.client_first_name,
+                            clientLastName: row.client_last_name,
+                            idNumber: row.id_number,
+                            incomeTaxNumber: row.income_tax_number,
+                            physicalAddress: row.physical_address,
+                            emailAddress: row.email_address,
+                            contactNumber: row.contact_number,
+                            industry: row.industry,
+                        },
+                        triggeredBy
+                    );
+
+                    // Clean up staging row
+                    await supabaseService.deletePendingLoe(sessionId);
+
+                    if (!fieldResult.success) {
                         return JSON.stringify({
                             status: 'partial_success',
-                            message: `LOE attached to ${args.lead_name}'s lead record, but the LOE Received flag could not be set. Please flip it manually in the CRM.`,
+                            message: `LOE PDF uploaded to ${row.lead_name}'s record, but the field update failed: ${fieldResult.error}. Please update the banking details manually in the CRM.`,
                         });
                     }
+
                     return JSON.stringify({
-                        status: 'success',
-                        message: `Signed LOE for ${args.lead_name} has been attached to the lead timeline and the LOE Received flag is now set.`,
+                        status: 'confirmed',
+                        lead_name: row.lead_name,
+                        message: `LOE for ${row.lead_name} has been saved. The signed PDF is attached, banking and signing details are updated, and LOE Received is set to true.`,
+                    });
+                };
+
+                // Helper: handle update_loe_field — correct a single field before confirming.
+                const handleUpdateLoeField = async (toolCall: any): Promise<string> => {
+                    if (!sessionId) {
+                        return JSON.stringify({ status: 'error', message: 'No session ID available.' });
+                    }
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    if (!args.field_name || !args.new_value) {
+                        return JSON.stringify({ status: 'error', message: 'Both field_name and new_value are required.' });
+                    }
+
+                    const success = await supabaseService.updatePendingLoeField(
+                        sessionId,
+                        args.field_name,
+                        args.new_value
+                    );
+                    if (!success) {
+                        return JSON.stringify({ status: 'error', message: `Could not update field "${args.field_name}". Make sure there is a pending LOE upload in progress.` });
+                    }
+
+                    // Re-read and show updated fields
+                    const pending = await supabaseService.getPendingLoeData(sessionId);
+                    const fieldDisplay = pending ? formatLoeFields(pending) : '(no data)';
+
+                    return JSON.stringify({
+                        status: 'updated',
+                        field_name: args.field_name,
+                        new_value: args.new_value,
+                        fields: fieldDisplay,
+                        message: `Updated ${args.field_name} to "${args.new_value}". Here are the current details:\n\n${fieldDisplay}\n\nIs everything correct now? Say "confirm" to write to the CRM, or tell me what else to change.`,
                     });
                 };
 
@@ -1531,6 +1788,10 @@ export class OpenAIService {
                             }
                         } else if (functionName === 'upload_letter_of_engagement') {
                             functionResponse = await handleUploadLoe(toolCall, phoneNumber, contactId);
+                        } else if (functionName === 'confirm_loe_upload') {
+                            functionResponse = await handleConfirmLoe();
+                        } else if (functionName === 'update_loe_field') {
+                            functionResponse = await handleUpdateLoeField(toolCall);
                         } else if (functionName === 'send_invoice_pdf') {
                             functionResponse = await handleSendInvoicePdf(toolCall);
                         } else if (functionName === 'save_document') {
@@ -1798,6 +2059,10 @@ export class OpenAIService {
                                 }
                             } else if (functionName === 'upload_letter_of_engagement') {
                                 functionResponse = await handleUploadLoe(toolCall, phoneNumber, contactId);
+                            } else if (functionName === 'confirm_loe_upload') {
+                                functionResponse = await handleConfirmLoe();
+                            } else if (functionName === 'update_loe_field') {
+                                functionResponse = await handleUpdateLoeField(toolCall);
                             } else if (functionName === 'send_invoice_pdf') {
                                 functionResponse = await handleSendInvoicePdf(toolCall);
                             } else if (functionName === 'create_lead') {

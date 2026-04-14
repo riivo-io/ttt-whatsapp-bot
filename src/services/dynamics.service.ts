@@ -3,8 +3,9 @@ import * as msal from '@azure/msal-node';
 import dotenv from 'dotenv';
 import { CrmEntity } from '../types/crm.types';
 import { supabaseService } from './supabase.service';
-import { mistralService } from './mistral.service';
-import { loeExtractorService, LoeExtractedFields } from './loe-extractor.service';
+// mistralService and loeExtractorService are no longer called from dynamics.service
+// — OCR + extraction now happen in the openai.service handler, and confirmed
+// fields are passed to writeLoeFieldsToLead as plain values.
 
 dotenv.config();
 
@@ -843,16 +844,12 @@ export class DynamicsService {
      * in the tool handler — this method assumes the caller has validated the
      * mime type.
      */
-    async uploadLoeToLead(
-        leadId: string,
-        fileName: string,
-        fileBuffer: Buffer,
-        triggeredBy: string
-    ): Promise<{ success: boolean; annotationId?: string; flagSet: boolean; ocrPageCount?: number; alreadyReceived?: boolean; leadName?: string; error?: string }> {
-        // Guard against duplicate LOE uploads: if this lead already has
-        // riivo_LoEReceived = true, bail out before we run OCR or touch the
-        // timeline. Keeps the CRM clean and stops us charging Mistral credits
-        // for re-processing a signed LOE that's already on file.
+    /**
+     * Check if a lead already has an LOE on file. Returns the lead's name
+     * for display purposes plus the flag state. Non-fatal — returns
+     * { alreadyReceived: false } if the query fails.
+     */
+    async checkLoeAlreadyReceived(leadId: string): Promise<{ alreadyReceived: boolean; leadName?: string }> {
         try {
             const existing = await this.searchEntity(
                 'new_leads',
@@ -861,131 +858,145 @@ export class DynamicsService {
             );
             if (existing && existing[LEAD_LOE_RECEIVED_FIELD] === true) {
                 const name = `${existing.ttt_firstname || ''} ${existing.ttt_lastname || ''}`.trim() || 'this lead';
-                console.log(`[Dynamics CRM] LOE upload blocked — lead ${leadId} (${name}) already has LOE Received = true`);
-                return {
-                    success: false,
-                    flagSet: true,
-                    alreadyReceived: true,
-                    leadName: name,
-                    error: 'loe_already_received',
-                };
+                return { alreadyReceived: true, leadName: name };
             }
         } catch (err: any) {
-            // Non-fatal — if we can't read the lead state, fall through to the
-            // upload attempt. Better to risk a duplicate than block a legit upload.
-            console.warn(`[Dynamics CRM] Could not check existing LOE status for lead ${leadId}:`, err?.message || err);
+            console.warn(`[Dynamics CRM] Could not check LOE status for lead ${leadId}:`, err?.message || err);
+        }
+        return { alreadyReceived: false };
+    }
+
+    /**
+     * Upload the signed LOE PDF to the Lead's File column
+     * (riivo_SignedLetterofEngagement) and create a timeline annotation
+     * recording the upload event. Called AFTER the staff has confirmed the
+     * extracted data — by this point the file is definitely the right one.
+     */
+    async uploadLoeFileToCrm(
+        leadId: string,
+        fileName: string,
+        fileBuffer: Buffer,
+        triggeredBy: string
+    ): Promise<{ success: boolean; error?: string }> {
+        // Step 1: Upload the PDF to the File column via PATCH with raw bytes.
+        try {
+            const token = await this.getToken();
+            const url = `${this.baseUrl}/api/data/v9.2/new_leads(${leadId})/riivo_signedletterofengagement`;
+            await axios.patch(url, fileBuffer, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/octet-stream',
+                    'x-ms-file-name': fileName,
+                },
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+            });
+            console.log(`[Dynamics CRM] Uploaded LOE file ${fileName} to lead ${leadId} file column`);
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error('[Dynamics CRM] LOE file column upload failed:', errMsg);
+            return { success: false, error: errMsg };
         }
 
-        const base64Content = fileBuffer.toString('base64');
-
-        // Run OCR FIRST (before the annotation POST) so that:
-        //  (a) if the PDF is unreadable, we can fail fast and not pollute the
-        //      lead timeline with an attached but unprocessable document;
-        //  (b) we have the extracted markdown ready to embed in the annotation
-        //      notetext, which keeps the OCR output co-located with the file.
-        // OCR is non-fatal — if Mistral is misconfigured or errors, we log and
-        // proceed with the upload anyway. The signed LOE itself is the critical
-        // artefact; the extracted data is a nice-to-have until field-mapping
-        // is wired up (waiting on field list from TTT).
-        let ocrMarkdown: string | null = null;
-        let ocrPageCount: number | undefined;
-        let extracted: LoeExtractedFields = {};
-        if (mistralService.isConfigured()) {
-            try {
-                const ocrResult = await mistralService.ocrDocument(fileName, fileBuffer, 'application/pdf');
-                ocrMarkdown = ocrResult.fullMarkdown;
-                ocrPageCount = ocrResult.pageCount;
-                console.log(`[Dynamics CRM] OCR'd LOE ${fileName} → ${ocrPageCount} pages, ${ocrMarkdown.length} chars`);
-
-                // Extract banking details and merge into the PATCH payload below.
-                // Extractor never throws — returns {} on failure — so a bad LLM
-                // run does not block the upload itself.
-                extracted = await loeExtractorService.extractBankingDetails(ocrMarkdown);
-            } catch (err: any) {
-                console.warn(`[Dynamics CRM] LOE OCR failed (proceeding with upload): ${err?.message || err}`);
-            }
-        } else {
-            console.log('[Dynamics CRM] LOE OCR skipped — MISTRAL_API_KEY not set');
-        }
-
-        const noteParts = ['Signed LOE received via WhatsApp Bot.'];
-        if (ocrMarkdown) {
-            // Truncate to keep annotation notetext reasonable. Full markdown
-            // is also written to server logs above for debugging.
-            const trimmed = ocrMarkdown.length > 8000
-                ? ocrMarkdown.slice(0, 8000) + '\n\n...[truncated]'
-                : ocrMarkdown;
-            noteParts.push('', '--- OCR EXTRACTION ---', trimmed);
-        }
-
+        // Step 2: Create a timeline annotation recording the upload event.
+        // No file body in the annotation — the PDF lives in the File column.
         const annotationPayload: any = {
             subject: 'Signed Letter of Engagement',
-            filename: fileName,
-            mimetype: 'application/pdf',
-            documentbody: base64Content,
-            notetext: noteParts.join('\n'),
+            notetext: `Signed LOE "${fileName}" uploaded via WhatsApp Bot at ${new Date().toISOString()}.`,
             'objectid_new_lead@odata.bind': `/new_leads(${leadId})`,
             objecttypecode: 'new_lead',
         };
-
-        let annotationId: string | undefined;
         try {
             const response = await this.crmPost('annotations', annotationPayload, triggeredBy);
-            annotationId = response.data?.annotationid;
-            console.log(`[Dynamics CRM] Attached LOE ${fileName} to lead ${leadId} (annotation ${annotationId})`);
+            const annotationId = response.data?.annotationid;
+            console.log(`[Dynamics CRM] Created LOE timeline note for lead ${leadId} (annotation ${annotationId})`);
             await supabaseService.logCrmWrite({
                 crmEntity: 'annotations',
                 crmRecordId: annotationId,
                 action: 'create',
-                payload: {
-                    subject: annotationPayload.subject,
-                    filename: annotationPayload.filename,
-                    mimetype: annotationPayload.mimetype,
-                    objecttypecode: annotationPayload.objecttypecode,
-                    lead_id: leadId,
-                },
+                payload: { subject: annotationPayload.subject, lead_id: leadId },
                 triggeredBy,
             });
         } catch (error: any) {
-            const errMsg = error?.response?.data?.error?.message || error.message;
-            console.error('[Dynamics CRM] LOE annotation failed:', errMsg);
-            return { success: false, flagSet: false, error: errMsg };
+            // Non-fatal — the file is already uploaded, the annotation is just
+            // the audit trail. Log but don't fail the whole operation.
+            console.error('[Dynamics CRM] LOE annotation failed:', error?.response?.data?.error?.message || error.message);
         }
 
-        // Annotation succeeded — now PATCH the Lead with:
-        //   (a) the LOE Received flag (always),
-        //   (b) any banking fields the OCR extractor was confident about.
-        // Done in a single PATCH so the lead is consistent (we don't end up
-        // with the flag flipped but the bank details missing, or vice versa).
-        let flagSet = false;
-        const leadPatchPayload: Record<string, any> = { [LEAD_LOE_RECEIVED_FIELD]: true };
-        if (extracted.bankName)        leadPatchPayload.riivo_bankname = extracted.bankName;
-        if (extracted.accountName)     leadPatchPayload.riivo_accountname = extracted.accountName;
-        if (extracted.accountNumber)   leadPatchPayload.riivo_accountnumber = extracted.accountNumber;
-        if (extracted.accountType)     leadPatchPayload.riivo_accounttype = extracted.accountType;
-        if (extracted.branchNameCode)  leadPatchPayload.riivo_branchnamecode = extracted.branchNameCode;
+        return { success: true };
+    }
+
+    /**
+     * Write confirmed LOE fields to the Lead record. Takes the staff-reviewed
+     * field values (not raw OCR output) so any corrections are honoured.
+     * Flips riivo_LoEReceived = true in the same PATCH.
+     */
+    async writeLoeFieldsToLead(
+        leadId: string,
+        fields: {
+            bankName?: string | null;
+            accountName?: string | null;
+            accountNumber?: string | null;
+            accountType?: string | null;
+            branchNameCode?: string | null;
+            signedAt?: string | null;
+            signedAtConsultant?: string | null;
+            signedDate?: string | null;
+            clientFirstName?: string | null;
+            clientLastName?: string | null;
+            idNumber?: string | null;
+            incomeTaxNumber?: string | null;
+            physicalAddress?: string | null;
+            emailAddress?: string | null;
+            contactNumber?: string | null;
+            industry?: string | null;
+        },
+        triggeredBy: string
+    ): Promise<{ success: boolean; flagSet: boolean; error?: string }> {
+        const payload: Record<string, any> = { [LEAD_LOE_RECEIVED_FIELD]: true };
+        // Banking
+        if (fields.bankName)            payload.riivo_bankname = fields.bankName;
+        if (fields.accountName)         payload.riivo_accountname = fields.accountName;
+        if (fields.accountNumber)       payload.riivo_accountnumber = fields.accountNumber;
+        if (fields.accountType)         payload.riivo_accounttype = fields.accountType;
+        if (fields.branchNameCode)      payload.riivo_branchnamecode = fields.branchNameCode;
+        // Signing
+        if (fields.signedAt)            payload.riivo_signedat = fields.signedAt;
+        if (fields.signedAtConsultant)  payload.riivo_signedatconsultant = fields.signedAtConsultant;
+        if (fields.signedDate)          payload.riivo_loesubmissiondate = fields.signedDate;
+        // Client details
+        if (fields.clientFirstName)     payload.ttt_firstname = fields.clientFirstName;
+        if (fields.clientLastName)      payload.ttt_lastname = fields.clientLastName;
+        if (fields.idNumber)            payload.ttt_idnumber = fields.idNumber;
+        if (fields.incomeTaxNumber)     payload.riivo_incometaxnumber = fields.incomeTaxNumber;
+        if (fields.physicalAddress)     payload.riivo_address1street1 = fields.physicalAddress;
+        if (fields.emailAddress)        payload.ttt_email = fields.emailAddress;
+        if (fields.contactNumber)       payload.ttt_mobilephone = fields.contactNumber;
+        // riivo_industry is an Int32 Choice field in Dynamics, not free text.
+        // We extract it from the LOE for display/review but cannot write it
+        // without a label→integer mapping. Skipped for now.
+        // if (fields.industry) payload.riivo_industry = fields.industry;
 
         try {
             await this.crmPatch(
                 'new_leads',
                 `${this.baseUrl}/api/data/v9.2/new_leads(${leadId})`,
-                leadPatchPayload,
+                payload,
                 triggeredBy
             );
-            flagSet = true;
             await supabaseService.logCrmWrite({
                 crmEntity: 'new_leads',
                 crmRecordId: leadId,
                 action: 'update',
-                payload: leadPatchPayload,
+                payload,
                 triggeredBy,
             });
+            return { success: true, flagSet: true };
         } catch (error: any) {
             const errMsg = error?.response?.data?.error?.message || error.message;
-            console.error(`[Dynamics CRM] Failed to PATCH lead ${leadId} with LOE fields:`, errMsg);
+            console.error(`[Dynamics CRM] Failed to write LOE fields to lead ${leadId}:`, errMsg);
+            return { success: false, flagSet: false, error: errMsg };
         }
-
-        return { success: true, annotationId, flagSet, ocrPageCount };
     }
 
     /**

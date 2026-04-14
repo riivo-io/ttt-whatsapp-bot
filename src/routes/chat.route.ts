@@ -232,7 +232,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
             //    So we pass all messages except the last one (current) to avoid duplication,
             //    since openAIService appends the userMessage itself.
             const historyWithoutCurrent = history.slice(0, -1);
-            response = await openAIService.generateResponse(message, crmEntity?.id, senderNumber, historyWithoutCurrent, crmEntity?.type, permittedTools, crmEntity?.fullname);
+            response = await openAIService.generateResponse(message, crmEntity?.id, senderNumber, historyWithoutCurrent, crmEntity?.type, permittedTools, crmEntity?.fullname, session.id);
         }
 
         // 8. Supabase: Save bot response
