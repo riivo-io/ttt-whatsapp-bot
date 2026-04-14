@@ -718,8 +718,9 @@ export class OpenAIService {
                 roleContext += `\n\n**LOE REVIEW IN PROGRESS — IMPORTANT**: Extracted data from the signed LOE for ${pendingLoeData.lead_name || 'the lead'} is awaiting review. Here are the current values:\n\n${fieldDisplay}\n\nShow these to the staff and ask if they are correct. If the staff confirms (says "yes", "confirm", "looks good"), call confirm_loe_upload. If they want to correct a field (e.g. "bank name should be Capitec"), call update_loe_field with the field_name and new_value. Available field names: bank_name, account_name, account_number, account_type, branch_name_code, signed_at, signed_at_consultant.\n\nAvailable field names for update_loe_field: client_first_name, client_last_name, id_number, income_tax_number, physical_address, email_address, contact_number, industry, bank_name, account_name, account_number, account_type, branch_name_code, signed_at, signed_at_consultant, signed_date.\n\nDo NOT use any other tools until this review is complete.`;
             } else if (phoneNumber && hasPendingUpload(phoneNumber)) {
                 if (entityType === 'user') {
-                    // Phase 1: file staged, need to identify lead and run OCR
-                    roleContext += `\n\n**PENDING DOCUMENT — IMPORTANT**: The staff member has just uploaded a file. The ONLY document upload available to staff is a signed Letter of Engagement, which attaches to a LEAD (not a contact/client). Follow this flow exactly:\n1. Ask which lead the LOE is for if not already clear.\n2. Use **search_lead_by_name** (NOT search_contact_by_name — leads and clients are different entities). If multiple matches, ask the staff to disambiguate.\n3. Call **upload_letter_of_engagement** with the resolved lead_id.\nThe file must be a PDF. Do not use save_document — that tool is not available to staff.`;
+                    // Staff can upload either an LOE (goes to a Lead) or a general
+                    // document (goes to a Client as an annotation). Ask which.
+                    roleContext += `\n\n**PENDING DOCUMENT — IMPORTANT**: The staff member has just uploaded a file. Ask them what type of document this is:\n\n1. **Signed Letter of Engagement (LOE)** — if they say LOE, letter of engagement, or similar:\n   - Ask which LEAD it's for (use search_lead_by_name, NOT search_contact_by_name).\n   - Call upload_letter_of_engagement with the resolved lead_id.\n\n2. **Other document** (ID Document, Payslip, Bank Statement, Tax Certificate, etc.) — if they say anything else:\n   - Ask which CLIENT it's for (use search_contact_by_name).\n   - Ask what type of document it is.\n   - Call save_document with the doc_type and client.\n\nDo NOT assume it's an LOE. Ask first.`;
                 } else {
                     roleContext += `\n\n**PENDING DOCUMENT**: The user has uploaded a file. Ask them what type of document it is: ID Document, Payslip, Bank Statement, Tax Certificate, or Other. Then call save_document with the doc_type.`;
                 }
@@ -735,7 +736,7 @@ export class OpenAIService {
 
             // Filter tools by role
             const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'opt_out_whatsapp', 'refer_friend', 'save_document'];
-            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field'];
+            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field'];
             const leadTools = ['save_document'];
             const unknownTools = ['verify_identity'];
 
@@ -781,11 +782,16 @@ export class OpenAIService {
                 console.log(`[OpenAI] LOE pending review — restricted tool surface from ${before} to ${availableTools.length} tools`);
             } else if (!pendingLoeData && entityType === 'user' && phoneNumber && hasPendingUpload(phoneNumber) && availableTools) {
                 const allowedDuringUpload = new Set([
+                    // LOE path (targets a Lead)
                     'search_lead_by_name',
                     'get_my_leads',
                     'upload_letter_of_engagement',
                     'create_lead',
                     'get_industries',
+                    // Generic document path (targets a Client)
+                    'save_document',
+                    'search_contact_by_name',
+                    'get_my_clients',
                 ]);
                 const before = availableTools.length;
                 availableTools = availableTools.filter(t => allowedDuringUpload.has((t as any).function.name));
@@ -1796,22 +1802,33 @@ export class OpenAIService {
                             functionResponse = await handleSendInvoicePdf(toolCall);
                         } else if (functionName === 'save_document') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            if (entityType === 'user') {
-                                // Staff have no save_document path — the only staff
-                                // upload is upload_letter_of_engagement. Reject defensively.
-                                functionResponse = JSON.stringify({ status: "error", message: "Staff cannot use save_document. Use upload_letter_of_engagement to attach a signed LOE to a lead." });
-                            } else if (!phoneNumber || !hasPendingUpload(phoneNumber)) {
+                            if (!phoneNumber || !hasPendingUpload(phoneNumber)) {
                                 functionResponse = JSON.stringify({ status: "error", message: "No pending document upload found. Ask the user to upload a file first." });
                             } else {
                                 let targetEntity: any = null;
-                                if (entityType === 'client' && contactId) {
+                                if (entityType === 'user' && args.client) {
+                                    // Staff uploading on behalf of a client
+                                    const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                                    const clientInput = args.client.trim();
+                                    if (guidRegex.test(clientInput)) {
+                                        targetEntity = { id: clientInput, type: 'client' };
+                                    } else {
+                                        const byPhone = await dynamicsService.getContactByPhone(clientInput);
+                                        if (byPhone?.type === 'client') {
+                                            targetEntity = { id: byPhone.id, type: 'client' };
+                                        } else {
+                                            const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
+                                            if (byName.length > 0) targetEntity = { id: byName[0].contactid, type: 'client' };
+                                        }
+                                    }
+                                } else if (entityType === 'client' && contactId) {
                                     targetEntity = { id: contactId, type: 'client' };
                                 } else if (entityType === 'lead' && contactId) {
                                     targetEntity = { id: contactId, type: 'lead' };
                                 }
 
                                 if (!targetEntity) {
-                                    functionResponse = JSON.stringify({ status: "error", message: "Could not determine which record to attach the document to." });
+                                    functionResponse = JSON.stringify({ status: "error", message: "Could not determine which record to attach the document to. For staff, provide a client name or phone." });
                                 } else {
                                     const result = await savePendingUpload(phoneNumber, args.doc_type, targetEntity);
                                     if (result.success) {
