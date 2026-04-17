@@ -3,48 +3,56 @@ import { openAIService } from '../services/openai.service';
 import { metaWhatsAppService } from '../services/meta.service';
 import { dynamicsService } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
-import { sendMessage } from '../services/clickatell.service';
+import { stagePendingUpload } from '../services/pendingUpload.service';
 
 const SIGN_UP_GREETING = `👋 Hi there! It looks like you're not registered with TTT yet.\n\nTo get started, please sign up using the link below. Once registered, message us again and we'll be able to assist you with all your tax needs!`;
 const SIGN_UP_LINK = `https://www.taxtechnicianstoday.co.za/sign-up`;
 
-/**
- * Resolve a phone number to a CRM entity.
- * Order: Supabase cached session → Dynamics (contacts → leads → users) → null
- */
-async function resolveContact(phoneNumber: string): Promise<any | null> {
-    // 1. Check Supabase for previous sessions
+type ResolvedEntity = {
+    crmEntity: any | null;
+    staffRoleId: string | null;
+    permittedTools: string[];
+};
+
+async function resolveSender(phoneNumber: string): Promise<ResolvedEntity> {
+    let crmEntity: any = null;
+    let staffRoleId: string | null = null;
+    let permittedTools: string[] = [];
+
+    const staff = await supabaseService.findStaffByPhone(phoneNumber);
+    if (staff) {
+        crmEntity = { id: staff.dynamics_user_id, type: 'user', fullname: staff.full_name };
+        staffRoleId = staff.role_id;
+        permittedTools = staff.role_id ? await supabaseService.getPermittedTools(staff.role_id) : [];
+        console.log(`[Webhook] ${phoneNumber} matched staff "${staff.full_name}" role_id=${staff.role_id || 'NONE'} tools=${permittedTools.length}`);
+        return { crmEntity, staffRoleId, permittedTools };
+    }
+
     const previousSession = await supabaseService.findPreviousSession(phoneNumber);
     if (previousSession) {
         try {
-            const cached = await dynamicsService.getEntityById(previousSession.crm_id, previousSession.crm_type);
-            if (cached) {
-                console.log(`[Resolve] ${phoneNumber} identified from Supabase cache: ${cached.type} "${cached.fullname}"`);
-                return cached;
+            crmEntity = await dynamicsService.getEntityById(previousSession.crm_id, previousSession.crm_type);
+            if (crmEntity) {
+                console.log(`[Webhook] ${phoneNumber} identified from Supabase cache: ${crmEntity.type} "${crmEntity.fullname}"`);
+                return { crmEntity, staffRoleId, permittedTools };
             }
         } catch (e) {
-            console.warn('[Resolve] Supabase-cached CRM lookup failed:', (e as Error).message);
+            console.warn('[Webhook] Supabase-cached CRM lookup failed:', (e as Error).message);
         }
     }
 
-    // 2. Search Dynamics CRM (contacts → leads → users)
     try {
-        const entity = await dynamicsService.getContactByPhone(phoneNumber);
-        if (entity) {
-            console.log(`[Resolve] ${phoneNumber} found in Dynamics: ${entity.type} "${entity.fullname}"`);
-            return entity;
+        crmEntity = await dynamicsService.getContactByPhone(phoneNumber);
+        if (crmEntity) {
+            console.log(`[Webhook] ${phoneNumber} found in Dynamics: ${crmEntity.type} "${crmEntity.fullname}"`);
         }
     } catch (e) {
-        console.warn('[Resolve] Dynamics lookup failed:', (e as Error).message);
+        console.warn('[Webhook] Dynamics lookup failed:', (e as Error).message);
     }
 
-    return null;
+    return { crmEntity, staffRoleId, permittedTools };
 }
 
-/**
- * Verifies the webhook for Meta WhatsApp API.
- * This is required during the initial setup in the Meta App Dashboard.
- */
 export function verifyWebhook(req: Request, res: Response): void {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -65,156 +73,206 @@ export function verifyWebhook(req: Request, res: Response): void {
     }
 }
 
-/**
- * Handles incoming webhook events from Meta WhatsApp API AND Clickatell (Legacy).
- */
+type IncomingMessage = {
+    from: string;
+    text: string;
+    document?: { id: string; filename: string; mimeType: string };
+};
+
+function extractIncoming(metaMessage: any): IncomingMessage | null {
+    const from = metaMessage.from;
+    if (!from) return null;
+
+    if (metaMessage.type === 'text') {
+        return { from, text: metaMessage.text?.body || '' };
+    }
+
+    if (metaMessage.type === 'interactive') {
+        const interactive = metaMessage.interactive;
+        if (interactive?.type === 'button_reply') {
+            return { from, text: interactive.button_reply.title };
+        }
+        if (interactive?.type === 'list_reply') {
+            return { from, text: interactive.list_reply.title };
+        }
+        return null;
+    }
+
+    if (metaMessage.type === 'document') {
+        const doc = metaMessage.document;
+        return {
+            from,
+            text: doc?.caption || '',
+            document: {
+                id: doc.id,
+                filename: doc.filename || `document-${Date.now()}.pdf`,
+                mimeType: doc.mime_type || 'application/pdf',
+            },
+        };
+    }
+
+    if (metaMessage.type === 'image') {
+        const img = metaMessage.image;
+        return {
+            from,
+            text: img?.caption || '',
+            document: {
+                id: img.id,
+                filename: `image-${Date.now()}.${(img.mime_type || 'image/jpeg').split('/')[1] || 'jpg'}`,
+                mimeType: img.mime_type || 'image/jpeg',
+            },
+        };
+    }
+
+    return null;
+}
+
+async function processMessage(incoming: IncomingMessage): Promise<void> {
+    const { from, text, document } = incoming;
+
+    if (document) {
+        try {
+            const { buffer, mimeType } = await metaWhatsAppService.downloadMedia(document.id);
+            stagePendingUpload(from, document.filename, mimeType || document.mimeType, buffer);
+        } catch (e) {
+            console.error('[Webhook] Failed to download Meta media:', (e as Error).message);
+            await metaWhatsAppService.sendMessage(from, "Sorry, I couldn't download that file from WhatsApp. Please try sending it again.");
+            return;
+        }
+    }
+
+    const effectiveText = text || (document ? 'I just sent you a document.' : '');
+    if (!effectiveText && !document) {
+        console.log(`[Webhook] ${from} sent an unsupported/empty message — ignoring`);
+        return;
+    }
+
+    const { crmEntity, staffRoleId: initialStaffRoleId, permittedTools: initialTools } = await resolveSender(from);
+
+    if (!crmEntity) {
+        console.log(`[Webhook] ${from} not found — sending sign-up link`);
+        await metaWhatsAppService.sendMessage(from, SIGN_UP_GREETING);
+        await metaWhatsAppService.sendMessage(from, SIGN_UP_LINK);
+        return;
+    }
+
+    let staffRoleId = initialStaffRoleId;
+    let permittedTools = initialTools;
+
+    const session = await supabaseService.getOrCreateSession(
+        from,
+        crmEntity.id,
+        crmEntity.type,
+        staffRoleId,
+        permittedTools
+    );
+
+    if (crmEntity.type === 'user') {
+        if (session.role_id) staffRoleId = session.role_id;
+        if (session.permitted_tools && session.permitted_tools.length > 0) permittedTools = session.permitted_tools;
+    }
+
+    if (crmEntity.type === 'user' && permittedTools.length === 0) {
+        const msg = `Hi ${crmEntity.fullname || 'there'} — you don't currently have access to any bot features. Please contact your administrator to request access.`;
+        await supabaseService.saveMessage(session.id, 'user', effectiveText);
+        await supabaseService.saveMessage(session.id, 'assistant', msg);
+        await metaWhatsAppService.sendMessage(from, msg);
+        console.log(`[Webhook] No-access staff user "${crmEntity.fullname}" — declined.`);
+        return;
+    }
+
+    if (crmEntity.type === 'client' && !crmEntity.optIn) {
+        try {
+            await dynamicsService.updateWhatsAppOptIn(crmEntity.id, true);
+        } catch (e) {
+            console.warn('[Webhook] Opt-in update failed:', (e as Error).message);
+        }
+    }
+
+    try {
+        await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from);
+    } catch (e) {
+        console.warn('[Webhook] Incoming log failed:', (e as Error).message);
+    }
+
+    await supabaseService.saveMessage(session.id, 'user', effectiveText);
+
+    const history = await supabaseService.getHistory(session.id);
+    const historyWithoutCurrent = history.slice(0, -1);
+
+    console.log(`[Webhook] ${from} (${session.crm_type}) session=${session.id} history=${history.length}`);
+
+    const responseText = await openAIService.generateResponse(
+        effectiveText,
+        crmEntity.id,
+        from,
+        historyWithoutCurrent,
+        crmEntity.type,
+        permittedTools,
+        crmEntity.fullname,
+        session.id
+    );
+
+    await supabaseService.saveMessage(session.id, 'assistant', responseText);
+
+    await metaWhatsAppService.sendMessage(from, responseText);
+
+    openAIService.classifyIntent(effectiveText, responseText, session.current_intent)
+        .then(intent => {
+            console.log(`[Webhook] Intent: ${intent}`);
+            return supabaseService.updateSessionState(session.id, intent, null);
+        })
+        .catch(e => console.warn('[Webhook] Intent classification failed:', e.message));
+
+    try {
+        await dynamicsService.logMessage(crmEntity, responseText, 'Outgoing', from);
+    } catch (e) {
+        console.warn('[Webhook] Outgoing log failed:', (e as Error).message);
+    }
+
+    console.log(`[Webhook] Bot → ${from}: ${responseText.slice(0, 80)}...`);
+}
+
 export async function handleIncomingMessage(req: Request, res: Response): Promise<void> {
+    res.sendStatus(200);
+
     try {
         const body = req.body;
 
-        // ==========================================
-        // STRATEGY 1: META WHATSAPP CLOUD API
-        // ==========================================
-        if (body.object === 'whatsapp_business_account') {
-            // Loop over entries (usually just 1)
-            for (const entry of body.entry) {
-                // Loop over changes (usually just 1)
-                for (const change of entry.changes) {
-                    const value = change.value;
+        if (body.object !== 'whatsapp_business_account') {
+            console.warn('[Webhook] Non-Meta payload ignored:', JSON.stringify(body).slice(0, 200));
+            return;
+        }
 
-                    // Check if there are messages
-                    if (value.messages && value.messages.length > 0) {
-                        const message = value.messages[0];
+        for (const entry of body.entry || []) {
+            for (const change of entry.changes || []) {
+                const value = change.value;
+                const messages = value?.messages;
+                if (!messages || messages.length === 0) continue;
 
-                        // We only handle text messages for now
-                        if (message.type === 'text' || message.type === 'interactive') {
-                            const from = message.from; // Phone number (e.g. 27832852913)
+                for (const message of messages) {
+                    const incoming = extractIncoming(message);
+                    if (!incoming) {
+                        console.log(`[Webhook] Unsupported message type: ${message.type}`);
+                        continue;
+                    }
 
-                            // Extract message body based on type
-                            let messageBody = '';
-                            if (message.type === 'text') {
-                                messageBody = message.text.body;
-                            } else if (message.type === 'interactive') {
-                                const interactive = message.interactive;
-                                if (interactive.type === 'button_reply') {
-                                    messageBody = interactive.button_reply.title; // Or .id if prefer ID
-                                } else if (interactive.type === 'list_reply') {
-                                    messageBody = interactive.list_reply.title;
-                                }
-                            }
+                    console.log(`[Webhook] ${incoming.from} → ${incoming.document ? `[doc ${incoming.document.filename}]` : ''} ${incoming.text}`);
 
-                            console.log(`[Meta] Received message from ${from}: ${messageBody}`);
-
-                            // 1. Resolve contact: Supabase cache → Dynamics (contacts → leads → users)
-                            const crmEntity = await resolveContact(from);
-
-                            // 1.5 If not found anywhere, send sign-up link
-                            if (!crmEntity) {
-                                console.log(`[Meta] ${from} not found in Supabase or Dynamics — sending sign-up link`);
-                                await metaWhatsAppService.sendMessage(from, SIGN_UP_GREETING);
-                                await metaWhatsAppService.sendMessage(from, SIGN_UP_LINK);
-                                continue;
-                            }
-
-                            // 2. Auto opt-in for contacts
-                            if (crmEntity.type === 'client' && !crmEntity.optIn) {
-                                await dynamicsService.updateWhatsAppOptIn(crmEntity.id, true);
-                            }
-
-                            // 3. Supabase: Get or create session
-                            const session = await supabaseService.getOrCreateSession(from, crmEntity.id, crmEntity.type);
-
-                            // 4. Log Incoming Message to Dynamics
-                            await dynamicsService.logMessage(crmEntity, messageBody, 'Incoming', from);
-
-                            // 5. Generate AI Response
-                            const history = await dynamicsService.getRecentMessages(crmEntity.id);
-                            console.log(`[OpenAI] History length: ${history.length}`);
-
-                            const responseText = await openAIService.generateResponse(messageBody, crmEntity.id, from, history, crmEntity.type);
-
-                            // 6. Send Reply via Meta
-                            await metaWhatsAppService.sendMessage(from, responseText);
-
-                            // 7. Classify intent and update session (non-blocking)
-                            openAIService.classifyIntent(messageBody, responseText, session.current_intent)
-                                .then(intent => {
-                                    console.log(`[Meta] Intent: ${intent}`);
-                                    return supabaseService.updateSessionState(session.id, intent, null);
-                                })
-                                .catch(e => console.warn('[Meta] Intent classification failed:', e.message));
-
-                            // 8. Log Outgoing Message to Dynamics
-                            await dynamicsService.logMessage(crmEntity, responseText, 'Outgoing', from);
-                        } else {
-                            console.log(`[Meta] Received non-text message type: ${message.type}`);
+                    try {
+                        await processMessage(incoming);
+                    } catch (err: any) {
+                        console.error(`[Webhook] processMessage error for ${incoming.from}:`, err?.message || err);
+                        try {
+                            await metaWhatsAppService.sendMessage(incoming.from, "Sorry, something went wrong on our side. Please try again in a moment.");
+                        } catch {
+                            // swallow — avoid error loop
                         }
                     }
                 }
             }
-            res.sendStatus(200);
-            return;
         }
-
-        // ==========================================
-        // STRATEGY 2: CLICKATELL (LEGACY)
-        // ==========================================
-        if (body.content && body.from) {
-            console.log(`[Clickatell] Received message from ${body.from}: ${body.content}`);
-
-            const senderNumber = body.from;
-            const messageContent = body.content;
-
-            // 1. Resolve contact: Supabase cache → Dynamics (contacts → leads → users)
-            const crmEntity = await resolveContact(senderNumber);
-
-            // 1.5 If not found anywhere, send sign-up link
-            if (!crmEntity) {
-                console.log(`[Clickatell] ${senderNumber} not found in Supabase or Dynamics — sending sign-up link`);
-                await sendMessage(senderNumber, SIGN_UP_GREETING);
-                await sendMessage(senderNumber, SIGN_UP_LINK);
-                res.status(200).json({ success: true, message: 'Sign-up link sent' });
-                return;
-            }
-
-            // 2. Auto opt-in for contacts
-            if (crmEntity.type === 'client' && !crmEntity.optIn) {
-                await dynamicsService.updateWhatsAppOptIn(crmEntity.id, true);
-            }
-
-            // 3. Supabase: Get or create session
-            const session = await supabaseService.getOrCreateSession(senderNumber, crmEntity.id, crmEntity.type);
-
-            // 4. Log Incoming Message to Dynamics
-            await dynamicsService.logMessage(crmEntity, messageContent, 'Incoming', senderNumber);
-
-            // 5. Generate AI Response
-            const responseText = await openAIService.generateResponse(messageContent, crmEntity.id, senderNumber, [], crmEntity.type);
-
-            // 6. Send Reply via CLICKATELL
-            await sendMessage(senderNumber, responseText);
-
-            // 7. Classify intent and update session (non-blocking)
-            openAIService.classifyIntent(messageContent, responseText, session.current_intent)
-                .then(intent => {
-                    console.log(`[Clickatell] Intent: ${intent}`);
-                    return supabaseService.updateSessionState(session.id, intent, null);
-                })
-                .catch(e => console.warn('[Clickatell] Intent classification failed:', e.message));
-
-            // 8. Log Outgoing Message to Dynamics
-            await dynamicsService.logMessage(crmEntity, responseText, 'Outgoing', senderNumber);
-
-            res.status(200).json({ success: true, message: 'Processed via Clickatell' });
-            return;
-        }
-
-        // Unknown source
-        console.warn('Unknown webhook payload:', JSON.stringify(body));
-        res.sendStatus(404);
-
     } catch (error: any) {
-        console.error('Error handling webhook:', error);
-        res.sendStatus(500);
+        console.error('[Webhook] fatal error handling webhook:', error?.message || error);
     }
 }

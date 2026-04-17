@@ -7,7 +7,7 @@ import { metaWhatsAppService } from './meta.service';
 import { mistralService } from './mistral.service';
 import { loeExtractorService } from './loe-extractor.service';
 import { supabaseService } from './supabase.service';
-import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from '../routes/upload.route';
+import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from './pendingUpload.service';
 
 dotenv.config();
 

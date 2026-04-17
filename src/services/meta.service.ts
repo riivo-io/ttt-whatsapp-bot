@@ -7,7 +7,7 @@ dotenv.config();
 export class MetaWhatsAppService {
     private token: string;
     private phoneNumberId: string;
-    private baseUrl: string = 'https://graph.facebook.com/v19.0';
+    private baseUrl: string = 'https://graph.facebook.com/v22.0';
 
     constructor() {
         this.token = process.env.META_WHATSAPP_TOKEN || '';
@@ -175,6 +175,29 @@ export class MetaWhatsAppService {
             console.error('[Meta WhatsApp] Failed to send document:', errMsg);
             return { delivered: false, dryRun: false, error: errMsg };
         }
+    }
+
+    async downloadMedia(mediaId: string): Promise<{ buffer: Buffer; mimeType: string }> {
+        if (!this.token) {
+            throw new Error('Cannot download media: META_WHATSAPP_TOKEN missing');
+        }
+
+        const metaRes = await axios.get(`${this.baseUrl}/${mediaId}`, {
+            headers: { 'Authorization': `Bearer ${this.token}` },
+        });
+
+        const downloadUrl: string | undefined = metaRes.data?.url;
+        const mimeType: string = metaRes.data?.mime_type || 'application/octet-stream';
+        if (!downloadUrl) throw new Error('Meta media lookup returned no url');
+
+        const fileRes = await axios.get(downloadUrl, {
+            headers: { 'Authorization': `Bearer ${this.token}` },
+            responseType: 'arraybuffer',
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+        });
+
+        return { buffer: Buffer.from(fileRes.data), mimeType };
     }
 
     async sendListMessage(to: string, text: string, buttonText: string, sections: { title: string; rows: { id: string; title: string; description?: string }[] }[]): Promise<void> {
