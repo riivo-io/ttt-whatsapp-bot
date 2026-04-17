@@ -4,6 +4,11 @@ import { metaWhatsAppService } from '../services/meta.service';
 import { dynamicsService } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
 import { stagePendingUpload } from '../services/pendingUpload.service';
+import {
+    caseService,
+    CASE_FEEDBACK_BUTTON_YES,
+    CASE_FEEDBACK_BUTTON_NO,
+} from '../services/case.service';
 
 const SIGN_UP_GREETING = `👋 Hi there! It looks like you're not registered with TTT yet.\n\nTo get started, please sign up using the link below. Once registered, message us again and we'll be able to assist you with all your tax needs!`;
 const SIGN_UP_LINK = `https://www.taxtechnicianstoday.co.za/sign-up`;
@@ -197,25 +202,103 @@ async function processMessage(incoming: IncomingMessage): Promise<void> {
 
     await supabaseService.saveMessage(session.id, 'user', effectiveText);
 
+    // Fire-and-forget timeout sweep on every client inbound. Safety net between
+    // daily cron runs — cheap UPDATE, idempotent.
+    if (crmEntity.type === 'client') {
+        caseService.handleTimeout().catch(e => console.warn('[Webhook] timeout sweep:', e.message));
+    }
+
+    // Feedback routing: if this session is waiting on feedback for a bot answer,
+    // and the inbound looks like yes/no, close the loop without invoking the AI.
+    const pendingCaseId = (session as any).pending_case_id || null;
+    if (crmEntity.type === 'client' && pendingCaseId) {
+        const feedback = caseService.detectFeedback(effectiveText);
+        if (feedback) {
+            await caseService.handleFeedback(pendingCaseId, feedback);
+            await supabaseService.setSessionPendingCase(session.id, null);
+
+            const ack = feedback === 'confirmed'
+                ? "Great — glad that helped. 🙌 Message me again any time."
+                : "Thanks for letting me know. I've flagged this for a consultant to follow up.";
+            await supabaseService.saveMessage(session.id, 'assistant', ack);
+            await metaWhatsAppService.sendMessage(from, ack);
+            try {
+                await dynamicsService.logMessage(crmEntity, ack, 'Outgoing', from);
+            } catch (e) {
+                console.warn('[Webhook] Outgoing log failed:', (e as Error).message);
+            }
+            console.log(`[Webhook] Case ${pendingCaseId} feedback=${feedback}`);
+            return;
+        }
+        // Not a feedback reply — treat as a new query and clear the pending pointer.
+        await supabaseService.setSessionPendingCase(session.id, null);
+    }
+
     const history = await supabaseService.getHistory(session.id);
     const historyWithoutCurrent = history.slice(0, -1);
 
     console.log(`[Webhook] ${from} (${session.crm_type}) session=${session.id} history=${history.length}`);
 
-    const responseText = await openAIService.generateResponse(
-        effectiveText,
-        crmEntity.id,
-        from,
-        historyWithoutCurrent,
-        crmEntity.type,
-        permittedTools,
-        crmEntity.fullname,
-        session.id
-    );
+    // Kick off case creation + classification in parallel with the AI call so
+    // user-visible latency isn't doubled.
+    let casePromise: Promise<{ caseId: string | null; level: 'L1' | 'escalation' | null }> = Promise.resolve({ caseId: null, level: null });
+    if (crmEntity.type === 'client' && caseService.qualifyMessage(effectiveText)) {
+        casePromise = (async () => {
+            const created = await caseService.createCase({
+                sessionId: session.id,
+                contactId: crmEntity.id,
+                phoneNumber: from,
+                queryText: effectiveText,
+            });
+            if (!created) return { caseId: null, level: null };
+            const { level } = await caseService.classifyCase(created.id, effectiveText);
+            return { caseId: created.id, level };
+        })().catch(e => {
+            console.warn('[Webhook] case pipeline failed:', e.message);
+            return { caseId: null, level: null };
+        });
+    }
+
+    const [responseText, caseOutcome] = await Promise.all([
+        openAIService.generateResponse(
+            effectiveText,
+            crmEntity.id,
+            from,
+            historyWithoutCurrent,
+            crmEntity.type,
+            permittedTools,
+            crmEntity.fullname,
+            session.id
+        ),
+        casePromise,
+    ]);
 
     await supabaseService.saveMessage(session.id, 'assistant', responseText);
 
     await metaWhatsAppService.sendMessage(from, responseText);
+
+    // After the main answer lands, close the case loop.
+    if (caseOutcome.caseId) {
+        if (caseOutcome.level === 'L1') {
+            await caseService.recordBotResponse(caseOutcome.caseId, 'direct_answer');
+            // Send the feedback prompt and park pending_case_id on the session
+            try {
+                await metaWhatsAppService.sendReplyButtons(
+                    from,
+                    'Did that answer your question?',
+                    [
+                        { id: CASE_FEEDBACK_BUTTON_YES, title: 'Yes, thanks' },
+                        { id: CASE_FEEDBACK_BUTTON_NO, title: 'No, I still need help' },
+                    ]
+                );
+                await supabaseService.setSessionPendingCase(session.id, caseOutcome.caseId);
+            } catch (e: any) {
+                console.warn('[Webhook] feedback buttons failed:', e?.message || e);
+            }
+        } else if (caseOutcome.level === 'escalation') {
+            await supabaseService.updateCase(caseOutcome.caseId, { status: 'escalated' });
+        }
+    }
 
     openAIService.classifyIntent(effectiveText, responseText, session.current_intent)
         .then(intent => {
