@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { handleIncomingMessage, verifyWebhook } from './controllers/webhook.controller';
 import pdfRoute from './routes/pdf.route';
+import cronRoute from './routes/cron.route';
 
 dotenv.config();
 
@@ -20,6 +21,7 @@ app.get('/webhook', verifyWebhook);
 app.post('/webhook', handleIncomingMessage);
 
 app.use('/api/pdf', pdfRoute);
+app.use('/api/cron', cronRoute);
 
 const server = app.listen(PORT, () => {
     console.log(`🚀 TTT WhatsApp Tax Bot server running on port ${PORT}`);

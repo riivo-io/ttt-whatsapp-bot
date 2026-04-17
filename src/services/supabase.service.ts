@@ -17,6 +17,36 @@ interface Session {
     created_at: string;
     role_id: string | null;
     permitted_tools: string[];
+    pending_case_id: string | null;
+}
+
+export type CaseLevel = 'L1' | 'escalation';
+export type CaseStatus =
+    | 'created'
+    | 'classified'
+    | 'bot_responded'
+    | 'resolved_by_bot'
+    | 'resolved_by_bot_timeout'
+    | 'escalated';
+export type CaseFeedback = 'confirmed' | 'rejected' | 'timeout';
+
+export interface WhatsAppCaseRow {
+    id: string;
+    session_id: string;
+    crm_case_id: string | null;
+    contact_id: string;
+    phone_number: string;
+    query_text: string;
+    is_qualified: boolean;
+    level: CaseLevel | null;
+    level_topic: string | null;
+    status: CaseStatus;
+    resolution_method: string | null;
+    feedback_received: CaseFeedback | null;
+    resolved_at: string | null;
+    escalated_to: string | null;
+    created_at: string;
+    updated_at: string;
 }
 
 export interface StaffRecord {
@@ -526,6 +556,102 @@ class SupabaseService {
 
         if (error) {
             console.error('[Supabase] Failed to delete pending LOE:', error.message);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // WhatsApp case lifecycle
+    // -------------------------------------------------------------------------
+
+    async insertCase(params: {
+        sessionId: string;
+        contactId: string;
+        phoneNumber: string;
+        queryText: string;
+        isQualified?: boolean;
+    }): Promise<WhatsAppCaseRow | null> {
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .insert({
+                session_id: params.sessionId,
+                contact_id: params.contactId,
+                phone_number: params.phoneNumber,
+                query_text: params.queryText,
+                is_qualified: params.isQualified !== false,
+            })
+            .select('*')
+            .single();
+
+        if (error) {
+            console.error('[Supabase] Failed to insert case:', error.message);
+            return null;
+        }
+        console.log(`[Supabase] Created case ${data.id} for session ${params.sessionId}`);
+        return data as WhatsAppCaseRow;
+    }
+
+    async updateCase(caseId: string, updates: Partial<WhatsAppCaseRow>): Promise<boolean> {
+        const { error } = await this.client
+            .from('whatsapp_cases')
+            .update(updates)
+            .eq('id', caseId);
+
+        if (error) {
+            console.error(`[Supabase] Failed to update case ${caseId}:`, error.message);
+            return false;
+        }
+        return true;
+    }
+
+    async getCase(caseId: string): Promise<WhatsAppCaseRow | null> {
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .select('*')
+            .eq('id', caseId)
+            .maybeSingle();
+
+        if (error) {
+            console.error(`[Supabase] Failed to fetch case ${caseId}:`, error.message);
+            return null;
+        }
+        return (data as WhatsAppCaseRow) || null;
+    }
+
+    /**
+     * Idempotent sweep. Any case in 'bot_responded' whose updated_at is older
+     * than the threshold is auto-resolved as a bot-timeout. Safe to run repeatedly.
+     */
+    async sweepTimedOutCases(thresholdHours: number): Promise<number> {
+        const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000).toISOString();
+
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .update({
+                status: 'resolved_by_bot_timeout',
+                feedback_received: 'timeout',
+                resolved_at: new Date().toISOString(),
+            })
+            .eq('status', 'bot_responded')
+            .lt('updated_at', cutoff)
+            .select('id');
+
+        if (error) {
+            console.error('[Supabase] sweepTimedOutCases error:', error.message);
+            return 0;
+        }
+        const swept = (data || []).length;
+        if (swept > 0) console.log(`[Supabase] Swept ${swept} timed-out case(s)`);
+        return swept;
+    }
+
+    async setSessionPendingCase(sessionId: string, caseId: string | null): Promise<void> {
+        const { error } = await this.client
+            .from('sessions')
+            .update({ pending_case_id: caseId })
+            .eq('id', sessionId);
+
+        if (error) {
+            console.error('[Supabase] Failed to set pending_case_id:', error.message);
         }
     }
 }

@@ -10,6 +10,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test:webhook": "ts-node test/simulate-webhook.ts",
+    "test:case": "ts-node test/test-case-lifecycle.ts",
     "sync:users": "ts-node src/scripts/sync-users-from-dynamics.ts"
   },
   "dependencies": {
