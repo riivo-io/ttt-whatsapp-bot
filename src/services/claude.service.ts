@@ -525,6 +525,56 @@ export { RateLimitError, callAnthropicMessages };
 export type { RateLimitHeaders };
 
 /**
+ * Returns a fresh tools array with `cache_control: { type: 'ephemeral' }`
+ * on the LAST tool only. Anthropic treats the last cache-flagged tool as
+ * the end of the tools cache prefix — everything before it gets cached.
+ */
+function withToolCacheBreakpoint(tools: Anthropic.Tool[] | undefined): Anthropic.Tool[] | undefined {
+    if (!tools || tools.length === 0) return tools;
+    return tools.map((tool, i) =>
+        i === tools.length - 1
+            ? { ...tool, cache_control: { type: 'ephemeral' as const } }
+            : tool
+    );
+}
+
+/**
+ * Wraps the system prompt as a single text block with a cache breakpoint.
+ * Anthropic doesn't honour `cache_control` on a bare-string system, so the
+ * old top-level `cache_control` param was a no-op — see PRD §3.3.
+ */
+function systemAsCachedBlock(systemPrompt: string): Anthropic.TextBlockParam[] {
+    return [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+}
+
+/**
+ * Returns a fresh messages array with `cache_control: { type: 'ephemeral' }`
+ * on the LAST content block of messages[N-2]. N-1 would write a new cache
+ * entry every inbound (1.25× input cost); N-2 reuses the prior turn's cache.
+ *
+ * Bails (returns the original array unchanged) when messages.length < 2.
+ * String-form content on the target message is converted to a content-block
+ * array so cache_control has somewhere to attach.
+ */
+function withMessageCacheBreakpoint(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+    if (messages.length < 2) return messages;
+    const targetIdx = messages.length - 2;
+    return messages.map((msg, i) => {
+        if (i !== targetIdx) return msg;
+        let blocks: any[];
+        if (typeof msg.content === 'string') {
+            blocks = [{ type: 'text', text: msg.content }];
+        } else {
+            blocks = msg.content.map(b => ({ ...b }));
+        }
+        if (blocks.length === 0) return msg;
+        const last = blocks[blocks.length - 1];
+        blocks[blocks.length - 1] = { ...last, cache_control: { type: 'ephemeral' } };
+        return { ...msg, content: blocks };
+    });
+}
+
+/**
  * Fire-and-forget usage logger. Never throws — pricing/logging must not break
  * a live conversation if Supabase is briefly unreachable.
  *
@@ -842,18 +892,23 @@ export class ClaudeService {
             const ownerFilter = entityType === 'user' ? contactId : undefined;
 
             // 1. First Call: Natural language or tool use
-            // Claude auto-caches the prefix (tools + system) when `cache_control`
-            // is set at the top level — repeated turns in the same session reuse
-            // the cached prefix at ~0.1x input cost.
+            // Three real cache breakpoints (PRD §3.3) — replaces the bogus
+            // top-level cache_control param which Anthropic silently ignores:
+            //   - last tool: caches the whole tools array
+            //   - system: caches the system prompt
+            //   - messages[N-2]: caches everything through the prior turn
+            // N-1 would write a new entry every inbound at 1.25× input cost.
+            const cachedTools = withToolCacheBreakpoint(
+                availableTools && availableTools.length > 0 ? availableTools : undefined
+            );
             const firstCall = await callAnthropicMessages(client, {
                 model: CLAUDE_MODEL,
                 max_tokens: CLAUDE_MAX_TOKENS,
-                system: systemPrompt,
-                messages: messages,
-                tools: availableTools && availableTools.length > 0 ? availableTools : undefined,
-                ...(availableTools && availableTools.length > 0 ? { tool_choice: { type: 'auto' as const } } : {}),
-                cache_control: { type: 'ephemeral' },
-            } as any);
+                system: systemAsCachedBlock(systemPrompt),
+                messages: withMessageCacheBreakpoint(messages),
+                tools: cachedTools,
+                ...(cachedTools ? { tool_choice: { type: 'auto' as const } } : {}),
+            });
             const completion = firstCall.message;
             logUsage(completion, 'main', sessionId, phoneNumber, entityType, firstCall.rateLimit);
 
@@ -2029,15 +2084,17 @@ export class ClaudeService {
                 // 3. Loop: keep processing tool calls until the AI returns a text-only response
                 const MAX_TOOL_ROUNDS = 5;
                 for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+                    const followUpTools = withToolCacheBreakpoint(
+                        availableTools && availableTools.length > 0 ? availableTools : undefined
+                    );
                     const followUpCall = await callAnthropicMessages(client, {
                         model: CLAUDE_MODEL,
                         max_tokens: CLAUDE_MAX_TOKENS,
-                        system: systemPrompt,
-                        messages: messages,
-                        tools: availableTools && availableTools.length > 0 ? availableTools : undefined,
-                        ...(availableTools && availableTools.length > 0 ? { tool_choice: { type: 'auto' as const } } : {}),
-                        cache_control: { type: 'ephemeral' },
-                    } as any);
+                        system: systemAsCachedBlock(systemPrompt),
+                        messages: withMessageCacheBreakpoint(messages),
+                        tools: followUpTools,
+                        ...(followUpTools ? { tool_choice: { type: 'auto' as const } } : {}),
+                    });
                     const followUp = followUpCall.message;
                     logUsage(followUp, 'tool_loop', sessionId, phoneNumber, entityType, followUpCall.rateLimit);
 
