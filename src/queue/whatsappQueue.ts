@@ -124,15 +124,9 @@ export async function enqueueRetryAfterRateLimit(
     await queue.add('inbound', payload, opts);
 }
 
-/**
- * Extract the retry attempt number from a BullMQ jobId. Bare `wamid.xxx`
- * returns 0 (the first run, no retries yet). `wamid.xxx:retry:N` returns N.
- */
-export function parseRetryAttempt(jobId: string | undefined): number {
-    if (!jobId) return 0;
-    const match = jobId.match(/:retry:(\d+)$/);
-    return match ? parseInt(match[1], 10) : 0;
-}
+// Pure helper lives in src/utils/jobIdRetry so smoke tests can import it
+// without pulling in BullMQ + ioredis transitively.
+export { parseRetryAttempt } from '../utils/jobIdRetry';
 
 export async function closeProducerQueues(): Promise<void> {
     if (producerQueues) {
