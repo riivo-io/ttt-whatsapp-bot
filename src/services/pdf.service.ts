@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit';
+console.log('[boot] pdf.service: pdfkit loaded');
 
 export interface InvoiceData {
     // Invoice Header
@@ -252,7 +253,7 @@ export const pdfService = new PDFService();
 /**
  * Map a Dynamics invoice record (from getInvoiceByNumber) into the InvoiceData
  * shape the PDF renderer expects. Extracted here so the /api/pdf/invoice route
- * and the OpenAI tool handlers share one definition — otherwise adding a
+ * and the Claude tool handlers share one definition — otherwise adding a
  * rendered field means updating two places and one will inevitably drift.
  */
 export function mapInvoiceToInvoiceData(invoice: any): InvoiceData {

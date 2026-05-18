@@ -1,0 +1,17 @@
+{
+  "watch": ["src"],
+  "ext": "ts,json",
+  "ignore": [
+    "node_modules",
+    "dist",
+    ".claude",
+    "docs",
+    "test",
+    "web",
+    "supabase",
+    "convex",
+    "**/*.test.ts"
+  ],
+  "exec": "tsx src/server.ts",
+  "delay": "500"
+}

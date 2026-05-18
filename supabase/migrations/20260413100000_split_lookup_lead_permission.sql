@@ -13,7 +13,7 @@
 --   Some Access → disabled (pending business sign-off)
 --   No Access   → disabled
 --
--- The application code (STAFF_TOOL_PERMISSIONS in openai.service.ts) is updated
+-- The application code (STAFF_TOOL_PERMISSIONS in claude.service.ts) is updated
 -- in the same change to map lead-lookup tools to this new key.
 -- =============================================================================
 

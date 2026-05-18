@@ -1,10 +1,17 @@
+console.log('[boot] dynamics.service: before axios');
 import axios from 'axios';
+console.log('[boot] dynamics.service: before msal');
 import * as msal from '@azure/msal-node';
+console.log('[boot] dynamics.service: before dotenv');
 import dotenv from 'dotenv';
+console.log('[boot] dynamics.service: before crm types');
 import { CrmEntity } from '../types/crm.types';
+console.log('[boot] dynamics.service: before supabase');
 import { supabaseService } from './supabase.service';
+import { PRESEASON_SELECT_FIELDS } from '../utils/preseasonDocTypes';
+console.log('[boot] dynamics.service: imports done');
 // mistralService and loeExtractorService are no longer called from dynamics.service
-// — OCR + extraction now happen in the openai.service handler, and confirmed
+// — OCR + extraction now happen in the claude.service handler, and confirmed
 // fields are passed to writeLoeFieldsToLead as plain values.
 
 dotenv.config();
@@ -23,6 +30,65 @@ const AUDIT_FIELDS = ['ttt_ai_triggered_by', 'ttt_ai_model', 'ttt_ai_generated_a
 // Engagement has been received. Schema name in Dynamics is riivo_LoEReceived;
 // the Web API uses the lowercased logical name.
 const LEAD_LOE_RECEIVED_FIELD = 'riivo_loereceived';
+
+// Boolean field on the new_lead entity indicating the lead has completed the
+// SARS eFiling shared-access OTP. Staff-flipped manually for now.
+const LEAD_OTP_COMPLETED_FIELD = 'riivo_efilingotpcompleted';
+
+// `riivo_leadtype` optionset value for the Tax service track. Leads on this
+// track must complete BOTH the LoE upload and the SARS OTP gate before
+// converting to a contact. Other tracks (Accounting, Insurance, FP) only
+// gate on the LoE.
+export const LEAD_TYPE_TAX = 100000000;
+
+// riivo_request option-set values. statecode is the built-in Dynamics state
+// field (0 = Active, 1 = Inactive). The integer values below mirror what was
+// configured in the Power Apps maker for this environment.
+export const REQUEST_STATE = {
+    ACTIVE: 0,
+    INACTIVE: 1,
+} as const;
+
+export const REQUEST_STATUSCODE = {
+    // Active
+    NEW: 1,
+    AWAITING_FEEDBACK: 463630001,
+    IN_PROGRESS: 463630002,
+    CLASSIFIED: 463630004,
+    BOT_ANSWERED: 463630005,
+    ESCALATED: 463630006,
+    // Inactive
+    RESOLVED_BY_BOT: 2,
+    CLOSED: 463630003,
+    RESOLVED_TIMEOUT: 463630007,
+    RESOLVED_BY_STAFF: 463630008,
+} as const;
+
+// riivo_resolutionmethod option set
+export const RESOLUTION_METHOD = {
+    AUTO_DIRECT_ANSWER: 463630000,
+    AUTO_TOOL_CALL: 463630001,
+    FEEDBACK_CONFIRMED: 463630002,
+    TIMEOUT_ASSUMED_RESOLVED: 463630003,
+    STAFF_RESOLVED: 463630004,
+    NOT_RESOLVED_ESCALATED: 463630005,
+} as const;
+
+// riivo_clientfeedback option set
+export const CLIENT_FEEDBACK = {
+    CONFIRMED: 463630000,
+    REJECTED: 463630001,
+    NO_RESPONSE_TIMEOUT: 463630002,
+    NOT_ASKED: 463630003,
+} as const;
+
+// riivo_classificationlevel option set
+export const CLASSIFICATION_LEVEL = {
+    L1: 463630000,
+    L2: 463630001,
+    L3: 463630002,
+    ESCALATION: 463630003,
+} as const;
 
 export class DynamicsService {
     private cca: msal.ConfidentialClientApplication;
@@ -83,7 +149,7 @@ export class DynamicsService {
         return {
             ...payload,
             ttt_ai_triggered_by: triggeredBy,
-            ttt_ai_model: 'gpt-4o-mini',
+            ttt_ai_model: 'claude-opus-4-7',
             ttt_ai_generated_at: new Date().toISOString(),
         };
     }
@@ -311,6 +377,96 @@ export class DynamicsService {
         );
     }
 
+    /**
+     * Active tax cases for a client with all fields the FAQ bot needs in
+     * one shot — refund, audit date, stage, year, owner. Filtered to
+     * statecode=Active. Annotation headers are included via getList() so
+     * formatted OptionSet labels come along for free.
+     */
+    async getActiveTaxCases(contactId: string): Promise<any[]> {
+        return this.getList(
+            'new_cases',
+            `_ttt_clientname_value eq ${contactId} and statecode eq 0`,
+            [
+                'new_caseid',
+                'new_name',
+                'icon_caseprocess',
+                'icon_casestage',
+                'ttt_taxyear',
+                'riivo_potentialrefund',
+                'riivo_dateplacedonaudit',
+                'statecode',
+                'createdon',
+                '_ownerid_value',
+            ]
+        );
+    }
+
+    /**
+     * Active preseason documentation records for a client. One record per
+     * tax year is the expected pattern. Caller can filter to a specific
+     * year afterwards. Selects every per-type doc field so the bot can
+     * compute outstanding + received lists from a single read.
+     */
+    async getPreseasonDocsForClient(contactId: string): Promise<any[]> {
+        return this.getList(
+            'riivo_preseasondocumentations',
+            `_riivo_customer_value eq ${contactId} and statecode eq 0`,
+            [...PRESEASON_SELECT_FIELDS]
+        );
+    }
+
+    /**
+     * Per-document rows uploaded for a case. These flow in from the email
+     * Power Automate flow (and, post-migration, from the WhatsApp bot's
+     * dual-write path). Annotation headers give us the human-readable
+     * document type label without a second lookup. Uses an inline query
+     * (not getList) because the FAQ bot needs the full doc list per case,
+     * not the default $top=5.
+     */
+    async getTaxSubmissionDocsByCase(caseId: string): Promise<any[]> {
+        return this.querySubmissionDocs(`_riivo_case_value eq ${caseId} and statecode eq 0`);
+    }
+
+    /**
+     * Per-document rows linked to a preseason record. Requires the
+     * `_riivo_preseasondoc_value` lookup added per the CRM spec — until
+     * the admin creates it Dynamics will respond with an error which the
+     * inline query swallows. Safe to ship the bot before the schema
+     * change lands.
+     */
+    async getTaxSubmissionDocsByPreseason(preseasonId: string): Promise<any[]> {
+        return this.querySubmissionDocs(`_riivo_preseasondoc_value eq ${preseasonId} and statecode eq 0`);
+    }
+
+    private async querySubmissionDocs(filter: string): Promise<any[]> {
+        const token = await this.getToken();
+        const selectFields = [
+            'riivo_taxsubmissionsdocumentsid',
+            'riivo_taxsubmissionsdocument',
+            '_riivo_documenttype_value',
+            'riivo_filereference',
+            'riivo_documentnotes',
+            'createdon',
+        ];
+        try {
+            const url = `${this.baseUrl}/api/data/v9.2/riivo_taxsubmissionsdocumentses?$filter=${encodeURIComponent(filter)}&$select=${selectFields.join(',')}&$orderby=createdon desc&$top=100`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                    'Prefer': 'odata.include-annotations="*"',
+                },
+            });
+            return response.data?.value || [];
+        } catch (error: any) {
+            console.warn(`[Dynamics CRM] querySubmissionDocs(${filter}) failed:`, error?.response?.data?.error?.message || error.message);
+            return [];
+        }
+    }
+
     async getStaffCases(userId: string): Promise<any[]> {
         return this.getList(
             'new_cases',
@@ -321,20 +477,23 @@ export class DynamicsService {
 
     async getContactByPhone(phoneNumber: string): Promise<any | null> {
         // Search ALL tables in parallel to detect duplicates and pick the right role
+        const contactsFilter = this.phoneOrFilter('mobilephone', phoneNumber);
+        const leadsFilter = this.phoneOrFilter('ttt_mobilephone', phoneNumber);
+        const usersFilter = this.phoneOrFilter('mobilephone', phoneNumber);
         const [contact, lead, user] = await Promise.all([
             this.searchEntity(
                 'contacts',
-                `mobilephone eq '${phoneNumber}' and statecode eq 0`,
+                `(${contactsFilter}) and statecode eq 0`,
                 ['contactid', 'fullname', 'riivo_whatsappoptinout']
             ),
             this.searchEntity(
                 'new_leads',
-                `ttt_mobilephone eq '${phoneNumber}' and statecode eq 0`,
-                ['new_leadid', 'ttt_firstname', 'ttt_lastname']
+                `(${leadsFilter}) and statecode eq 0`,
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             ),
             this.searchEntity(
                 'systemusers',
-                `mobilephone eq '${phoneNumber}'`,
+                usersFilter,
                 ['systemuserid', 'fullname']
             ),
         ]);
@@ -372,7 +531,82 @@ export class DynamicsService {
             return {
                 id: lead.new_leadid,
                 type: 'lead',
-                fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim()
+                fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
+                otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
+                leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
+            };
+        }
+
+        return null;
+    }
+
+    /**
+     * Look up by email across contacts, leads, and systemusers — used by the
+     * email-relay flow (TTT staff forwards a client email to tina-bot@; we
+     * need to find that client's WhatsApp number).
+     *
+     * Same priority as getContactByPhone: user > client > lead. Returns the
+     * mobile number alongside the entity so the caller doesn't need a second
+     * round-trip. Returns null if no match.
+     */
+    async getEntityByEmail(email: string): Promise<any | null> {
+        const normalized = email.trim().toLowerCase();
+        if (!normalized) return null;
+
+        const odataEmail = normalized.replace(/'/g, "''");
+        const [contact, lead, user] = await Promise.all([
+            this.searchEntity(
+                'contacts',
+                `emailaddress1 eq '${odataEmail}' and statecode eq 0`,
+                ['contactid', 'fullname', 'mobilephone', 'emailaddress1', 'riivo_whatsappoptinout']
+            ),
+            this.searchEntity(
+                'new_leads',
+                `ttt_email eq '${odataEmail}' and statecode eq 0`,
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+            ),
+            this.searchEntity(
+                'systemusers',
+                `internalemailaddress eq '${odataEmail}' and isdisabled eq false`,
+                ['systemuserid', 'fullname', 'mobilephone', 'internalemailaddress']
+            ),
+        ]);
+
+        const matches = [contact ? 'client' : null, lead ? 'lead' : null, user ? 'user' : null].filter(Boolean);
+        if (matches.length > 1) {
+            console.warn(`[Dynamics CRM] Email ${normalized} found in MULTIPLE tables: ${matches.join(', ')}. Using priority: user > client > lead.`);
+        }
+
+        if (user) {
+            return {
+                id: user.systemuserid,
+                type: 'user',
+                fullname: user.fullname,
+                email: user.internalemailaddress || normalized,
+                mobilephone: user.mobilephone || null,
+            };
+        }
+        if (contact) {
+            return {
+                id: contact.contactid,
+                type: 'client',
+                fullname: contact.fullname,
+                email: contact.emailaddress1 || normalized,
+                mobilephone: contact.mobilephone || null,
+                optIn: contact.riivo_whatsappoptinout,
+            };
+        }
+        if (lead) {
+            return {
+                id: lead.new_leadid,
+                type: 'lead',
+                fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                email: lead.ttt_email || normalized,
+                mobilephone: lead.ttt_mobilephone || null,
+                loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
+                otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
+                leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
             };
         }
 
@@ -387,26 +621,54 @@ export class DynamicsService {
         if (type === 'client') {
             const contact = await this.searchEntity(
                 'contacts',
-                `mobilephone eq '${phoneNumber}' and statecode eq 0`,
+                `(${this.phoneOrFilter('mobilephone', phoneNumber)}) and statecode eq 0`,
                 ['contactid', 'fullname', 'riivo_whatsappoptinout']
             );
             if (contact) return { id: contact.contactid, type: 'client', fullname: contact.fullname, optIn: contact.riivo_whatsappoptinout };
         } else if (type === 'lead') {
             const lead = await this.searchEntity(
                 'new_leads',
-                `ttt_mobilephone eq '${phoneNumber}' and statecode eq 0`,
-                ['new_leadid', 'ttt_firstname', 'ttt_lastname']
+                `(${this.phoneOrFilter('ttt_mobilephone', phoneNumber)}) and statecode eq 0`,
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             );
-            if (lead) return { id: lead.new_leadid, type: 'lead', fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim() };
+            if (lead) return {
+                id: lead.new_leadid,
+                type: 'lead',
+                fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
+                otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
+                leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
+            };
         } else if (type === 'user') {
             const user = await this.searchEntity(
                 'systemusers',
-                `mobilephone eq '${phoneNumber}'`,
+                this.phoneOrFilter('mobilephone', phoneNumber),
                 ['systemuserid', 'fullname']
             );
             if (user) return { id: user.systemuserid, type: 'user', fullname: user.fullname };
         }
         return null;
+    }
+
+    /**
+     * Build an OData OR filter across SA phone-format variants so a lookup
+     * matches whether Dynamics stores the number as "0832852913",
+     * "+27832852913", or "27832852913".
+     */
+    private phoneOrFilter(field: string, phoneNumber: string): string {
+        const trimmed = phoneNumber.trim().replace(/\s+/g, '');
+        const variants = new Set<string>([trimmed]);
+        if (trimmed.startsWith('0') && trimmed.length === 10) {
+            variants.add('+27' + trimmed.slice(1));
+            variants.add('27' + trimmed.slice(1));
+        } else if (trimmed.startsWith('+27') && trimmed.length === 12) {
+            variants.add('0' + trimmed.slice(3));
+            variants.add('27' + trimmed.slice(1));
+        } else if (trimmed.startsWith('27') && trimmed.length === 11) {
+            variants.add('0' + trimmed.slice(2));
+            variants.add('+' + trimmed);
+        }
+        return Array.from(variants).map(v => `${field} eq '${v.replace(/'/g, "''")}'`).join(' or ');
     }
 
     /**
@@ -427,6 +689,70 @@ export class DynamicsService {
         return contact?._ownerid_value || null;
     }
 
+    /**
+     * Read the fields needed to personalise the required-documents list:
+     * the contact's SARS source codes (multi-select optionset, stored as the
+     * formatted label string) and industry name.
+     *
+     * Returns the 4-digit codes extracted from the formatted labels (e.g.
+     * "3601 - Salary; 3606 - Commission" → ['3601', '3606']). This is robust
+     * to whatever numeric optionset values Dataverse assigned.
+     */
+    async getContactTaxProfile(
+        contactId: string
+    ): Promise<{ sourceCodes: string[]; industryName: string | null } | null> {
+        const token = await this.getToken();
+        try {
+            const url = `${this.baseUrl}/api/data/v9.2/contacts(${contactId})?$select=contactid,riivo_sourcecode,_riivo_industryid_value`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"',
+                },
+            });
+            const c = response.data;
+            if (!c) return null;
+
+            const sourceLabel: string =
+                c['riivo_sourcecode@OData.Community.Display.V1.FormattedValue'] || '';
+            const sourceCodes = Array.from(
+                new Set((sourceLabel.match(/\b\d{4}\b/g) as string[] | null) || [])
+            );
+
+            const industryName: string | null =
+                c['_riivo_industryid_value@OData.Community.Display.V1.FormattedValue'] || null;
+
+            return { sourceCodes, industryName };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[CRM GET ✗] getContactTaxProfile(${contactId}) — ${errMsg}`);
+            return null;
+        }
+    }
+
+    /**
+     * Look up a systemuser (consultant) by id. Returns null if the id belongs
+     * to a Team rather than a User, or if the user is disabled/not found.
+     */
+    async getSystemUserById(
+        systemUserId: string
+    ): Promise<{ id: string; fullname: string; email: string | null } | null> {
+        const user = await this.searchEntity(
+            'systemusers',
+            `systemuserid eq ${systemUserId} and isdisabled eq false`,
+            ['systemuserid', 'fullname', 'internalemailaddress']
+        );
+        if (!user) return null;
+        return {
+            id: user.systemuserid,
+            fullname: user.fullname,
+            email: user.internalemailaddress || null,
+        };
+    }
+
     async getEntityById(crmId: string, crmType: string): Promise<any | null> {
         try {
             if (crmType === 'contact' || crmType === 'client') {
@@ -442,10 +768,17 @@ export class DynamicsService {
                 const lead = await this.searchEntity(
                     'new_leads',
                     `new_leadid eq ${crmId} and statecode eq 0`,
-                    ['new_leadid', 'ttt_firstname', 'ttt_lastname']
+                    ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
                 );
                 if (lead) {
-                    return { id: lead.new_leadid, type: 'lead', fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim() };
+                    return {
+                        id: lead.new_leadid,
+                        type: 'lead',
+                        fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                        loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
+                        otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
+                        leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
+                    };
                 }
             } else if (crmType === 'user') {
                 const user = await this.searchEntity(
@@ -611,6 +944,28 @@ export class DynamicsService {
             ['ttt_taxnumber']
         );
         return contact ? contact.ttt_taxnumber : null;
+    }
+
+    async getContactReferralCode(contactId: string): Promise<string | null> {
+        const contact = await this.searchEntity(
+            'contacts',
+            `contactid eq ${contactId}`,
+            ['riivo_referralcode']
+        );
+        return contact?.riivo_referralcode || null;
+    }
+
+    async getContactByReferralCode(code: string): Promise<{ id: string; fullname: string } | null> {
+        const trimmed = code.trim();
+        if (!trimmed) return null;
+        const safe = trimmed.replace(/'/g, "''");
+        const contact = await this.searchEntity(
+            'contacts',
+            `riivo_referralcode eq '${safe}' and statecode eq 0`,
+            ['contactid', 'fullname']
+        );
+        if (!contact?.contactid) return null;
+        return { id: contact.contactid, fullname: contact.fullname || '' };
     }
 
     async createLead(params: {
@@ -808,7 +1163,8 @@ export class DynamicsService {
         entity: any | null,
         messageContent: string,
         direction: 'Incoming' | 'Outgoing',
-        phoneNumber: string
+        phoneNumber: string,
+        requestId?: string | null
     ): Promise<void> {
         const directionValue = direction === 'Incoming' ? 463630000 : 463630001;
 
@@ -821,7 +1177,12 @@ export class DynamicsService {
             "riivo_timestamp": new Date().toISOString()
         };
 
-        if (entity) {
+        // Prefer threading under the request so staff can see the full
+        // conversation on the request record in CRM. Fall back to the
+        // contact/lead binding only when no request exists.
+        if (requestId) {
+            payload['regardingobjectid_riivo_request@odata.bind'] = `/riivo_requests(${requestId})`;
+        } else if (entity) {
             if (entity.type === 'client') {
                 payload['regardingobjectid_contact@odata.bind'] = `/contacts(${entity.id})`;
             } else if (entity.type === 'lead') {
@@ -831,7 +1192,7 @@ export class DynamicsService {
 
         try {
             await this.crmPost('riivo_whatsappcommunicationses', payload, entity?.id || phoneNumber);
-            console.log(`[Dynamics CRM] Logged ${direction} message for ${phoneNumber}`);
+            console.log(`[Dynamics CRM] Logged ${direction} message for ${phoneNumber}${requestId ? ` (request ${requestId})` : ''}`);
         } catch (error: any) {
             console.error('[Dynamics CRM] Logging failed:', error?.response?.data?.error?.message || error.message);
         }
@@ -1087,6 +1448,206 @@ export class DynamicsService {
     }
 
     /**
+     * Create a riivo_taxsubmissionsdocuments row for a WhatsApp-uploaded
+     * document. Matches the shape Power Automate writes for emailed docs:
+     *   - _riivo_client_value links to the contact
+     *   - riivo_taxsubmissionsdocument (primary name) carries the canonical
+     *     doc-type label string (since _riivo_documenttype_value lookup is
+     *     unused today by both Power Automate and this bot)
+     *   - riivo_filereference holds the SharePoint webUrl
+     *   - riivo_taxyear is a plain Whole Number (e.g. 2025)
+     *   - riivo_uploaded = true to match Power Automate's flag
+     *
+     * Tax-year inference: if the client has exactly one active preseason
+     * record, use that year; otherwise fall back to CURRENT_TAX_SEASON_YEAR.
+     *
+     * Case auto-link: if exactly one active case exists for the client at
+     * the inferred year, populate _riivo_case_value. Otherwise leave null
+     * (matches Power Automate's "consultant manually attaches" pattern).
+     *
+     * Preseason auto-link: gated by ENABLE_PRESEASON_DOC_LINK env flag —
+     * off by default until the admin ships the _riivo_preseasondoc_value
+     * lookup. Once on, the row links to the matching preseason record so
+     * the spec §3 status-reason recalc flow fires.
+     */
+    async createTaxSubmissionDocument(params: {
+        contactId: string;
+        canonicalDocType: string;
+        fileReferenceUrl: string;
+        documentNotes: string;
+        triggeredBy: string;
+    }): Promise<{ success: boolean; recordId?: string; taxYear: number; caseId?: string; preseasonId?: string; error?: string }> {
+        const inferred = await this.inferUploadContext(params.contactId);
+
+        const payload: any = {
+            'riivo_taxsubmissionsdocument': params.canonicalDocType,
+            'riivo_filereference': params.fileReferenceUrl,
+            'riivo_taxyear': inferred.taxYear,
+            'riivo_uploaded': true,
+            'riivo_documentnotes': params.documentNotes,
+            '_riivo_client_value@odata.bind': `/contacts(${params.contactId})`,
+        };
+
+        if (inferred.caseId) {
+            payload['_riivo_case_value@odata.bind'] = `/new_cases(${inferred.caseId})`;
+        }
+
+        if (inferred.preseasonId && process.env.ENABLE_PRESEASON_DOC_LINK === 'true') {
+            payload['_riivo_preseasondoc_value@odata.bind'] = `/riivo_preseasondocumentations(${inferred.preseasonId})`;
+        }
+
+        try {
+            const response = await this.crmPost('riivo_taxsubmissionsdocumentses', payload, params.triggeredBy);
+            const recordId = response.data?.riivo_taxsubmissionsdocumentsid;
+            console.log(`[Dynamics CRM] Created taxsubmissionsdocument ${recordId} for contact ${params.contactId}, year ${inferred.taxYear}, case ${inferred.caseId || 'none'}, preseason ${inferred.preseasonId || 'none'}`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'riivo_taxsubmissionsdocumentses',
+                crmRecordId: recordId,
+                action: 'create',
+                payload: {
+                    canonical_doc_type: params.canonicalDocType,
+                    tax_year: inferred.taxYear,
+                    case_id: inferred.caseId,
+                    preseason_id: inferred.preseasonId,
+                    file_reference: params.fileReferenceUrl,
+                },
+                triggeredBy: params.triggeredBy,
+            });
+            return { success: true, recordId, taxYear: inferred.taxYear, caseId: inferred.caseId, preseasonId: inferred.preseasonId };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[Dynamics CRM] Failed to create taxsubmissionsdocument for contact ${params.contactId}:`, errMsg);
+            return { success: false, taxYear: inferred.taxYear, error: errMsg };
+        }
+    }
+
+    /**
+     * Resolve tax-year + optional case-link + optional preseason-link from a
+     * contact's active preseason records and cases. Used by
+     * createTaxSubmissionDocument; pulled out so the inference is easy to
+     * unit-test independent of the CRM POST.
+     */
+    private async inferUploadContext(contactId: string): Promise<{
+        taxYear: number;
+        caseId?: string;
+        preseasonId?: string;
+    }> {
+        const fallbackYear = parseInt(process.env.CURRENT_TAX_SEASON_YEAR || '', 10);
+        const safeFallback = Number.isFinite(fallbackYear) ? fallbackYear : new Date().getFullYear() - 1;
+
+        const preseasonRecords = await this.getPreseasonDocsForClient(contactId);
+        let taxYear = safeFallback;
+        let preseasonId: string | undefined;
+
+        if (preseasonRecords.length === 1) {
+            const rec = preseasonRecords[0];
+            const yearLabel = rec?.['riivo_taxyear@OData.Community.Display.V1.FormattedValue'];
+            const parsed = parseInt(yearLabel, 10);
+            if (Number.isFinite(parsed)) taxYear = parsed;
+            preseasonId = rec?.riivo_preseasondocumentationid;
+        } else if (preseasonRecords.length > 1) {
+            const matching = preseasonRecords.find(r => {
+                const label = r?.['riivo_taxyear@OData.Community.Display.V1.FormattedValue'];
+                return parseInt(label, 10) === safeFallback;
+            });
+            if (matching) preseasonId = matching.riivo_preseasondocumentationid;
+        }
+
+        const activeCases = await this.getActiveTaxCases(contactId);
+        const yearStr = String(taxYear);
+        const yearMatchedCases = activeCases.filter(c => {
+            const label = c?.['ttt_taxyear@OData.Community.Display.V1.FormattedValue'];
+            return label === yearStr;
+        });
+        const caseId = yearMatchedCases.length === 1 ? yearMatchedCases[0].new_caseid : undefined;
+
+        return { taxYear, caseId, preseasonId };
+    }
+
+    /**
+     * Create a riivo_request record for a qualifying inbound WhatsApp case.
+     * Returns the new record's riivo_requestid, or null on failure.
+     *
+     * Option-set values:
+     *   riivo_channel   1 = WhatsApp
+     *   riivo_category  0 = Tax (default)
+     *   riivo_priority  1 = Medium (default)
+     */
+    async createRequest(params: {
+        contactId?: string;
+        leadId?: string;
+        contactType: 'client' | 'lead';
+        phoneNumber: string;
+        description: string;
+        category?: number;
+        priority?: number;
+    }): Promise<{ riivo_requestid: string } | null> {
+        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const targetId = params.contactType === 'client' ? params.contactId : params.leadId;
+        if (!targetId || !guidRegex.test(targetId)) {
+            console.error(`[Dynamics CRM] createRequest: invalid ${params.contactType} id: ${targetId}`);
+            return null;
+        }
+
+        const payload: any = {
+            riivo_clientmobilenumber: params.phoneNumber,
+            riivo_channel: 1,
+            riivo_category: params.category ?? 0,
+            riivo_priority: params.priority ?? 1,
+            riivo_description: params.description,
+            statecode: REQUEST_STATE.ACTIVE,
+            statuscode: REQUEST_STATUSCODE.NEW,
+        };
+
+        if (params.contactType === 'client') {
+            payload['riivo_Client@odata.bind'] = `/contacts(${targetId})`;
+        } else {
+            payload['riivo_Lead@odata.bind'] = `/new_leads(${targetId})`;
+        }
+
+        try {
+            const response = await this.crmPost('riivo_requests', payload, targetId);
+            const riivoRequestId: string | undefined = response.data?.riivo_requestid;
+            console.log(`[Dynamics CRM] Created riivo_request ${riivoRequestId} for ${params.contactType} ${targetId}`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'riivo_requests',
+                crmRecordId: riivoRequestId,
+                action: 'create',
+                payload,
+                triggeredBy: targetId,
+            });
+            return riivoRequestId ? { riivo_requestid: riivoRequestId } : null;
+        } catch (error: any) {
+            console.error('[Dynamics CRM] Failed to create riivo_request:', error?.response?.data?.error?.message || error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Patch a riivo_request record with state-transition fields (statecode,
+     * statuscode, resolution fields, classification, feedback, escalation).
+     * Best-effort — logs and swallows errors so a Dynamics outage doesn't break
+     * the Supabase-side case update that preceded it.
+     */
+    async updateRequest(requestId: string, patch: Record<string, any>): Promise<void> {
+        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!requestId || !guidRegex.test(requestId)) {
+            console.warn(`[Dynamics CRM] updateRequest: skipping invalid request id: ${requestId}`);
+            return;
+        }
+        try {
+            await this.crmPatch(
+                'riivo_requests',
+                `${this.baseUrl}/api/data/v9.2/riivo_requests(${requestId})`,
+                patch,
+                requestId
+            );
+        } catch (error: any) {
+            console.warn(`[Dynamics CRM] updateRequest ${requestId} failed:`, error?.response?.data?.error?.message || error.message);
+        }
+    }
+
+    /**
      * Create a callback request in Dynamics CRM (riivo_requests entity).
      * Power Automate will handle consultant assignment and notifications.
      */
@@ -1308,7 +1869,7 @@ export class DynamicsService {
             return messages.map(msg => ({
                 role: (msg.riivo_messagedirection === 463630000 ? 'user' : 'assistant') as 'user' | 'assistant',
                 content: msg.description || ''
-            })).reverse(); // Reverse to have oldest first for OpenAI context
+            })).reverse(); // Reverse to have oldest first for Claude context
 
         } catch (error: any) {
             console.error('[Dynamics CRM] Failed to fetch recent messages:', error?.response?.data?.error?.message || error.message);

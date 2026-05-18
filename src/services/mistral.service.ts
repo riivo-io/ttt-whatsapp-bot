@@ -2,7 +2,9 @@ import axios from 'axios';
 import FormData from 'form-data';
 import dotenv from 'dotenv';
 
+console.log('[boot] mistral.service: imports done');
 dotenv.config();
+console.log('[boot] mistral.service: dotenv configured');
 
 /**
  * Thin wrapper around Mistral's OCR API.

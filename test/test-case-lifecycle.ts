@@ -15,7 +15,7 @@
 // pure functions we're testing never call it.
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'http://test.local';
 process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'test';
-process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test';
+process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test';
 process.env.DYNAMICS_URL = process.env.DYNAMICS_URL || 'https://test.crm4.dynamics.com/';
 process.env.DYNAMICS_TENANT_ID = process.env.DYNAMICS_TENANT_ID || 'test';
 process.env.DYNAMICS_CLIENT_ID = process.env.DYNAMICS_CLIENT_ID || 'test';

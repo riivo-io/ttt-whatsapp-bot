@@ -1,32 +1,41 @@
 {
   "name": "ttt-whatsapp-tax-bot",
   "version": "1.0.0",
-  "description": "WhatsApp Tax Bot powered by OpenAI and Clickatell",
+  "description": "TTT WhatsApp Tax Bot — Meta WhatsApp Cloud API + Dynamics 365 + Supabase",
   "main": "dist/server.js",
   "scripts": {
-    "dev": "nodemon --exec ts-node src/server.ts",
+    "dev": "nodemon",
     "dev:web": "npm run dev --prefix web",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:web\"",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test:webhook": "ts-node test/simulate-webhook.ts",
-    "test:case": "ts-node test/test-case-lifecycle.ts",
-    "sync:users": "ts-node src/scripts/sync-users-from-dynamics.ts"
+    "worker": "node dist/worker.js",
+    "worker:dev": "tsx src/worker.ts",
+    "test:webhook": "tsx test/simulate-webhook.ts",
+    "test:case": "tsx test/test-case-lifecycle.ts",
+    "sync:users": "tsx src/scripts/sync-users-from-dynamics.ts",
+    "graph:bootstrap": "tsx src/scripts/create-graph-subscription.ts",
+    "kb:ingest-test": "tsx src/scripts/ingest-test-doc.ts",
+    "sync:kb": "tsx src/scripts/sync-knowledge-base.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
     "@azure/msal-node": "^3.8.5",
     "@supabase/supabase-js": "^2.100.0",
     "@types/form-data": "^2.2.1",
     "@types/pdfkit": "^0.17.4",
     "axios": "^1.13.2",
-    "convex": "^1.31.5",
+    "bullmq": "^5.34.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "form-data": "^4.0.5",
+    "ioredis": "^5.4.1",
+    "mammoth": "^1.12.0",
     "multer": "^2.0.2",
     "node-fetch": "^2.7.0",
-    "openai": "^6.16.0",
+    "openai": "^4.104.0",
+    "pdf-parse": "^1.1.4",
     "pdfkit": "^0.17.2"
   },
   "devDependencies": {
@@ -37,7 +46,7 @@
     "@types/node-fetch": "^2.6.13",
     "concurrently": "^9.1.0",
     "nodemon": "^3.0.2",
-    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.3.2"
   }
 }

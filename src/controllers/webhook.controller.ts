@@ -1,62 +1,17 @@
 import { Request, Response } from 'express';
-import { openAIService } from '../services/openai.service';
-import { metaWhatsAppService } from '../services/meta.service';
-import { dynamicsService } from '../services/dynamics.service';
-import { supabaseService } from '../services/supabase.service';
-import { stagePendingUpload } from '../services/pendingUpload.service';
-import {
-    caseService,
-    CASE_FEEDBACK_BUTTON_YES,
-    CASE_FEEDBACK_BUTTON_NO,
-} from '../services/case.service';
+import { extractIncoming } from '../workers/whatsappProcessor';
+import { enqueueInboundMessage } from '../queue/whatsappQueue';
+import { idempotencyService } from '../services/idempotency.service';
 
-const SIGN_UP_GREETING = `👋 Hi there! It looks like you're not registered with TTT yet.\n\nTo get started, please sign up using the link below. Once registered, message us again and we'll be able to assist you with all your tax needs!`;
-const SIGN_UP_LINK = `https://www.taxtechnicianstoday.co.za/sign-up`;
-
-type ResolvedEntity = {
-    crmEntity: any | null;
-    staffRoleId: string | null;
-    permittedTools: string[];
-};
-
-async function resolveSender(phoneNumber: string): Promise<ResolvedEntity> {
-    let crmEntity: any = null;
-    let staffRoleId: string | null = null;
-    let permittedTools: string[] = [];
-
-    const staff = await supabaseService.findStaffByPhone(phoneNumber);
-    if (staff) {
-        crmEntity = { id: staff.dynamics_user_id, type: 'user', fullname: staff.full_name };
-        staffRoleId = staff.role_id;
-        permittedTools = staff.role_id ? await supabaseService.getPermittedTools(staff.role_id) : [];
-        console.log(`[Webhook] ${phoneNumber} matched staff "${staff.full_name}" role_id=${staff.role_id || 'NONE'} tools=${permittedTools.length}`);
-        return { crmEntity, staffRoleId, permittedTools };
-    }
-
-    const previousSession = await supabaseService.findPreviousSession(phoneNumber);
-    if (previousSession) {
-        try {
-            crmEntity = await dynamicsService.getEntityById(previousSession.crm_id, previousSession.crm_type);
-            if (crmEntity) {
-                console.log(`[Webhook] ${phoneNumber} identified from Supabase cache: ${crmEntity.type} "${crmEntity.fullname}"`);
-                return { crmEntity, staffRoleId, permittedTools };
-            }
-        } catch (e) {
-            console.warn('[Webhook] Supabase-cached CRM lookup failed:', (e as Error).message);
-        }
-    }
-
-    try {
-        crmEntity = await dynamicsService.getContactByPhone(phoneNumber);
-        if (crmEntity) {
-            console.log(`[Webhook] ${phoneNumber} found in Dynamics: ${crmEntity.type} "${crmEntity.fullname}"`);
-        }
-    } catch (e) {
-        console.warn('[Webhook] Dynamics lookup failed:', (e as Error).message);
-    }
-
-    return { crmEntity, staffRoleId, permittedTools };
-}
+// Hard denylist — phones whose inbound messages we ack-and-drop without any
+// processing or reply. Comma-separated `WEBHOOK_BLOCKED_PHONES` env var (digits
+// only, no `+`). Used as an emergency stop for runaway test numbers.
+const BLOCKED_PHONES = new Set(
+    (process.env.WEBHOOK_BLOCKED_PHONES || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+);
 
 export function verifyWebhook(req: Request, res: Response): void {
     const mode = req.query['hub.mode'];
@@ -78,244 +33,17 @@ export function verifyWebhook(req: Request, res: Response): void {
     }
 }
 
-type IncomingMessage = {
-    from: string;
-    text: string;
-    document?: { id: string; filename: string; mimeType: string };
-};
-
-function extractIncoming(metaMessage: any): IncomingMessage | null {
-    const from = metaMessage.from;
-    if (!from) return null;
-
-    if (metaMessage.type === 'text') {
-        return { from, text: metaMessage.text?.body || '' };
-    }
-
-    if (metaMessage.type === 'interactive') {
-        const interactive = metaMessage.interactive;
-        if (interactive?.type === 'button_reply') {
-            return { from, text: interactive.button_reply.title };
-        }
-        if (interactive?.type === 'list_reply') {
-            return { from, text: interactive.list_reply.title };
-        }
-        return null;
-    }
-
-    if (metaMessage.type === 'document') {
-        const doc = metaMessage.document;
-        return {
-            from,
-            text: doc?.caption || '',
-            document: {
-                id: doc.id,
-                filename: doc.filename || `document-${Date.now()}.pdf`,
-                mimeType: doc.mime_type || 'application/pdf',
-            },
-        };
-    }
-
-    if (metaMessage.type === 'image') {
-        const img = metaMessage.image;
-        return {
-            from,
-            text: img?.caption || '',
-            document: {
-                id: img.id,
-                filename: `image-${Date.now()}.${(img.mime_type || 'image/jpeg').split('/')[1] || 'jpg'}`,
-                mimeType: img.mime_type || 'image/jpeg',
-            },
-        };
-    }
-
-    return null;
-}
-
-async function processMessage(incoming: IncomingMessage): Promise<void> {
-    const { from, text, document } = incoming;
-
-    if (document) {
-        try {
-            const { buffer, mimeType } = await metaWhatsAppService.downloadMedia(document.id);
-            stagePendingUpload(from, document.filename, mimeType || document.mimeType, buffer);
-        } catch (e) {
-            console.error('[Webhook] Failed to download Meta media:', (e as Error).message);
-            await metaWhatsAppService.sendMessage(from, "Sorry, I couldn't download that file from WhatsApp. Please try sending it again.");
-            return;
-        }
-    }
-
-    const effectiveText = text || (document ? 'I just sent you a document.' : '');
-    if (!effectiveText && !document) {
-        console.log(`[Webhook] ${from} sent an unsupported/empty message — ignoring`);
-        return;
-    }
-
-    const { crmEntity, staffRoleId: initialStaffRoleId, permittedTools: initialTools } = await resolveSender(from);
-
-    if (!crmEntity) {
-        console.log(`[Webhook] ${from} not found — sending sign-up link`);
-        await metaWhatsAppService.sendMessage(from, SIGN_UP_GREETING);
-        await metaWhatsAppService.sendMessage(from, SIGN_UP_LINK);
-        return;
-    }
-
-    let staffRoleId = initialStaffRoleId;
-    let permittedTools = initialTools;
-
-    const session = await supabaseService.getOrCreateSession(
-        from,
-        crmEntity.id,
-        crmEntity.type,
-        staffRoleId,
-        permittedTools
-    );
-
-    if (crmEntity.type === 'user') {
-        if (session.role_id) staffRoleId = session.role_id;
-        if (session.permitted_tools && session.permitted_tools.length > 0) permittedTools = session.permitted_tools;
-    }
-
-    if (crmEntity.type === 'user' && permittedTools.length === 0) {
-        const msg = `Hi ${crmEntity.fullname || 'there'} — you don't currently have access to any bot features. Please contact your administrator to request access.`;
-        await supabaseService.saveMessage(session.id, 'user', effectiveText);
-        await supabaseService.saveMessage(session.id, 'assistant', msg);
-        await metaWhatsAppService.sendMessage(from, msg);
-        console.log(`[Webhook] No-access staff user "${crmEntity.fullname}" — declined.`);
-        return;
-    }
-
-    if (crmEntity.type === 'client' && !crmEntity.optIn) {
-        try {
-            await dynamicsService.updateWhatsAppOptIn(crmEntity.id, true);
-        } catch (e) {
-            console.warn('[Webhook] Opt-in update failed:', (e as Error).message);
-        }
-    }
-
-    try {
-        await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from);
-    } catch (e) {
-        console.warn('[Webhook] Incoming log failed:', (e as Error).message);
-    }
-
-    await supabaseService.saveMessage(session.id, 'user', effectiveText);
-
-    // Fire-and-forget timeout sweep on every client inbound. Safety net between
-    // daily cron runs — cheap UPDATE, idempotent.
-    if (crmEntity.type === 'client') {
-        caseService.handleTimeout().catch(e => console.warn('[Webhook] timeout sweep:', e.message));
-    }
-
-    // Feedback routing: if this session is waiting on feedback for a bot answer,
-    // and the inbound looks like yes/no, close the loop without invoking the AI.
-    const pendingCaseId = (session as any).pending_case_id || null;
-    if (crmEntity.type === 'client' && pendingCaseId) {
-        const feedback = caseService.detectFeedback(effectiveText);
-        if (feedback) {
-            await caseService.handleFeedback(pendingCaseId, feedback);
-            await supabaseService.setSessionPendingCase(session.id, null);
-
-            const ack = feedback === 'confirmed'
-                ? "Great — glad that helped. 🙌 Message me again any time."
-                : "Thanks for letting me know. I've flagged this for a consultant to follow up.";
-            await supabaseService.saveMessage(session.id, 'assistant', ack);
-            await metaWhatsAppService.sendMessage(from, ack);
-            try {
-                await dynamicsService.logMessage(crmEntity, ack, 'Outgoing', from);
-            } catch (e) {
-                console.warn('[Webhook] Outgoing log failed:', (e as Error).message);
-            }
-            console.log(`[Webhook] Case ${pendingCaseId} feedback=${feedback}`);
-            return;
-        }
-        // Not a feedback reply — treat as a new query and clear the pending pointer.
-        await supabaseService.setSessionPendingCase(session.id, null);
-    }
-
-    const history = await supabaseService.getHistory(session.id);
-    const historyWithoutCurrent = history.slice(0, -1);
-
-    console.log(`[Webhook] ${from} (${session.crm_type}) session=${session.id} history=${history.length}`);
-
-    // Kick off case creation + classification in parallel with the AI call so
-    // user-visible latency isn't doubled.
-    let casePromise: Promise<{ caseId: string | null; level: 'L1' | 'escalation' | null }> = Promise.resolve({ caseId: null, level: null });
-    if (crmEntity.type === 'client' && caseService.qualifyMessage(effectiveText)) {
-        casePromise = (async () => {
-            const created = await caseService.createCase({
-                sessionId: session.id,
-                contactId: crmEntity.id,
-                phoneNumber: from,
-                queryText: effectiveText,
-            });
-            if (!created) return { caseId: null, level: null };
-            const { level } = await caseService.classifyCase(created.id, effectiveText);
-            return { caseId: created.id, level };
-        })().catch(e => {
-            console.warn('[Webhook] case pipeline failed:', e.message);
-            return { caseId: null, level: null };
-        });
-    }
-
-    const [responseText, caseOutcome] = await Promise.all([
-        openAIService.generateResponse(
-            effectiveText,
-            crmEntity.id,
-            from,
-            historyWithoutCurrent,
-            crmEntity.type,
-            permittedTools,
-            crmEntity.fullname,
-            session.id
-        ),
-        casePromise,
-    ]);
-
-    await supabaseService.saveMessage(session.id, 'assistant', responseText);
-
-    await metaWhatsAppService.sendMessage(from, responseText);
-
-    // After the main answer lands, close the case loop.
-    if (caseOutcome.caseId) {
-        if (caseOutcome.level === 'L1') {
-            await caseService.recordBotResponse(caseOutcome.caseId, 'direct_answer');
-            // Send the feedback prompt and park pending_case_id on the session
-            try {
-                await metaWhatsAppService.sendReplyButtons(
-                    from,
-                    'Did that answer your question?',
-                    [
-                        { id: CASE_FEEDBACK_BUTTON_YES, title: 'Yes, thanks' },
-                        { id: CASE_FEEDBACK_BUTTON_NO, title: 'No, I still need help' },
-                    ]
-                );
-                await supabaseService.setSessionPendingCase(session.id, caseOutcome.caseId);
-            } catch (e: any) {
-                console.warn('[Webhook] feedback buttons failed:', e?.message || e);
-            }
-        } else if (caseOutcome.level === 'escalation') {
-            await supabaseService.updateCase(caseOutcome.caseId, { status: 'escalated' });
-        }
-    }
-
-    openAIService.classifyIntent(effectiveText, responseText, session.current_intent)
-        .then(intent => {
-            console.log(`[Webhook] Intent: ${intent}`);
-            return supabaseService.updateSessionState(session.id, intent, null);
-        })
-        .catch(e => console.warn('[Webhook] Intent classification failed:', e.message));
-
-    try {
-        await dynamicsService.logMessage(crmEntity, responseText, 'Outgoing', from);
-    } catch (e) {
-        console.warn('[Webhook] Outgoing log failed:', (e as Error).message);
-    }
-
-    console.log(`[Webhook] Bot → ${from}: ${responseText.slice(0, 80)}...`);
-}
-
+/**
+ * Thin webhook ingester:
+ *
+ *   1. Ack Meta within 10s (we 200 immediately).
+ *   2. For each inbound message: parse, dedupe in Supabase, enqueue.
+ *   3. All Claude/Dynamics/Supabase work happens in the BullMQ worker process.
+ *
+ * Idempotency lives in `whatsapp_webhook_events` (Postgres unique key on
+ * Meta's `messages[].id`); the BullMQ jobId is also set to the same id so
+ * concurrent ingester replicas can't double-enqueue the same message.
+ */
 export async function handleIncomingMessage(req: Request, res: Response): Promise<void> {
     res.sendStatus(200);
 
@@ -333,6 +61,12 @@ export async function handleIncomingMessage(req: Request, res: Response): Promis
                 const messages = value?.messages;
                 if (!messages || messages.length === 0) continue;
 
+                // Phone number id of the WhatsApp number this inbound came in
+                // on. Threaded through to the worker so outbound replies route
+                // from the same number, even when multiple numbers are attached
+                // to the same WABA.
+                const inboundPhoneNumberId: string | undefined = value?.metadata?.phone_number_id;
+
                 for (const message of messages) {
                     const incoming = extractIncoming(message);
                     if (!incoming) {
@@ -340,17 +74,44 @@ export async function handleIncomingMessage(req: Request, res: Response): Promis
                         continue;
                     }
 
-                    console.log(`[Webhook] ${incoming.from} → ${incoming.document ? `[doc ${incoming.document.filename}]` : ''} ${incoming.text}`);
+                    if (BLOCKED_PHONES.has(incoming.from)) {
+                        console.log(`[Webhook] BLOCKED ${incoming.from} — dropping inbound (no reply)`);
+                        continue;
+                    }
+
+                    if (!message.id) {
+                        console.warn(`[Webhook] Inbound without messages[].id — cannot dedupe; dropping`);
+                        continue;
+                    }
+
+                    const claimed = await idempotencyService.claim(message.id, incoming.from);
+                    if (!claimed) {
+                        console.log(`[Webhook] Duplicate ${message.id} from ${incoming.from} — skipping`);
+                        continue;
+                    }
+
+                    console.log(
+                        `[Webhook] ${incoming.from} → [pid ${inboundPhoneNumberId || 'env'}] ${incoming.document ? `[doc ${incoming.document.filename}]` : ''} ${incoming.text}`
+                    );
 
                     try {
-                        await processMessage(incoming);
+                        await enqueueInboundMessage({
+                            metaMessageId: message.id,
+                            phone: incoming.from,
+                            phoneNumberId: inboundPhoneNumberId || null,
+                            receivedAt: Date.now(),
+                            rawMessage: message,
+                        });
                     } catch (err: any) {
-                        console.error(`[Webhook] processMessage error for ${incoming.from}:`, err?.message || err);
-                        try {
-                            await metaWhatsAppService.sendMessage(incoming.from, "Sorry, something went wrong on our side. Please try again in a moment.");
-                        } catch {
-                            // swallow — avoid error loop
-                        }
+                        console.error(
+                            `[Webhook] enqueue failed for ${message.id} (${incoming.from}):`,
+                            err?.message || err
+                        );
+                        // Don't surface the failure to Meta — we already 200'd. The
+                        // idempotency row is in place though, so a future Meta retry
+                        // would be silently dropped as a "duplicate". Catching this
+                        // failure end-to-end requires a queue-side audit; for now
+                        // it's an alert-worthy log line.
                     }
                 }
             }

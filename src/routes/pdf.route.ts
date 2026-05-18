@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { dynamicsService } from '../services/dynamics.service';
 import { pdfService, InvoiceData, mapInvoiceToInvoiceData } from '../services/pdf.service';
+console.log('[boot] pdf.route: imports done');
 
 const router = Router();
 
@@ -25,7 +26,7 @@ router.get('/invoice/:invoiceNumber', async (req: Request, res: Response): Promi
         }
 
         // Map Dynamics data to InvoiceData via the shared helper so /api/pdf
-        // and the OpenAI tool handlers can't drift apart when fields change.
+        // and the Claude tool handlers can't drift apart when fields change.
         const invoiceData: InvoiceData = mapInvoiceToInvoiceData(invoice);
 
         // Generate PDF
