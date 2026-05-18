@@ -72,7 +72,7 @@ class CaseService {
 
     private getAnthropic(): Anthropic {
         if (!this.anthropic) {
-            this.anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' });
+            this.anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '', maxRetries: 0 });
         }
         return this.anthropic;
     }

@@ -77,7 +77,7 @@ class LoeExtractorService {
 
     constructor() {
         if (process.env.ANTHROPIC_API_KEY) {
-            this.anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+            this.anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
         }
     }
 
