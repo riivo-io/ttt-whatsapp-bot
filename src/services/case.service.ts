@@ -1,6 +1,14 @@
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
-import { dynamicsService } from './dynamics.service';
+console.log('[boot] case.service: anthropic+dotenv loaded, loading dynamics');
+import {
+    dynamicsService,
+    REQUEST_STATE,
+    REQUEST_STATUSCODE,
+    RESOLUTION_METHOD,
+    CLIENT_FEEDBACK,
+    CLASSIFICATION_LEVEL,
+} from './dynamics.service';
 import { supabaseService, WhatsAppCaseRow, CaseLevel } from './supabase.service';
 
 dotenv.config();
@@ -16,23 +24,37 @@ dotenv.config();
  *
  * Q2 metrics (adoption + L1 auto-resolution) are computed off this table.
  *
- * The classifier currently uses OpenAI gpt-4o-mini as a lightweight model.
- * Once the Claude migration ships (Phase 1d), swap the internals of
- * `classifyCase` to call claude-haiku-4-5. The public API stays the same.
+ * The classifier runs on Claude with a single forced tool — this is the
+ * Anthropic-native pattern for reliable JSON output (no `response_format`
+ * equivalent; forcing a specific tool guarantees schema-shaped input in the
+ * response).
  */
 
 const FEEDBACK_TIMEOUT_HOURS = 12;
+const CLASSIFIER_MODEL = 'claude-haiku-4-5-20251001';
 
 export const CASE_FEEDBACK_BUTTON_YES = 'case_feedback_yes';
 export const CASE_FEEDBACK_BUTTON_NO = 'case_feedback_no';
 
 export const L1_TOPICS = [
-    'tax_season_dates',
+    // Tool-backed lookups the bot resolves directly
+    'invoice_query',
     'case_status',
+    'tax_number_lookup',
+    'account_details',
+    // Tax-season FAQ topics (each backed by a dedicated tool)
+    'refund_status',
+    'submission_status',
+    'required_documents',
+    'received_documents',
+    'audit_status',
+    // Knowledge-based topics the bot answers from general SA tax knowledge
+    'tax_season_dates',
     'home_office_requirements',
     'document_guidance',
     'basic_tax_structuring',
     'referral_enquiries',
+    'general_tax_question',
 ] as const;
 
 type L1Topic = typeof L1_TOPICS[number];
@@ -46,13 +68,13 @@ const NOISE_WORDS = new Set([
 const EMOJI_ONLY_RE = /^[\p{Emoji}\p{Emoji_Presentation}\p{Extended_Pictographic}\s]+$/u;
 
 class CaseService {
-    private openai: OpenAI | null = null;
+    private anthropic: Anthropic | null = null;
 
-    private getOpenAI(): OpenAI {
-        if (!this.openai) {
-            this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || '' });
+    private getAnthropic(): Anthropic {
+        if (!this.anthropic) {
+            this.anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' });
         }
-        return this.openai;
+        return this.anthropic;
     }
 
     /**
@@ -78,6 +100,7 @@ class CaseService {
     async createCase(params: {
         sessionId: string;
         contactId: string;
+        contactType: 'client' | 'lead';
         phoneNumber: string;
         queryText: string;
     }): Promise<WhatsAppCaseRow | null> {
@@ -89,19 +112,19 @@ class CaseService {
         });
         if (!row) return null;
 
-        // Mirror to Dynamics. Only do this when contactId is a GUID
-        // (clients identified in CRM); skip for non-client types.
+        // Mirror to Dynamics as a riivo_request record. Only when contactId is
+        // a GUID — applies to both clients (contacts table) and leads (new_leads table).
         const guidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         if (guidRe.test(params.contactId)) {
             try {
-                const description = params.queryText.slice(0, 500);
-                const dynRes: any = await dynamicsService.createCase(
-                    params.contactId,
-                    'Query',
-                    `[WhatsApp] ${description}`,
-                    'Medium'
-                );
-                const crmCaseId = dynRes?.new_caseid || null;
+                const dynRes = await dynamicsService.createRequest({
+                    contactId: params.contactType === 'client' ? params.contactId : undefined,
+                    leadId: params.contactType === 'lead' ? params.contactId : undefined,
+                    contactType: params.contactType,
+                    phoneNumber: params.phoneNumber,
+                    description: params.queryText.slice(0, 500),
+                });
+                const crmCaseId = dynRes?.riivo_requestid || null;
                 if (crmCaseId) {
                     await supabaseService.updateCase(row.id, { crm_case_id: crmCaseId });
                     row.crm_case_id = crmCaseId;
@@ -116,37 +139,70 @@ class CaseService {
 
     /**
      * Classify a case as L1 (bot can attempt resolution) or escalation.
-     * Uses a small JSON-mode call to gpt-4o-mini; swap to Claude Haiku
-     * once Phase 1 lands.
+     *
+     * Uses Claude with a single forced tool — Anthropic's recommended pattern
+     * for reliable JSON output. The tool is never actually "executed"; the tool
+     * call's `input` field is the structured response we want.
      */
     async classifyCase(caseId: string, queryText: string): Promise<{ level: CaseLevel; topic: string | null }> {
-        const prompt = `Classify the following client WhatsApp query.
+        const systemPrompt = `Classify the following client WhatsApp query.
 
-L1 topics the bot can handle without a human:
-- tax_season_dates: dates, deadlines, filing windows
+Default to "L1" (bot can handle). Only classify as "escalation" for queries
+that clearly require a human consultant — personal financial advice with
+real risk of getting it wrong, complaints, payment disputes, requests to
+change sensitive account details, or explicit asks to talk to a person.
+
+L1 topics — tool-backed lookups the bot answers directly from CRM data:
+- invoice_query: outstanding balance, invoice list, invoice details, "do I have any invoices"
 - case_status: "what's happening with my tax return / claim / case"
+- tax_number_lookup: the client asking for their own tax number
+- account_details: profile info, email, phone on file
+- refund_status: "what's my refund?", "how much will I get back?", refund amount or refund-issued questions
+- submission_status: "have you submitted me?", "did you file my return?"
+- required_documents: "what docs do you need?", "what's outstanding?", what to send
+- received_documents: "have you received my docs?", "what have you got from me?"
+- audit_status: "am I on audit?", verification, SARS reviewing the case
+
+L1 topics — general knowledge the bot answers without CRM lookups:
+- tax_season_dates: dates, deadlines, filing windows
 - home_office_requirements: documents / rules for home office tax deduction
 - document_guidance: which forms / documents to send in
-- basic_tax_structuring: simple tax-planning questions, not advice
+- basic_tax_structuring: simple tax-planning questions, not personal advice
 - referral_enquiries: how the referral programme works
+- general_tax_question: any other South African tax question answerable from general knowledge`;
 
-Anything else — personal advice, complex claims, complaints, payment disputes,
-staff requests — is "escalation".
-
-Reply with strict JSON of shape {"level": "L1" | "escalation", "topic": <one of the L1 topics above, or null>}.
-
-Query: """${queryText}"""`;
+        const recordTool: Anthropic.Tool = {
+            name: 'record_classification',
+            description: 'Record the classification of the client query. Always call this once per query.',
+            input_schema: {
+                type: 'object',
+                properties: {
+                    level: {
+                        type: 'string',
+                        enum: ['L1', 'escalation'],
+                        description: "'L1' if the bot can handle this; 'escalation' if it needs a human.",
+                    },
+                    topic: {
+                        type: 'string',
+                        enum: [...(L1_TOPICS as readonly string[]), 'none'],
+                        description: "For L1 queries, one of the L1 topics. Use 'none' for escalation.",
+                    },
+                },
+                required: ['level', 'topic'],
+            },
+        };
 
         try {
-            const res = await this.getOpenAI().chat.completions.create({
-                model: 'gpt-4o-mini',
-                messages: [{ role: 'user', content: prompt }],
-                response_format: { type: 'json_object' },
-                temperature: 0,
-                max_tokens: 80,
+            const res = await this.getAnthropic().messages.create({
+                model: CLASSIFIER_MODEL,
+                max_tokens: 200,
+                system: systemPrompt,
+                messages: [{ role: 'user', content: `Query: """${queryText}"""` }],
+                tools: [recordTool],
+                tool_choice: { type: 'tool', name: 'record_classification' },
             });
-            const content = res.choices[0]?.message?.content || '{}';
-            const parsed = JSON.parse(content);
+            const toolUse = res.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+            const parsed: any = toolUse?.input ?? {};
 
             const level: CaseLevel = parsed.level === 'L1' ? 'L1' : 'escalation';
             const topic = (L1_TOPICS as readonly string[]).includes(parsed.topic) ? parsed.topic : null;
@@ -157,11 +213,27 @@ Query: """${queryText}"""`;
                 status: 'classified',
             });
 
+            const crmId = await this.resolveCrmId(caseId);
+            if (crmId) {
+                await dynamicsService.updateRequest(crmId, {
+                    statuscode: REQUEST_STATUSCODE.CLASSIFIED,
+                    riivo_classificationlevel: level === 'L1' ? CLASSIFICATION_LEVEL.L1 : CLASSIFICATION_LEVEL.ESCALATION,
+                    riivo_classificationtopic: topic,
+                });
+            }
+
             return { level, topic };
         } catch (e: any) {
             console.error(`[CaseService] classifyCase failed for ${caseId}:`, e?.message || e);
             // Default to escalation on classifier failure — safer than falsely marking L1
             await supabaseService.updateCase(caseId, { level: 'escalation', status: 'classified' });
+            const crmId = await this.resolveCrmId(caseId);
+            if (crmId) {
+                await dynamicsService.updateRequest(crmId, {
+                    statuscode: REQUEST_STATUSCODE.CLASSIFIED,
+                    riivo_classificationlevel: CLASSIFICATION_LEVEL.ESCALATION,
+                });
+            }
             return { level: 'escalation', topic: null };
         }
     }
@@ -170,32 +242,138 @@ Query: """${queryText}"""`;
      * Record that the bot has produced a candidate answer for this case.
      * After this, the feedback flow decides whether it resolves or escalates.
      */
-    async recordBotResponse(caseId: string, method: string): Promise<void> {
+    async recordBotResponse(caseId: string, method: string, answerText?: string, crmRequestId?: string | null): Promise<void> {
         await supabaseService.updateCase(caseId, {
             status: 'bot_responded',
             resolution_method: method,
         });
+        const crmId = crmRequestId ?? await this.resolveCrmId(caseId);
+        if (crmId) {
+            const patch: Record<string, any> = {
+                statuscode: REQUEST_STATUSCODE.BOT_ANSWERED,
+                riivo_resolutionmethod: RESOLUTION_METHOD.AUTO_DIRECT_ANSWER,
+            };
+            if (answerText) patch.riivo_botanswers = answerText;
+            await dynamicsService.updateRequest(crmId, patch);
+        }
+    }
+
+    /**
+     * Mark a case as escalated in both Supabase and Dynamics. Escalation
+     * keeps the Dynamics request in statecode=Active (the consultant still
+     * needs to work it) with statuscode=Escalated.
+     */
+    async markEscalated(caseId: string, reason: string, crmRequestId?: string | null): Promise<void> {
+        await supabaseService.updateCase(caseId, { status: 'escalated' });
+        const crmId = crmRequestId ?? await this.resolveCrmId(caseId);
+        if (crmId) {
+            await dynamicsService.updateRequest(crmId, {
+                statuscode: REQUEST_STATUSCODE.ESCALATED,
+                riivo_escalationreason: reason,
+                riivo_escalatedon: new Date().toISOString(),
+            });
+        }
     }
 
     /**
      * Handle the client's follow-up after the feedback prompt.
-     * "confirmed" → resolved_by_bot (final, counted toward L1 auto-resolution)
-     * "rejected"  → escalated. Dynamics case already exists; humans pick up from there.
+     * "confirmed" → resolve every open sibling case in the same session
+     *               (one positive signal closes the whole conversation).
+     * "rejected"  → escalate ONLY the case identified by caseId. Dynamics
+     *               case already exists; humans pick up from there.
      */
     async handleFeedback(caseId: string, feedback: 'confirmed' | 'rejected'): Promise<WhatsAppCaseRow | null> {
+        const resolvedAt = new Date().toISOString();
         if (feedback === 'confirmed') {
-            await supabaseService.updateCase(caseId, {
-                status: 'resolved_by_bot',
-                feedback_received: 'confirmed',
-                resolved_at: new Date().toISOString(),
-            });
+            const anchor = await supabaseService.getCase(caseId);
+            const siblings = anchor
+                ? await supabaseService.findOpenCasesForSession(anchor.session_id)
+                : [];
+
+            const toClose = new Map<string, WhatsAppCaseRow>();
+            if (anchor && anchor.status !== 'resolved_by_bot'
+                && anchor.status !== 'resolved_by_bot_timeout'
+                && anchor.status !== 'escalated') {
+                toClose.set(anchor.id, anchor);
+            }
+            for (const s of siblings) toClose.set(s.id, s);
+
+            for (const row of toClose.values()) {
+                await supabaseService.updateCase(row.id, {
+                    status: 'resolved_by_bot',
+                    feedback_received: 'confirmed',
+                    resolved_at: resolvedAt,
+                });
+                const crmId = row.crm_case_id;
+                if (crmId) {
+                    await dynamicsService.updateRequest(crmId, {
+                        statecode: REQUEST_STATE.INACTIVE,
+                        statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
+                        riivo_clientfeedback: CLIENT_FEEDBACK.CONFIRMED,
+                        riivo_resolvedon: resolvedAt,
+                        riivo_resolutionmethod: RESOLUTION_METHOD.FEEDBACK_CONFIRMED,
+                    });
+                }
+            }
         } else {
             await supabaseService.updateCase(caseId, {
                 status: 'escalated',
                 feedback_received: 'rejected',
             });
+            const crmId = await this.resolveCrmId(caseId);
+            if (crmId) {
+                await dynamicsService.updateRequest(crmId, {
+                    statuscode: REQUEST_STATUSCODE.ESCALATED,
+                    riivo_clientfeedback: CLIENT_FEEDBACK.REJECTED,
+                    riivo_escalationreason: 'Client rejected bot answer',
+                    riivo_escalatedon: resolvedAt,
+                });
+            }
         }
         return supabaseService.getCase(caseId);
+    }
+
+    /**
+     * Resolve the Dynamics riivo_request id for a Supabase case. Small helper
+     * used by state-transition methods so they can PATCH Dynamics after the
+     * Supabase write.
+     */
+    private async resolveCrmId(caseId: string): Promise<string | null> {
+        const row = await supabaseService.getCase(caseId);
+        return row?.crm_case_id || null;
+    }
+
+    /**
+     * Detect a natural wrap-up signal — a short closing acknowledgement like
+     * "thanks", "perfect", "got it". Used for cases that are still open but
+     * not in the explicit pending-feedback window (the client kept chatting
+     * past the feedback prompt or never received one). Conservative on purpose:
+     * skips long messages, anything containing "?", or qualifiers like "but"
+     * that suggest the client is actually asking for more.
+     */
+    detectWrapUp(text: string): boolean {
+        const t = (text || '').trim().toLowerCase();
+        if (!t || t.length > 60) return false;
+        if (t.includes('?')) return false;
+        if (/\b(but|however|actually|also|wait|another|one more)\b/.test(t)) return false;
+        return /\b(thanks|thank you|thx|ty|perfect|sorted|got it|all good|appreciate|cheers|awesome|amazing|brilliant|lekker)\b/.test(t);
+    }
+
+    /**
+     * Close every open case in the session as if the client had tapped "Yes".
+     * Used by the natural wrap-up path. A single positive signal ("thanks")
+     * closes the whole conversation, not just the most recent case. Returns
+     * the number of cases closed so the caller can decide whether to
+     * short-circuit Claude.
+     */
+    async resolveAllOpenCasesAsConfirmed(sessionId: string): Promise<number> {
+        const rows = await supabaseService.findOpenCasesForSession(sessionId);
+        if (rows.length === 0) return 0;
+        // handleFeedback('confirmed') already fans out across siblings — one
+        // call closes them all; calling per-row would be redundant.
+        await this.handleFeedback(rows[0].id, 'confirmed');
+        console.log(`[CaseService] Wrap-up closed ${rows.length} case(s) for session ${sessionId}`);
+        return rows.length;
     }
 
     /**
@@ -219,10 +397,26 @@ Query: """${queryText}"""`;
 
     /**
      * Idempotent timeout sweep. Runs daily via cron + fire-and-forget on
-     * every client inbound as a safety net.
+     * every client inbound as a safety net. For each swept case, mirrors
+     * the terminal state onto the Dynamics riivo_request (best-effort).
      */
     async handleTimeout(): Promise<number> {
-        return supabaseService.sweepTimedOutCases(FEEDBACK_TIMEOUT_HOURS);
+        const swept = await supabaseService.sweepTimedOutCases(FEEDBACK_TIMEOUT_HOURS);
+        if (swept.length === 0) return 0;
+
+        const resolvedAt = new Date().toISOString();
+        await Promise.all(
+            swept
+                .filter(r => r.crm_case_id)
+                .map(r => dynamicsService.updateRequest(r.crm_case_id!, {
+                    statecode: REQUEST_STATE.INACTIVE,
+                    statuscode: REQUEST_STATUSCODE.RESOLVED_TIMEOUT,
+                    riivo_clientfeedback: CLIENT_FEEDBACK.NO_RESPONSE_TIMEOUT,
+                    riivo_resolvedon: resolvedAt,
+                    riivo_resolutionmethod: RESOLUTION_METHOD.TIMEOUT_ASSUMED_RESOLVED,
+                }))
+        );
+        return swept.length;
     }
 }
 
