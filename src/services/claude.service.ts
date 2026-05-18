@@ -16,6 +16,7 @@ import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpl
 import { computeRequiredDocuments, formatRequiredDocumentsMessage } from './requiredDocuments.service';
 import { computeCostUsd, totalTokens } from './claudePricing.service';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
+import { RateLimitError, callAnthropicMessages, type RateLimitHeaders } from '../utils/anthropicRateLimit';
 import {
     handleGetRefundStatus,
     handleGetSubmissionStatus,
@@ -517,9 +518,18 @@ const TOOLS: Anthropic.Tool[] = [
 const CLAUDE_MODEL = 'claude-opus-4-7';
 const CLAUDE_MAX_TOKENS = 2048;
 
+// Re-export so call sites can `import { RateLimitError } from './claude.service'`
+// per the breakdown contract. Implementation lives in src/utils/anthropicRateLimit
+// to avoid a circular import (claude.service ↔ loe-extractor.service).
+export { RateLimitError, callAnthropicMessages };
+export type { RateLimitHeaders };
+
 /**
  * Fire-and-forget usage logger. Never throws — pricing/logging must not break
  * a live conversation if Supabase is briefly unreachable.
+ *
+ * `rateLimit` carries the headers parsed by callAnthropicMessages so the
+ * persistence layer can record them — actual column writes land in Issue 8.
  */
 function logUsage(
     response: Anthropic.Message,
@@ -527,6 +537,7 @@ function logUsage(
     sessionId: string | undefined,
     phoneNumber: string | undefined,
     entityType: 'client' | 'lead' | 'user' | undefined,
+    rateLimit?: RateLimitHeaders,
 ): void {
     try {
         const usage = (response as any).usage || null;
@@ -541,6 +552,7 @@ function logUsage(
             usage,
             costUsd: computeCostUsd(model, usage),
             totalTokens: totalTokens(usage),
+            rateLimit,
         }).catch(err => console.warn('[Claude] usage log failed:', err?.message || err));
     } catch (err) {
         console.warn('[Claude] usage log threw:', err);
@@ -833,7 +845,7 @@ export class ClaudeService {
             // Claude auto-caches the prefix (tools + system) when `cache_control`
             // is set at the top level — repeated turns in the same session reuse
             // the cached prefix at ~0.1x input cost.
-            const completion = await client.messages.create({
+            const firstCall = await callAnthropicMessages(client, {
                 model: CLAUDE_MODEL,
                 max_tokens: CLAUDE_MAX_TOKENS,
                 system: systemPrompt,
@@ -842,7 +854,8 @@ export class ClaudeService {
                 ...(availableTools && availableTools.length > 0 ? { tool_choice: { type: 'auto' as const } } : {}),
                 cache_control: { type: 'ephemeral' },
             } as any);
-            logUsage(completion, 'main', sessionId, phoneNumber, entityType);
+            const completion = firstCall.message;
+            logUsage(completion, 'main', sessionId, phoneNumber, entityType, firstCall.rateLimit);
 
             // Collect tool_use blocks from the first response. If present, we
             // enter the agentic loop; otherwise we return the model's text.
@@ -2016,7 +2029,7 @@ export class ClaudeService {
                 // 3. Loop: keep processing tool calls until the AI returns a text-only response
                 const MAX_TOOL_ROUNDS = 5;
                 for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-                    const followUp = await client.messages.create({
+                    const followUpCall = await callAnthropicMessages(client, {
                         model: CLAUDE_MODEL,
                         max_tokens: CLAUDE_MAX_TOKENS,
                         system: systemPrompt,
@@ -2025,7 +2038,8 @@ export class ClaudeService {
                         ...(availableTools && availableTools.length > 0 ? { tool_choice: { type: 'auto' as const } } : {}),
                         cache_control: { type: 'ephemeral' },
                     } as any);
-                    logUsage(followUp, 'tool_loop', sessionId, phoneNumber, entityType);
+                    const followUp = followUpCall.message;
+                    logUsage(followUp, 'tool_loop', sessionId, phoneNumber, entityType, followUpCall.rateLimit);
 
                     const followUpToolUses = followUp.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
 
@@ -2335,7 +2349,7 @@ export class ClaudeService {
         if (!client) return previousIntent || 'unknown';
 
         try {
-            const completion = await client.messages.create({
+            const intentCall = await callAnthropicMessages(client, {
                 model: CLAUDE_MODEL,
                 max_tokens: 20,
                 system: `Classify the user's current intent from this conversation exchange. Return ONLY one of these labels, nothing else:
@@ -2358,7 +2372,8 @@ Previous intent was: ${previousIntent || 'none'}`,
                     { role: 'user', content: 'Return the single intent label now.' },
                 ],
             });
-            logUsage(completion, 'intent_classify', sessionId, phoneNumber, entityType);
+            const completion = intentCall.message;
+            logUsage(completion, 'intent_classify', sessionId, phoneNumber, entityType, intentCall.rateLimit);
 
             const intent = extractTextFromResponse(completion).toLowerCase() || 'unknown';
             return intent;

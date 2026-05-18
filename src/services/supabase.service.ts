@@ -1,7 +1,11 @@
+console.log('[boot] supabase.service: before supabase-js');
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+console.log('[boot] supabase.service: before dotenv');
 import dotenv from 'dotenv';
 
+console.log('[boot] supabase.service: imports done');
 dotenv.config();
+console.log('[boot] supabase.service: dotenv configured');
 
 const SESSION_TIMEOUT_MINUTES = 30;
 
@@ -18,6 +22,9 @@ interface Session {
     role_id: string | null;
     permitted_tools: string[];
     pending_case_id: string | null;
+    message_count: number;
+    token_count: number;
+    cap_blocked_at: string | null;
 }
 
 export type CaseLevel = 'L1' | 'escalation';
@@ -63,6 +70,24 @@ interface Message {
     role: 'user' | 'assistant';
     content: string;
     timestamp: string;
+}
+
+export interface EmailRelayPendingRow {
+    id: string;
+    graph_message_id: string;
+    client_phone: string;
+    client_crm_id: string | null;
+    client_crm_type: 'client' | 'lead' | 'user' | null;
+    forwarder_email: string;
+    forwarder_name: string | null;
+    original_sender_email: string;
+    subject: string | null;
+    relay_body: string;
+    status: 'awaiting_consent' | 'accepted' | 'declined' | 'expired' | 'no_match' | 'superseded';
+    template_sent_at: string | null;
+    responded_at: string | null;
+    expires_at: string;
+    created_at: string;
 }
 
 export interface PendingLoeRow {
@@ -117,14 +142,15 @@ class SupabaseService {
      * Returns the most recent session with a known crm_id, or null.
      */
     async findPreviousSession(phoneNumber: string): Promise<{ id: string; crm_id: string; crm_type: string } | null> {
+        const variants = this.phoneVariants(phoneNumber);
         const { data, error } = await this.client
             .from('sessions')
             .select('id, crm_id, crm_type')
-            .eq('phone_number', phoneNumber)
+            .in('phone_number', variants)
             .not('crm_id', 'is', null)
             .order('last_active', { ascending: false })
             .limit(1)
-            .single();
+            .maybeSingle();
 
         if (error || !data) {
             return null;
@@ -154,10 +180,11 @@ class SupabaseService {
         permittedTools: string[] = []
     ): Promise<Session> {
         // Look for an active session for this phone number
+        const variants = this.phoneVariants(phoneNumber);
         const { data: existing, error: fetchError } = await this.client
             .from('sessions')
             .select('*')
-            .eq('phone_number', phoneNumber)
+            .in('phone_number', variants)
             .eq('status', 'active')
             .order('last_active', { ascending: false })
             .limit(1)
@@ -243,7 +270,7 @@ class SupabaseService {
     }
 
     /**
-     * Get conversation history for a session, ordered oldest-first for OpenAI context.
+     * Get conversation history for a session, ordered oldest-first for Claude context.
      */
     async getHistory(sessionId: string): Promise<{ role: 'user' | 'assistant'; content: string }[]> {
         const { data, error } = await this.client
@@ -258,6 +285,117 @@ class SupabaseService {
         }
 
         return (data || []) as { role: 'user' | 'assistant'; content: string }[];
+    }
+
+    /**
+     * Log a Claude API call's token usage and computed cost. One row per
+     * messages.create invocation. Also bumps the session cap counters so the
+     * next turn can decide whether to deflect without summing claude_usage.
+     */
+    async logClaudeUsage(params: {
+        sessionId: string | null;
+        phoneNumber: string | null;
+        role: string | null;
+        model: string;
+        callPurpose: 'main' | 'tool_loop' | 'intent_classify';
+        usage: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_creation_input_tokens?: number;
+            cache_read_input_tokens?: number;
+        } | null;
+        costUsd: number;
+        totalTokens: number;
+        // Optional Anthropic rate-limit headers — wired to persistence in Issue 8.
+        rateLimit?: {
+            tokensRemaining?: number;
+            tokensLimit?: number;
+            requestsRemaining?: number;
+            requestsLimit?: number;
+        };
+        // Optional 429 marker — wired to persistence in Issue 8.
+        was429?: boolean;
+        retryAfterMs?: number;
+    }): Promise<void> {
+        const u = params.usage || {};
+        const { error } = await this.client
+            .from('claude_usage')
+            .insert({
+                session_id: params.sessionId,
+                phone_number: params.phoneNumber,
+                role: params.role,
+                model: params.model,
+                call_purpose: params.callPurpose,
+                input_tokens: u.input_tokens || 0,
+                output_tokens: u.output_tokens || 0,
+                cache_creation_tokens: u.cache_creation_input_tokens || 0,
+                cache_read_tokens: u.cache_read_input_tokens || 0,
+                cost_usd: params.costUsd,
+            });
+
+        if (error) {
+            console.error('[Supabase] Failed to log Claude usage:', error.message);
+        }
+
+        if (params.sessionId) {
+            const { error: rpcError } = await this.client.rpc('increment_session_usage', {
+                p_session_id: params.sessionId,
+                p_tokens: params.totalTokens,
+            });
+            if (rpcError) {
+                // Fallback: read-modify-write. Race-y under bursts but our
+                // worst case is undercounting by a turn or two.
+                const { data: cur } = await this.client
+                    .from('sessions')
+                    .select('message_count, token_count')
+                    .eq('id', params.sessionId)
+                    .maybeSingle();
+                if (cur) {
+                    await this.client
+                        .from('sessions')
+                        .update({
+                            message_count: (cur.message_count || 0) + 1,
+                            token_count: (cur.token_count || 0) + params.totalTokens,
+                        })
+                        .eq('id', params.sessionId);
+                }
+            }
+        }
+    }
+
+    /**
+     * Count messages from a phone number within the last 24h. Used for the
+     * per-phone daily rate limit. Walks the sessions table because individual
+     * message rows live there transiently and sessions accumulate counts.
+     */
+    async countMessagesLast24h(phoneNumber: string): Promise<number> {
+        const variants = this.phoneVariants(phoneNumber);
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { data, error } = await this.client
+            .from('sessions')
+            .select('message_count')
+            .in('phone_number', variants)
+            .gte('last_active', since);
+
+        if (error) {
+            console.error('[Supabase] Failed to count daily messages:', error.message);
+            return 0;
+        }
+        return (data || []).reduce((sum, row: any) => sum + (row.message_count || 0), 0);
+    }
+
+    /**
+     * Mark a session as cap-blocked so subsequent inbound messages skip the
+     * Claude call entirely until the session expires.
+     */
+    async markSessionCapBlocked(sessionId: string): Promise<void> {
+        const { error } = await this.client
+            .from('sessions')
+            .update({ cap_blocked_at: new Date().toISOString() })
+            .eq('id', sessionId);
+        if (error) {
+            console.error('[Supabase] Failed to mark session cap-blocked:', error.message);
+        }
     }
 
     /**
@@ -278,7 +416,7 @@ class SupabaseService {
                 action: params.action,
                 payload: params.payload,
                 ai_triggered_by: params.triggeredBy,
-                ai_model: 'gpt-4o-mini',
+                ai_model: 'claude-opus-4-7',
                 ai_generated_at: new Date().toISOString(),
             });
 
@@ -620,8 +758,10 @@ class SupabaseService {
     /**
      * Idempotent sweep. Any case in 'bot_responded' whose updated_at is older
      * than the threshold is auto-resolved as a bot-timeout. Safe to run repeatedly.
+     * Returns the rows that were swept so the caller can mirror state to
+     * Dynamics.
      */
-    async sweepTimedOutCases(thresholdHours: number): Promise<number> {
+    async sweepTimedOutCases(thresholdHours: number): Promise<{ id: string; crm_case_id: string | null }[]> {
         const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000).toISOString();
 
         const { data, error } = await this.client
@@ -633,15 +773,126 @@ class SupabaseService {
             })
             .eq('status', 'bot_responded')
             .lt('updated_at', cutoff)
-            .select('id');
+            .select('id, crm_case_id');
 
         if (error) {
             console.error('[Supabase] sweepTimedOutCases error:', error.message);
-            return 0;
+            return [];
         }
-        const swept = (data || []).length;
-        if (swept > 0) console.log(`[Supabase] Swept ${swept} timed-out case(s)`);
-        return swept;
+        const rows = (data || []) as { id: string; crm_case_id: string | null }[];
+        if (rows.length > 0) console.log(`[Supabase] Swept ${rows.length} timed-out case(s)`);
+        return rows;
+    }
+
+    /**
+     * Find the most recent open request for the given session, to thread
+     * continuation messages (follow-ups, thanks, feedback) under the same
+     * Dynamics riivo_request record. Scoped to the session so a fresh
+     * conversation (new session after timeout) always starts a new request.
+     *
+     * "Open" = not in a terminal status (resolved_by_bot /
+     * resolved_by_bot_timeout). Escalated cases count as open because the
+     * work continues — a consultant needs the comms too.
+     */
+    async findOpenRequestForSession(sessionId: string): Promise<string | null> {
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .select('crm_case_id, status')
+            .eq('session_id', sessionId)
+            .not('crm_case_id', 'is', null)
+            .not('status', 'in', '("resolved_by_bot","resolved_by_bot_timeout")')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (error) {
+            console.warn('[Supabase] findOpenRequestForSession error:', error.message);
+            return null;
+        }
+        return data?.crm_case_id || null;
+    }
+
+    /**
+     * Sibling of findOpenRequestForSession that returns the full whatsapp_cases
+     * row instead of just the Dynamics request id. Used by the natural wrap-up
+     * path so the closer has the case id needed for handleFeedback.
+     */
+    async findOpenCaseForSession(sessionId: string): Promise<WhatsAppCaseRow | null> {
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .select('*')
+            .eq('session_id', sessionId)
+            .not('status', 'in', '("resolved_by_bot","resolved_by_bot_timeout")')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (error) {
+            console.warn('[Supabase] findOpenCaseForSession error:', error.message);
+            return null;
+        }
+        return (data as WhatsAppCaseRow) || null;
+    }
+
+    /**
+     * Plural variant: every open (non-terminal, non-escalated) case in the
+     * session. The escalated exclusion is critical — a "thanks" inbound after
+     * an escalation must not un-escalate the case.
+     */
+    async findOpenCasesForSession(sessionId: string): Promise<WhatsAppCaseRow[]> {
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .select('*')
+            .eq('session_id', sessionId)
+            .not('status', 'in', '("resolved_by_bot","resolved_by_bot_timeout","escalated")')
+            .order('created_at', { ascending: true });
+
+        if (error) {
+            console.warn('[Supabase] findOpenCasesForSession error:', error.message);
+            return [];
+        }
+        return (data || []) as WhatsAppCaseRow[];
+    }
+
+    /**
+     * Returns true if the client has sent any inbound message in this session
+     * after the given timestamp. Used by the delayed feedback-prompt worker
+     * to abort firing buttons if the client kept chatting within the idle
+     * window.
+     */
+    async hasClientInboundSince(sessionId: string, since: string): Promise<boolean> {
+        const { count, error } = await this.client
+            .from('messages')
+            .select('id', { count: 'exact', head: true })
+            .eq('session_id', sessionId)
+            .eq('role', 'user')
+            .gt('timestamp', since);
+
+        if (error) {
+            console.warn('[Supabase] hasClientInboundSince error:', error.message);
+            // Fail-open: if we can't determine, assume client replied so we
+            // skip the prompt rather than risk interrupting a live conversation.
+            return true;
+        }
+        return (count || 0) > 0;
+    }
+
+    /**
+     * Read a session row by id. Used by the feedback-prompt worker to inspect
+     * `pending_case_id` at fire time without a separate phone-based lookup.
+     */
+    async getSession(sessionId: string): Promise<Session | null> {
+        const { data, error } = await this.client
+            .from('sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .maybeSingle();
+
+        if (error) {
+            console.warn('[Supabase] getSession error:', error.message);
+            return null;
+        }
+        return (data as Session) || null;
     }
 
     async setSessionPendingCase(sessionId: string, caseId: string | null): Promise<void> {
@@ -653,6 +904,240 @@ class SupabaseService {
         if (error) {
             console.error('[Supabase] Failed to set pending_case_id:', error.message);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Email-to-WhatsApp relay (tina-bot mailbox flow)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Mark any prior 'awaiting_consent' rows for this phone as 'superseded'.
+     * Called before inserting a new pending row so the partial unique index
+     * doesn't collide. New forward wins over old pending consent.
+     */
+    async supersedeActiveRelaysForPhone(clientPhone: string): Promise<number> {
+        const { data, error } = await this.client
+            .from('email_relay_pending')
+            .update({ status: 'superseded', responded_at: new Date().toISOString() })
+            .eq('client_phone', clientPhone)
+            .eq('status', 'awaiting_consent')
+            .select('id');
+
+        if (error) {
+            console.error('[Supabase] Failed to supersede prior relays:', error.message);
+            return 0;
+        }
+        const count = (data || []).length;
+        if (count > 0) console.log(`[Supabase] Superseded ${count} prior relay(s) for ${clientPhone}`);
+        return count;
+    }
+
+    async createEmailRelayPending(params: {
+        graphMessageId: string;
+        clientPhone: string;
+        clientCrmId: string | null;
+        clientCrmType: 'client' | 'lead' | 'user' | null;
+        forwarderEmail: string;
+        forwarderName: string | null;
+        originalSenderEmail: string;
+        subject: string | null;
+        relayBody: string;
+        status?: 'awaiting_consent' | 'no_match';
+        expiresAt: Date;
+    }): Promise<EmailRelayPendingRow | null> {
+        const { data, error } = await this.client
+            .from('email_relay_pending')
+            .insert({
+                graph_message_id: params.graphMessageId,
+                client_phone: params.clientPhone,
+                client_crm_id: params.clientCrmId,
+                client_crm_type: params.clientCrmType,
+                forwarder_email: params.forwarderEmail,
+                forwarder_name: params.forwarderName,
+                original_sender_email: params.originalSenderEmail,
+                subject: params.subject,
+                relay_body: params.relayBody,
+                status: params.status || 'awaiting_consent',
+                template_sent_at: params.status === 'no_match' ? null : new Date().toISOString(),
+                expires_at: params.expiresAt.toISOString(),
+            })
+            .select('*')
+            .single();
+
+        if (error) {
+            // 23505 = unique violation. Means we've already processed this graph_message_id
+            // (Graph redelivered the same notification). Treat as a no-op success.
+            if ((error as any).code === '23505') {
+                console.log(`[Supabase] email_relay_pending already exists for graph_message_id=${params.graphMessageId} — idempotent skip`);
+                return null;
+            }
+            console.error('[Supabase] Failed to insert email_relay_pending:', error.message);
+            return null;
+        }
+        console.log(`[Supabase] Created email_relay_pending ${data.id} for ${params.clientPhone} (${params.status || 'awaiting_consent'})`);
+        return data as EmailRelayPendingRow;
+    }
+
+    /**
+     * Find the single active relay (status=awaiting_consent) for a client phone.
+     * Returns null if none. Used when the client taps the Yes/No button — the
+     * payload is static (`relay_yes`/`relay_no`) so we identify the row by phone.
+     */
+    async findActiveRelayByPhone(clientPhone: string): Promise<EmailRelayPendingRow | null> {
+        const { data, error } = await this.client
+            .from('email_relay_pending')
+            .select('*')
+            .eq('client_phone', clientPhone)
+            .eq('status', 'awaiting_consent')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (error) {
+            console.error('[Supabase] findActiveRelayByPhone error:', error.message);
+            return null;
+        }
+        return (data as EmailRelayPendingRow) || null;
+    }
+
+    async markRelayResponded(
+        id: string,
+        status: 'accepted' | 'declined' | 'expired'
+    ): Promise<boolean> {
+        const { error } = await this.client
+            .from('email_relay_pending')
+            .update({ status, responded_at: new Date().toISOString() })
+            .eq('id', id);
+
+        if (error) {
+            console.error(`[Supabase] Failed to mark relay ${id} as ${status}:`, error.message);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Expire any 'awaiting_consent' rows whose expires_at has passed. Returns
+     * the rows that were swept so the caller can email the original forwarder
+     * a "client didn't respond" note.
+     */
+    async expireOldRelays(): Promise<EmailRelayPendingRow[]> {
+        const nowIso = new Date().toISOString();
+        const { data, error } = await this.client
+            .from('email_relay_pending')
+            .update({ status: 'expired', responded_at: nowIso })
+            .eq('status', 'awaiting_consent')
+            .lt('expires_at', nowIso)
+            .select('*');
+
+        if (error) {
+            console.error('[Supabase] expireOldRelays error:', error.message);
+            return [];
+        }
+        const rows = (data || []) as EmailRelayPendingRow[];
+        if (rows.length > 0) console.log(`[Supabase] Expired ${rows.length} relay(s) past consent window`);
+        return rows;
+    }
+
+    // -------------------------------------------------------------------------
+    // Knowledge base (kb_documents / kb_chunks + match_kb_chunks RPC)
+    // -------------------------------------------------------------------------
+
+    async findKbDocument(sourceId: string): Promise<{ id: string; etag: string | null } | null> {
+        const { data, error } = await this.client
+            .from('kb_documents')
+            .select('id, etag')
+            .eq('source_id', sourceId)
+            .maybeSingle();
+        if (error) {
+            console.warn('[Supabase] findKbDocument error:', error.message);
+            return null;
+        }
+        return data ? { id: data.id, etag: data.etag } : null;
+    }
+
+    async upsertKbDocument(doc: {
+        source_id: string;
+        source_url: string;
+        title: string;
+        path: string | null;
+        etag: string | null;
+        last_modified: string | null;
+    }): Promise<string> {
+        const { data, error } = await this.client
+            .from('kb_documents')
+            .upsert(
+                { ...doc, ingested_at: new Date().toISOString() },
+                { onConflict: 'source_id' }
+            )
+            .select('id')
+            .single();
+        if (error || !data) {
+            throw new Error(`upsertKbDocument failed: ${error?.message || 'no row returned'}`);
+        }
+        return data.id;
+    }
+
+    /**
+     * Replace all chunks for a document. Old chunks are deleted first so a
+     * shorter doc doesn't leave stale embeddings behind.
+     */
+    async replaceKbChunks(
+        documentId: string,
+        chunks: { chunk_index: number; content: string; heading_path: string | null; embedding: number[]; token_count: number }[]
+    ): Promise<void> {
+        const { error: delErr } = await this.client
+            .from('kb_chunks')
+            .delete()
+            .eq('document_id', documentId);
+        if (delErr) {
+            throw new Error(`replaceKbChunks delete failed: ${delErr.message}`);
+        }
+        if (chunks.length === 0) return;
+
+        const rows = chunks.map(c => ({ document_id: documentId, ...c }));
+        const { error: insErr } = await this.client.from('kb_chunks').insert(rows);
+        if (insErr) {
+            throw new Error(`replaceKbChunks insert failed: ${insErr.message}`);
+        }
+    }
+
+    async listKbDocumentSourceIds(): Promise<string[]> {
+        const { data, error } = await this.client
+            .from('kb_documents')
+            .select('source_id');
+        if (error) {
+            console.warn('[Supabase] listKbDocumentSourceIds error:', error.message);
+            return [];
+        }
+        return (data || []).map((r: any) => r.source_id);
+    }
+
+    async deleteKbDocumentBySourceId(sourceId: string): Promise<void> {
+        const { error } = await this.client
+            .from('kb_documents')
+            .delete()
+            .eq('source_id', sourceId);
+        if (error) {
+            throw new Error(`deleteKbDocumentBySourceId failed: ${error.message}`);
+        }
+    }
+
+    async matchKbChunks(
+        queryEmbedding: number[],
+        threshold: number,
+        count: number
+    ): Promise<{ content: string; heading_path: string | null; title: string; source_url: string; similarity: number }[]> {
+        const { data, error } = await this.client.rpc('match_kb_chunks', {
+            query_embedding: queryEmbedding,
+            match_threshold: threshold,
+            match_count: count,
+        });
+        if (error) {
+            console.warn('[Supabase] match_kb_chunks RPC failed:', error.message);
+            return [];
+        }
+        return (data || []) as { content: string; heading_path: string | null; title: string; source_url: string; similarity: number }[];
     }
 }
 

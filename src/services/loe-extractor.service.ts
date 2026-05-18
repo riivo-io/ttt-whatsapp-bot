@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
+import { RateLimitError } from '../utils/anthropicRateLimit';
 
 console.log('[boot] loe-extractor.service: imports done');
 dotenv.config();
@@ -138,6 +139,15 @@ class LoeExtractorService {
             console.log(`[LoeExtractor] Extracted ${Object.keys(out).length} fields:`, Object.keys(out).join(', ') || '(none)');
             return out;
         } catch (err: any) {
+            // A 429 must propagate so the worker can re-enqueue with delay.
+            // Other errors stay swallowed — LoE extraction is best-effort.
+            const status = err?.status ?? err?.response?.status;
+            if (status === 429) {
+                const retryAfterHeader = err?.headers?.['retry-after'] ?? err?.response?.headers?.['retry-after'];
+                const retryAfterSec = retryAfterHeader ? Number(retryAfterHeader) : 60;
+                const retryAfterMs = Math.max(1, Math.floor((Number.isFinite(retryAfterSec) ? retryAfterSec : 60) * 1000));
+                throw new RateLimitError(retryAfterMs, 1, err);
+            }
             console.warn(`[LoeExtractor] Extraction failed (proceeding without it): ${err?.message || err}`);
             return {};
         }

@@ -10,6 +10,7 @@ import {
     CLASSIFICATION_LEVEL,
 } from './dynamics.service';
 import { supabaseService, WhatsAppCaseRow, CaseLevel } from './supabase.service';
+import { RateLimitError } from '../utils/anthropicRateLimit';
 
 dotenv.config();
 
@@ -224,6 +225,15 @@ L1 topics — general knowledge the bot answers without CRM lookups:
 
             return { level, topic };
         } catch (e: any) {
+            // A 429 must propagate so the worker can re-enqueue with delay.
+            // Other classifier errors fall through to the escalation fallback.
+            const status = e?.status ?? e?.response?.status;
+            if (status === 429) {
+                const retryAfterHeader = e?.headers?.['retry-after'] ?? e?.response?.headers?.['retry-after'];
+                const retryAfterSec = retryAfterHeader ? Number(retryAfterHeader) : 60;
+                const retryAfterMs = Math.max(1, Math.floor((Number.isFinite(retryAfterSec) ? retryAfterSec : 60) * 1000));
+                throw new RateLimitError(retryAfterMs, 1, e);
+            }
             console.error(`[CaseService] classifyCase failed for ${caseId}:`, e?.message || e);
             // Default to escalation on classifier failure — safer than falsely marking L1
             await supabaseService.updateCase(caseId, { level: 'escalation', status: 'classified' });
