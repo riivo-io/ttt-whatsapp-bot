@@ -318,6 +318,7 @@ class SupabaseService {
         retryAfterMs?: number;
     }): Promise<void> {
         const u = params.usage || {};
+        const rl = params.rateLimit || {};
         const { error } = await this.client
             .from('claude_usage')
             .insert({
@@ -331,6 +332,14 @@ class SupabaseService {
                 cache_creation_tokens: u.cache_creation_input_tokens || 0,
                 cache_read_tokens: u.cache_read_input_tokens || 0,
                 cost_usd: params.costUsd,
+                // Anthropic rate-limit headers — added in migration 20260518100000.
+                // Nullable; left NULL when headers weren't present on the response.
+                ratelimit_tokens_remaining: rl.tokensRemaining ?? null,
+                ratelimit_tokens_limit: rl.tokensLimit ?? null,
+                ratelimit_requests_remaining: rl.requestsRemaining ?? null,
+                ratelimit_requests_limit: rl.requestsLimit ?? null,
+                retry_after_ms: params.retryAfterMs ?? null,
+                was_429: params.was429 ?? false,
             });
 
         if (error) {

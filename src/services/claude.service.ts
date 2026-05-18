@@ -575,6 +575,38 @@ function withMessageCacheBreakpoint(messages: Anthropic.MessageParam[]): Anthrop
 }
 
 /**
+ * 429 counterpart to logUsage. Writes a claude_usage row with was_429=true
+ * and the retry-after value so the success metric in PRD §2.2 (429 rate)
+ * can be measured directly. No tokens are charged on a 429, so usage is null.
+ */
+function logRateLimit429(
+    err: RateLimitError,
+    callPurpose: 'main' | 'tool_loop' | 'intent_classify',
+    sessionId: string | undefined,
+    phoneNumber: string | undefined,
+    entityType: 'client' | 'lead' | 'user' | undefined,
+): void {
+    try {
+        const role = entityType === 'user' ? 'staff' : (entityType === 'client' || entityType === 'lead') ? 'client' : 'unknown';
+        supabaseService.logClaudeUsage({
+            sessionId: sessionId || null,
+            phoneNumber: phoneNumber || null,
+            role,
+            model: CLAUDE_MODEL,
+            callPurpose,
+            usage: null,
+            costUsd: 0,
+            totalTokens: 0,
+            rateLimit: err.rateLimit,
+            was429: true,
+            retryAfterMs: err.retryAfterMs,
+        }).catch(e => console.warn('[Claude] 429 usage log failed:', e?.message || e));
+    } catch (e) {
+        console.warn('[Claude] 429 usage log threw:', e);
+    }
+}
+
+/**
  * Fire-and-forget usage logger. Never throws — pricing/logging must not break
  * a live conversation if Supabase is briefly unreachable.
  *
@@ -901,14 +933,20 @@ export class ClaudeService {
             const cachedTools = withToolCacheBreakpoint(
                 availableTools && availableTools.length > 0 ? availableTools : undefined
             );
-            const firstCall = await callAnthropicMessages(client, {
-                model: CLAUDE_MODEL,
-                max_tokens: CLAUDE_MAX_TOKENS,
-                system: systemAsCachedBlock(systemPrompt),
-                messages: withMessageCacheBreakpoint(messages),
-                tools: cachedTools,
-                ...(cachedTools ? { tool_choice: { type: 'auto' as const } } : {}),
-            });
+            let firstCall;
+            try {
+                firstCall = await callAnthropicMessages(client, {
+                    model: CLAUDE_MODEL,
+                    max_tokens: CLAUDE_MAX_TOKENS,
+                    system: systemAsCachedBlock(systemPrompt),
+                    messages: withMessageCacheBreakpoint(messages),
+                    tools: cachedTools,
+                    ...(cachedTools ? { tool_choice: { type: 'auto' as const } } : {}),
+                });
+            } catch (e) {
+                if (e instanceof RateLimitError) logRateLimit429(e, 'main', sessionId, phoneNumber, entityType);
+                throw e;
+            }
             const completion = firstCall.message;
             logUsage(completion, 'main', sessionId, phoneNumber, entityType, firstCall.rateLimit);
 
@@ -2087,14 +2125,20 @@ export class ClaudeService {
                     const followUpTools = withToolCacheBreakpoint(
                         availableTools && availableTools.length > 0 ? availableTools : undefined
                     );
-                    const followUpCall = await callAnthropicMessages(client, {
-                        model: CLAUDE_MODEL,
-                        max_tokens: CLAUDE_MAX_TOKENS,
-                        system: systemAsCachedBlock(systemPrompt),
-                        messages: withMessageCacheBreakpoint(messages),
-                        tools: followUpTools,
-                        ...(followUpTools ? { tool_choice: { type: 'auto' as const } } : {}),
-                    });
+                    let followUpCall;
+                    try {
+                        followUpCall = await callAnthropicMessages(client, {
+                            model: CLAUDE_MODEL,
+                            max_tokens: CLAUDE_MAX_TOKENS,
+                            system: systemAsCachedBlock(systemPrompt),
+                            messages: withMessageCacheBreakpoint(messages),
+                            tools: followUpTools,
+                            ...(followUpTools ? { tool_choice: { type: 'auto' as const } } : {}),
+                        });
+                    } catch (e) {
+                        if (e instanceof RateLimitError) logRateLimit429(e, 'tool_loop', sessionId, phoneNumber, entityType);
+                        throw e;
+                    }
                     const followUp = followUpCall.message;
                     logUsage(followUp, 'tool_loop', sessionId, phoneNumber, entityType, followUpCall.rateLimit);
 
@@ -2435,6 +2479,9 @@ Previous intent was: ${previousIntent || 'none'}`,
             const intent = extractTextFromResponse(completion).toLowerCase() || 'unknown';
             return intent;
         } catch (error) {
+            if (error instanceof RateLimitError) {
+                logRateLimit429(error, 'intent_classify', sessionId, phoneNumber, entityType);
+            }
             console.warn('[Claude] Intent classification failed:', error);
             return previousIntent || 'unknown';
         }
