@@ -1,10 +1,19 @@
-node_modules/
-dist/
-.env
-.DS_Store
+# Agent scratch / harness state
+.agents/
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+ralph/
+skills-lock.json
 
-.env.local
+# Local scratch scripts
+test-enqueue.ts
 
-# Web (Next.js)
-web/node_modules/
-web/.next/
+# iCloud "filename 2.ext" duplicates
+* 2.*
+* 2.ts
+* 2.json
+* 2.md
+
+# Scratch planning docs (root-level only — docs/ is curated)
+/REMOTION-VIDEO-PROMPT.md
+/PLAN-create-task.md
