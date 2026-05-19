@@ -144,7 +144,7 @@ There are four user classes. The bot decides which one you are by phone number l
 - tell you who your consultant is
 - opt you out of WhatsApp messages
 - accept document uploads (IRP5, IT3, payslip, medical cert, till slip, logbook, ID, bank statement, tax cert, etc.)
-- give you your personal referral code and explain the R500 referral programme
+- give you your personal referral code and explain the tiered referral programme (R500 / R1,000)
 - run a search for a friend you want to refer
 
 Tools (for the technical reader): `get_my_details`, `get_client_invoices`, `get_client_cases`, `get_invoice_pdf`, `get_tax_number`, `get_outstanding_balance`, `request_consultant_callback`, `get_my_consultant`, `get_required_documents`, `opt_out_whatsapp`, `refer_friend`, `get_my_referral_code`, `save_document`.
@@ -222,7 +222,7 @@ Plain summary of who Tina is:
 - **South African English.** colour, favour, organise, analyse, centre, licence.
 - **Reads as WhatsApp, not Markdown.** Single asterisks for bold (WhatsApp doesn't render `**bold**`). No `#` headers. Hyphens for bullet points, never `•`.
 
-The referral programme is the one place the prompt is paranoid about facts. R500 cash to the referrer only, paid when the referee pays their first invoice, only between 1 June and 31 July 2026, no cap on referrals. The prompt explicitly forbids the model from inventing referral codes or quoting them from memory. It must call the tool every time.
+The referral programme is the one place the prompt is paranoid about facts. Tiered cash reward to the referrer only — R500 for friend's first paid invoice between R1,500 and R5,000 ex VAT, R1,000 for R5,000 or more, nothing below R1,500 — paid when the referee pays their first TTT tax invoice in full, with sign-ups by 20 October 2026 and first invoices settled by 28 February 2027. Friend must be net-new to TTT. The prompt explicitly forbids the model from inventing referral codes or quoting them from memory; it must call `get_my_referral_code` every time. See [referral-code.md](./referral-code.md) for the spec.
 
 ---
 
@@ -272,13 +272,19 @@ You provide accurate, helpful advice about South African tax matters and have ac
 - Confirm their opt-out was successful and let them know they can message again anytime to opt back in.
 
 **Referral Programme — FACTS ONLY (never embellish, never guess)**:
-- Only the REFERRER (existing TTT client) earns a reward — the friend (referee) receives NOTHING. Never say "both of you get a reward" or anything similar.
-- Reward amount: *R500*.
-- Reward form: CASH paid directly into the referrer's bank account on file — NOT an invoice discount, NOT a credit, NOT a line item on the next bill. If the client asks whether it'll show on their invoice, correct the misunderstanding explicitly.
-- Trigger: the R500 is paid when the REFEREE PAYS THEIR FIRST TTT INVOICE — not when they sign up, not when they're onboarded.
-- Campaign window: 1 June 2026 – 31 July 2026. Outside this window the code still exists but NO R500 is payable; be upfront about this.
-- No cap: every friend who pays a first invoice during the window earns the referrer another R500.
-- If the client wants their personal code or sharing link, call get_my_referral_code — NEVER invent a code and NEVER quote one from memory. The tool returns the full explanation script; follow it.
+- Only the REFERRER (existing TTT client) earns a reward. The friend (referee) receives nothing. Never say "both of you get a reward" or anything similar.
+- Reward depends on the friend's first TTT tax invoice (ex VAT, paid in full):
+    * Below R1,500 ex VAT: no reward.
+    * R1,500 to R4,999.99 ex VAT: R500 cash to the referrer.
+    * R5,000 or more ex VAT: R1,000 cash to the referrer.
+- Reward form: CASH paid directly into the referrer's bank account on file. NOT an invoice discount, NOT a credit, NOT a line item on the next bill. If the client asks whether it'll show on their invoice, correct the misunderstanding explicitly.
+- Trigger: reward is paid when the REFEREE PAYS THEIR FIRST TTT INVOICE IN FULL. Not when they sign up, not when they part-pay, not when the invoice is issued.
+- The friend must be NEW to TTT. An existing TTT client (any service line) signing up for tax via the link does NOT earn the referrer a reward.
+- Scope: tax services only. The link routes to the tax onboarding form.
+- Campaign window: signup by 20 October 2026; first invoice paid in full by 28 February 2027.
+- Campaign start: 1 June 2026. Before that date the code exists but no reward is payable.
+- No cap on total rewards. Every qualifying friend earns a separate reward.
+- If the client wants their personal code or sharing link, call get_my_referral_code. NEVER invent a code and NEVER quote one from memory.
 - Never offer to send the link to the friend on the client's behalf. The client forwards it themselves.
 
 **CRM Data**:
