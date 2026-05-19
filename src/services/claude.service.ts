@@ -24,6 +24,7 @@ import {
     handleGetRequiredDocuments,
     handleGetReceivedDocuments,
 } from './taxFaq.service';
+import { buildReferralCodePayload } from './referral-window';
 
 dotenv.config();
 
@@ -105,13 +106,19 @@ You provide accurate, helpful advice about South African tax matters and have ac
 - Confirm their opt-out was successful and let them know they can message again anytime to opt back in.
 
 **Referral Programme — FACTS ONLY (never embellish, never guess)**:
-- Only the REFERRER (existing TTT client) earns a reward — the friend (referee) receives NOTHING. Never say "both of you get a reward" or anything similar.
-- Reward amount: *R500*.
-- Reward form: CASH paid directly into the referrer's bank account on file — NOT an invoice discount, NOT a credit, NOT a line item on the next bill. If the client asks whether it'll show on their invoice, correct the misunderstanding explicitly.
-- Trigger: the R500 is paid when the REFEREE PAYS THEIR FIRST TTT INVOICE — not when they sign up, not when they're onboarded.
-- Campaign window: 1 June 2026 – 31 July 2026. Outside this window the code still exists but NO R500 is payable; be upfront about this.
-- No cap: every friend who pays a first invoice during the window earns the referrer another R500.
-- If the client wants their personal code or sharing link, call get_my_referral_code — NEVER invent a code and NEVER quote one from memory. The tool returns the full explanation script; follow it.
+- Only the REFERRER (existing TTT client) earns a reward. The friend (referee) receives nothing. Never say "both of you get a reward" or anything similar.
+- Reward depends on the friend's first TTT tax invoice (ex VAT, paid in full):
+    * Below R1,500 ex VAT: no reward.
+    * R1,500 to R4,999.99 ex VAT: R500 cash to the referrer.
+    * R5,000 or more ex VAT: R1,000 cash to the referrer.
+- Reward form: CASH paid directly into the referrer's bank account on file. NOT an invoice discount, NOT a credit, NOT a line item on the next bill. If the client asks whether it'll show on their invoice, correct the misunderstanding explicitly.
+- Trigger: reward is paid when the REFEREE PAYS THEIR FIRST TTT INVOICE IN FULL. Not when they sign up, not when they part-pay, not when the invoice is issued.
+- The friend must be NEW to TTT. An existing TTT client (any service line) signing up for tax via the link does NOT earn the referrer a reward.
+- Scope: tax services only. The link routes to the tax onboarding form.
+- Campaign window: signup by 20 October 2026; first invoice paid in full by 28 February 2027.
+- Campaign start: 1 June 2026. Before that date the code exists but no reward is payable.
+- No cap on total rewards. Every qualifying friend earns a separate reward.
+- If the client wants their personal code or sharing link, call get_my_referral_code. NEVER invent a code and NEVER quote one from memory.
 - Never offer to send the link to the friend on the client's behalf. The client forwards it themselves.
 
 **CRM Data**:
@@ -2007,26 +2014,14 @@ export class ClaudeService {
                                 const code = await dynamicsService.getContactReferralCode(contactId);
                                 if (!code) {
                                     functionResponse = JSON.stringify({
-                                        status: "not_found",
+                                        status: "missing_code",
+                                        code: null,
                                         message: "No referral code is set on this contact record. Apologise briefly, offer to have the consultant look into it (request_consultant_callback). Do NOT invent a code."
                                     });
                                 } else {
-                                    // Campaign window: 1 Jun 2026 – 31 Jul 2026 SAST.
-                                    const CAMPAIGN_START = new Date('2026-06-01T00:00:00+02:00');
-                                    const CAMPAIGN_END = new Date('2026-07-31T23:59:59+02:00');
-                                    const now = new Date();
-                                    const campaignActive = now >= CAMPAIGN_START && now <= CAMPAIGN_END;
-                                    const magicLink = `https://ttt-tax.co.za/client-onboarding?ref=${encodeURIComponent(code)}&service=tax`;
-                                    functionResponse = JSON.stringify({
-                                        status: "success",
-                                        code,
-                                        magic_link: magicLink,
-                                        campaign_active: campaignActive,
-                                        campaign_window: "1 June 2026 – 31 July 2026",
-                                        reply_instructions: campaignActive
-                                            ? "Hand the client their magic_link as the PRIMARY artifact (full URL in the message). Explain in 3 numbered steps: (1) forward the link to a friend, (2) the friend clicks and signs up with the code already attached, (3) when the friend pays their FIRST TTT invoice, R500 is paid STRAIGHT INTO THE REFERRER'S BANK ACCOUNT. CRITICAL: describe the R500 as a cash payment into the referrer's bank account — NEVER as a discount, credit, or amount off an invoice (clients check their bill and think TTT forgot). Also state: campaign ends 31 July 2026; no cap on referrals; include the raw `code` as a typed fallback at the end. NEVER offer to send the link on the client's behalf — they forward it themselves."
-                                            : "The R500 campaign runs 1 June – 31 July 2026 and is NOT currently active. Give the client their magic_link for future use but be upfront the reward only applies within that window. Do not promise rewards outside it."
-                                    });
+                                    functionResponse = JSON.stringify(
+                                        buildReferralCodePayload({ code, currentDate: new Date() })
+                                    );
                                 }
                             }
                         } else if (functionName === 'upload_letter_of_engagement') {
