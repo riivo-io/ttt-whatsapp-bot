@@ -100,6 +100,9 @@ export function startFeedbackPromptWorker(): Worker<FeedbackPromptJobPayload> {
         {
             connection: workerConnection,
             concurrency: 4,
+            // Match the WhatsApp worker polling cadence — see comment there.
+            drainDelay: 30,
+            stalledInterval: 60_000,
         }
     );
 

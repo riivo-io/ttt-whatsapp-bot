@@ -80,6 +80,13 @@ export function startWhatsAppWorkers(): StartedWorker[] {
             {
                 connection,
                 concurrency: 1,
+                // Upstash bills per-command and caps daily requests. Default
+                // BullMQ polling (drainDelay=5s, stalledInterval=30s) plus
+                // per-shard workers easily exceeds the 500K/day cap when
+                // idle. Stretching both intervals cuts idle traffic ~6×
+                // with no functional impact for our latency target.
+                drainDelay: 30,
+                stalledInterval: 60_000,
             }
         );
 
