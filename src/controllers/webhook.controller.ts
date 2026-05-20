@@ -13,6 +13,20 @@ const BLOCKED_PHONES = new Set(
         .filter(Boolean)
 );
 
+// Hard allowlist on inbound `phone_number_id`. If set, any inbound whose PID
+// is not in this list is dropped before we touch Supabase or Redis. Empty/unset
+// means allow all (preserves prior behavior).
+//
+// Why: the webhook is shared by every WABA subscribed to this Meta App. If a
+// foreign (e.g. prod) WABA is subscribed, its traffic burns Upstash request
+// quota on idempotency + BullMQ enqueue. Gating at the door costs ~0 ops.
+const ALLOWED_PHONE_NUMBER_IDS = new Set(
+    (process.env.WEBHOOK_ALLOWED_PHONE_NUMBER_IDS || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+);
+
 export function verifyWebhook(req: Request, res: Response): void {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -66,6 +80,16 @@ export async function handleIncomingMessage(req: Request, res: Response): Promis
                 // from the same number, even when multiple numbers are attached
                 // to the same WABA.
                 const inboundPhoneNumberId: string | undefined = value?.metadata?.phone_number_id;
+
+                if (
+                    ALLOWED_PHONE_NUMBER_IDS.size > 0 &&
+                    (!inboundPhoneNumberId || !ALLOWED_PHONE_NUMBER_IDS.has(inboundPhoneNumberId))
+                ) {
+                    console.log(
+                        `[Webhook] DROP pid=${inboundPhoneNumberId || 'unknown'} waba=${entry.id} — not in WEBHOOK_ALLOWED_PHONE_NUMBER_IDS`
+                    );
+                    continue;
+                }
 
                 for (const message of messages) {
                     const incoming = extractIncoming(message);
