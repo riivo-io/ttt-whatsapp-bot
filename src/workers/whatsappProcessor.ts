@@ -47,7 +47,7 @@ const CLIENT_MENU_IDS = {
 // bespoke dispatch logic.
 const CLIENT_MENU_CANONICAL_TEXT: Record<string, string> = {
     [CLIENT_MENU_IDS.INVOICES]: 'Please show me my invoices and outstanding balance.',
-    [CLIENT_MENU_IDS.CASES]: 'What is the status on my open cases?',
+    [CLIENT_MENU_IDS.CASES]: 'What is the status on my open tax returns?',
     [CLIENT_MENU_IDS.UPLOAD]: 'What tax documents do I need to upload?',
     [CLIENT_MENU_IDS.CALLBACK]: 'Please request a consultant callback for me.',
     [CLIENT_MENU_IDS.REFERRAL]: 'Please share my referral code and sharing link.',
@@ -177,7 +177,7 @@ async function sendClientWelcomeMenu(to: string, firstName: string): Promise<str
                 title: 'Your account',
                 rows: [
                     { id: CLIENT_MENU_IDS.INVOICES, title: '📄 Invoices & balances', description: "View, download, or check what's due" },
-                    { id: CLIENT_MENU_IDS.CASES, title: '📂 Case updates', description: 'Status on your open tax matters' },
+                    { id: CLIENT_MENU_IDS.CASES, title: '📂 Tax return updates', description: 'Status on your open tax returns' },
                     { id: CLIENT_MENU_IDS.UPLOAD, title: '📎 Upload tax docs', description: 'IRP5, IT3, payslips and more' },
                 ],
             },

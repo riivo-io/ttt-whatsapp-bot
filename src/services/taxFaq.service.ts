@@ -138,8 +138,8 @@ export async function handleGetRefundStatus(params: {
         return JSON.stringify({
             status: 'no_active_case',
             message: params.taxYear
-                ? `You don't have an active tax case for ${params.taxYear} on file. Once we create one I can give you a refund update.`
-                : `You don't have any active tax cases yet. Once your return is being prepared I can give you a refund update.`,
+                ? `You don't have an active tax return for ${params.taxYear} on file. Once we set one up I can give you a refund update.`
+                : `You don't have any active tax returns yet. Once your return is being prepared I can give you a refund update.`,
         });
     }
 
@@ -160,7 +160,7 @@ export async function handleGetRefundStatus(params: {
                 tax_year: yearLabel,
                 stage: stageLabel,
                 refund: null,
-                message: `For your ${yearLabel || 'tax'} case we aren't sure of the exact refund amount just yet — your consultant will follow up to confirm.`,
+                message: `For your ${yearLabel || 'tax'} return we aren't sure of the exact refund amount just yet — your consultant will follow up to confirm.`,
             };
         }
 
@@ -169,7 +169,7 @@ export async function handleGetRefundStatus(params: {
             stage: stageLabel,
             refund_rand: amount,
             refund_formatted: formatRand(amount),
-            message: `Your ${yearLabel || 'tax'} case has a potential refund of ${formatRand(amount)} (case stage: ${stageLabel || 'unknown'}).`,
+            message: `Your ${yearLabel || 'tax'} return has a potential refund of ${formatRand(amount)} (stage: ${stageLabel || 'unknown'}).`,
         };
     }));
 
@@ -191,8 +191,8 @@ export async function handleGetSubmissionStatus(params: {
         return JSON.stringify({
             status: 'not_submitted',
             message: params.taxYear
-                ? `No active case for ${params.taxYear} yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only create a case once we're ready to file.`
-                : `No active tax cases on file — TTT hasn't submitted a return for you yet. We only create a case once your return is ready to be filed.`,
+                ? `No active tax return for ${params.taxYear} yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only set one up once we're ready to file.`
+                : `No active tax returns on file — TTT hasn't submitted a return for you yet. We only set one up once your return is ready to be filed.`,
         });
     }
 
@@ -205,7 +205,7 @@ export async function handleGetSubmissionStatus(params: {
 
     return JSON.stringify({
         status: 'submitted',
-        message: 'Yes — there is an active tax case on file, which means we have submitted you.',
+        message: 'Yes — there is an active tax return on file, which means we have submitted you.',
         cases: perCase,
     });
 }
@@ -227,8 +227,8 @@ export async function handleGetAuditStatus(params: {
         return JSON.stringify({
             status: 'not_on_audit',
             message: cases.length === 0
-                ? `You don't have any active tax cases on file, so nothing is currently under SARS audit.`
-                : `None of your active tax cases are currently flagged as being under SARS audit.`,
+                ? `You don't have any active tax returns on file, so nothing is currently under SARS audit.`
+                : `None of your active tax returns are currently flagged as being under SARS audit.`,
         });
     }
 
@@ -239,7 +239,7 @@ export async function handleGetAuditStatus(params: {
             return {
                 tax_year: yearLabel,
                 stage: getCaseStageLabel(c),
-                message: `Your ${yearLabel || 'tax'} case is on audit, but the placed-on-audit date isn't recorded yet. Your consultant will be able to give you exact timelines.`,
+                message: `Your ${yearLabel || 'tax'} return is on audit, but the placed-on-audit date isn't recorded yet. Your consultant will be able to give you exact timelines.`,
             };
         }
 
@@ -250,11 +250,11 @@ export async function handleGetAuditStatus(params: {
 
         if (summary.bucket === 'within_standard') {
             const remaining = summary.standardDays - summary.daysOnAudit;
-            message = `Your${yearText} case has been on audit for ${summary.daysOnAudit} working day${summary.daysOnAudit === 1 ? '' : 's'}. SARS audits usually conclude within ${summary.standardDays} working days, so there's about ${remaining} working day${remaining === 1 ? '' : 's'} left in the standard window.`;
+            message = `Your${yearText} tax return has been on audit for ${summary.daysOnAudit} working day${summary.daysOnAudit === 1 ? '' : 's'}. SARS audits usually conclude within ${summary.standardDays} working days, so there's about ${remaining} working day${remaining === 1 ? '' : 's'} left in the standard window.`;
         } else if (summary.bucket === 'in_extension') {
-            message = `Your${yearText} case has been on audit for ${summary.daysOnAudit} working days. That's beyond the usual ${summary.standardDays}-day window — SARS can extend audits up to ${summary.extendedDays} working days in special circumstances. We email you separately if anything changes.`;
+            message = `Your${yearText} tax return has been on audit for ${summary.daysOnAudit} working days. That's beyond the usual ${summary.standardDays}-day window — SARS can extend audits up to ${summary.extendedDays} working days in special circumstances. We email you separately if anything changes.`;
         } else {
-            message = `Your${yearText} case has been on audit for ${summary.daysOnAudit} working days, which is past the ${summary.extendedDays}-day extended window. Your consultant will follow up directly to chase SARS.`;
+            message = `Your${yearText} tax return has been on audit for ${summary.daysOnAudit} working days, which is past the ${summary.extendedDays}-day extended window. Your consultant will follow up directly to chase SARS.`;
         }
 
         return {
@@ -393,7 +393,7 @@ export async function handleGetReceivedDocuments(params: {
     }
     if (submissionDocs.length > 0) {
         if (lines.length > 0) lines.push('');
-        lines.push('Uploaded to your case file:');
+        lines.push('Uploaded to your tax return file:');
         submissionDocs.forEach(d => lines.push(`• ${d.label}${d.taxYear ? ` (${d.taxYear})` : ''}`));
     }
 
