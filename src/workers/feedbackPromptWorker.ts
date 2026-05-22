@@ -1,6 +1,9 @@
-import { Worker, Job } from 'bullmq';
-import { Redis } from 'ioredis';
-import { createRedisConnection } from '../queue/connection';
+import {
+    ServiceBusReceiver,
+    ServiceBusReceivedMessage,
+    ProcessErrorArgs,
+} from '@azure/service-bus';
+import { getServiceBusClient } from '../queue/connection';
 import {
     FEEDBACK_PROMPT_QUEUE,
     FeedbackPromptJobPayload,
@@ -22,10 +25,10 @@ import { messageContextStorage } from '../utils/messageContext';
 // robust to restarts and missed cancellations.
 //
 // Skip reasons are emitted as structured `[FeedbackPrompt]` log lines so we
-// can watch fire/skip ratios in Vercel logs without extra infra.
+// can watch fire/skip ratios without extra infra.
 
-let worker: Worker<FeedbackPromptJobPayload> | null = null;
-let workerConnection: Redis | null = null;
+let receiver: ServiceBusReceiver | null = null;
+let running = false;
 
 export async function processFeedbackPromptJob(payload: FeedbackPromptJobPayload): Promise<void> {
     const { caseId, sessionId, phoneNumber, crmRequestId, botAnswerSentAt } = payload;
@@ -83,50 +86,60 @@ export async function processFeedbackPromptJob(payload: FeedbackPromptJobPayload
     }
 }
 
-export function startFeedbackPromptWorker(): Worker<FeedbackPromptJobPayload> {
-    if (worker) return worker;
+async function handleMessage(
+    rec: ServiceBusReceiver,
+    msg: ServiceBusReceivedMessage,
+): Promise<void> {
+    const payload = msg.body as FeedbackPromptJobPayload;
+    const deliveryCount = (msg.deliveryCount ?? 0) + 1;
+    try {
+        // sendMessage requires phoneNumberId in AsyncLocalStorage scope for
+        // the multi-number routing path; for now we don't have it on the
+        // payload, so we run with an empty ctx (single-number prod setup).
+        await messageContextStorage.run({ phoneNumberId: '' }, async () => {
+            await processFeedbackPromptJob(payload);
+        });
+        await rec.completeMessage(msg);
+    } catch (err: any) {
+        console.warn(
+            `[FeedbackPromptWorker] msg=${msg.messageId} delivery=${deliveryCount} err=${err?.message || err}`
+        );
+        // ASB will redeliver up to max-delivery (5) configured on the queue;
+        // after that it lands in the queue's DLQ automatically.
+        await rec.abandonMessage(msg);
+    }
+}
 
-    workerConnection = createRedisConnection();
-    worker = new Worker<FeedbackPromptJobPayload>(
-        FEEDBACK_PROMPT_QUEUE,
-        async (job: Job<FeedbackPromptJobPayload>) => {
-            // sendMessage requires phoneNumberId in AsyncLocalStorage scope for
-            // the multi-number routing path; for now we don't have it on the
-            // payload, so we run with an empty ctx (single-number prod setup).
-            await messageContextStorage.run({ phoneNumberId: '' }, async () => {
-                await processFeedbackPromptJob(job.data);
-            });
+export function startFeedbackPromptWorker(): void {
+    if (running) return;
+    running = true;
+    const client = getServiceBusClient();
+    receiver = client.createReceiver(FEEDBACK_PROMPT_QUEUE, { receiveMode: 'peekLock' });
+
+    receiver.subscribe({
+        processMessage: async (msg) => {
+            if (!receiver) return;
+            await handleMessage(receiver, msg);
         },
-        {
-            connection: workerConnection,
-            concurrency: 4,
-            // Match the WhatsApp worker polling cadence — see comment there.
-            drainDelay: 30,
-            stalledInterval: 60_000,
-        }
-    );
-
-    worker.on('error', (err) => {
-        console.error('[FeedbackPromptWorker] worker error:', err.message);
+        processError: async (args: ProcessErrorArgs) => {
+            console.error('[FeedbackPromptWorker]', args.error?.message || args.error);
+        },
+    }, {
+        maxConcurrentCalls: 4,
+        autoCompleteMessages: false,
     });
 
-    worker.on('failed', (job, err) => {
-        const attempts = job?.attemptsMade ?? 0;
-        const max = job?.opts.attempts ?? 1;
-        console.warn(`[FeedbackPromptWorker] job=${job?.id} attempt=${attempts}/${max} err=${err.message}`);
-    });
-
-    console.log('[FeedbackPromptWorker] Started feedback-prompt worker (concurrency=4)');
-    return worker;
+    console.log('[FeedbackPromptWorker] Started feedback-prompt receiver (concurrency=4)');
 }
 
 export async function stopFeedbackPromptWorker(): Promise<void> {
-    if (worker) {
-        await worker.close();
-        worker = null;
-    }
-    if (workerConnection) {
-        await workerConnection.quit();
-        workerConnection = null;
+    running = false;
+    if (receiver) {
+        try {
+            await receiver.close();
+        } catch (e: any) {
+            console.warn('[FeedbackPromptWorker] receiver.close error:', e?.message || e);
+        }
+        receiver = null;
     }
 }

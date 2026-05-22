@@ -1,113 +1,67 @@
-import { Queue, JobsOptions } from 'bullmq';
-import { Redis } from 'ioredis';
-import { createRedisConnection } from './connection';
+import { ServiceBusMessage, ServiceBusSender } from '@azure/service-bus';
+import { getServiceBusClient } from './connection';
 
-// Sharded queue design for per-conversation FIFO:
+// Per-conversation FIFO via Azure Service Bus sessions:
 //
-//   shard(phone) = hash(phone) % NUM_SHARDS
+//   sessionId = phone
 //
-// Every message from the same phone lands in the same shard queue. Each
-// shard runs with worker concurrency = 1, giving strict in-order processing
-// per phone. Across shards runs in parallel.
+// ASB guarantees ordered delivery within a session and locks one session at
+// a time to a receiver, so per-phone ordering falls out for free. Multiple
+// sessions (phones) process in parallel up to `MAX_CONCURRENT_SESSIONS`.
 //
-// Tune NUM_SHARDS up for more parallel throughput at the cost of more Redis
-// connections (each shard owns one blocking BLPOP connection on the worker
-// side). 16 shards is a reasonable default for ~5000 concurrent users —
-// each shard handles ~300 users serially.
+// Duplicate detection is set on the queue (10-min window); we set
+// `messageId = metaMessageId` so a redelivered Meta webhook is rejected by
+// ASB before the worker sees it. Supabase's `whatsapp_inbound_messages`
+// unique constraint is the durable layer underneath.
 
-// NUM_SHARDS is resolved lazily — evaluating at module-import time runs
-// before server.ts's dotenv.config(), so process.env.WORKER_NUM_SHARDS
-// wouldn't be set yet.
-let cachedNumShards: number | null = null;
-export function getNumShards(): number {
-    if (cachedNumShards !== null) return cachedNumShards;
-    cachedNumShards = Math.max(
-        1,
-        parseInt(process.env.WORKER_NUM_SHARDS || '16', 10)
-    );
-    return cachedNumShards;
-}
-
-export const SHARD_QUEUE_PREFIX = 'whatsapp-inbound';
-
-export function shardQueueName(shardIndex: number): string {
-    return `${SHARD_QUEUE_PREFIX}-${shardIndex}`;
-}
-
-// FNV-1a-ish 32-bit hash. Cheap, well-distributed, doesn't pull in a crypto
-// dep. Used only for shard routing — not security-sensitive.
-export function shardFor(phone: string): number {
-    let h = 2166136261 >>> 0;
-    for (let i = 0; i < phone.length; i++) {
-        h ^= phone.charCodeAt(i);
-        h = Math.imul(h, 16777619) >>> 0;
-    }
-    return h % getNumShards();
-}
+export const WHATSAPP_INBOUND_QUEUE = 'whatsapp-inbound';
 
 // The exact shape passed from the webhook ingester to the worker. Keep this
-// minimal — it gets serialized to Redis and stored until the worker picks it
-// up. Anything reconstructible from `phone` + `metaMessageId` should be
-// fetched inside the worker, not stashed in the payload.
+// minimal — it gets serialized into the ASB message body. Anything
+// reconstructible from `phone` + `metaMessageId` should be fetched inside
+// the worker, not stashed in the payload.
 export type WhatsAppJobPayload = {
-    metaMessageId: string;          // wamid.xxx — also used as BullMQ jobId
-    phone: string;                  // sender E.164 sans `+`
+    metaMessageId: string;          // wamid.xxx — also used as ASB messageId for dedup
+    phone: string;                  // sender E.164 sans `+` — used as sessionId
     phoneNumberId: string | null;   // metadata.phone_number_id (for multi-number routing)
     receivedAt: number;             // Date.now() at ingest — for end-to-end latency
     rawMessage: any;                // Meta's `messages[i]` object, unmodified
 };
 
-let producerQueues: Queue<WhatsAppJobPayload>[] | null = null;
-let producerConnections: Redis[] | null = null;
+let sender: ServiceBusSender | null = null;
 
-function getProducerQueues(): Queue<WhatsAppJobPayload>[] {
-    if (producerQueues) return producerQueues;
-    // One ioredis connection per Queue — sharing breaks under load on Upstash.
-    producerConnections = Array.from({ length: getNumShards() }, () => createRedisConnection());
-    producerQueues = producerConnections.map((connection, i) =>
-        new Queue<WhatsAppJobPayload>(shardQueueName(i), {
-            connection,
-            defaultJobOptions: {
-                // Up to 4 retries on transient failures with exponential backoff.
-                // After that the job lands in the DLQ via the worker's failed
-                // handler in whatsappWorker.ts.
-                attempts: 4,
-                backoff: { type: 'exponential', delay: 2000 },
-                // Keep recent completed jobs briefly for observability, but bound
-                // both lists so Redis memory stays predictable.
-                removeOnComplete: { age: 3600, count: 1000 },
-                removeOnFail: { age: 24 * 3600, count: 5000 },
-            },
-        })
-    );
-    return producerQueues;
+function getSender(): ServiceBusSender {
+    if (sender) return sender;
+    sender = getServiceBusClient().createSender(WHATSAPP_INBOUND_QUEUE);
+    return sender;
 }
 
 /**
  * Enqueue an inbound WhatsApp message for worker processing.
  *
- * The `metaMessageId` doubles as the BullMQ jobId — BullMQ silently no-ops
- * if a job with the same id is already in the queue, giving us a second line
- * of dedupe defense on top of the Supabase idempotency table. (Belt and
- * braces: Supabase covers the durable case, jobId dedupe covers the rare
- * race where two ingester replicas fire the insert concurrently.)
+ * `messageId = metaMessageId` activates the queue's duplicate-detection
+ * window as a second line of defense on top of Supabase's idempotency table.
+ * `sessionId = phone` is what gives strict per-phone FIFO on the receive
+ * side.
  */
 export async function enqueueInboundMessage(payload: WhatsAppJobPayload): Promise<void> {
-    const queues = getProducerQueues();
-    const queue = queues[shardFor(payload.phone)];
-    const opts: JobsOptions = { jobId: payload.metaMessageId };
-    await queue.add('inbound', payload, opts);
+    const msg: ServiceBusMessage = {
+        body: payload,
+        sessionId: payload.phone,
+        messageId: payload.metaMessageId,
+    };
+    await getSender().sendMessages(msg);
 }
 
 /**
- * Re-enqueue a job that hit an Anthropic 429. With concurrency=1 per shard,
- * a sleeping worker would block every other phone hashed to that shard, so
- * we mark the original job complete and add a fresh delayed one instead.
+ * Re-enqueue a job that hit an Anthropic 429. ASB has scheduled messages
+ * built in — no separate retry queue, no sleeping worker blocking the
+ * session.
  *
- * The jobId is namespaced as `${wamid}:retry:${attemptNum}` so:
- *   - it doesn't collide with the original wamid job
- *   - Meta redelivering the bare wamid is still rejected by the idempotency
- *     table (claim() returns false → ingester drops)
+ * The messageId is namespaced as `${wamid}:retry:${attemptNum}` so:
+ *   - it doesn't collide with the original wamid message in dedup
+ *   - Meta redelivering the bare wamid is still rejected by the
+ *     idempotency table (claim() returns false → ingester drops)
  *   - successive retries don't collide with each other
  */
 export async function enqueueRetryAfterRateLimit(
@@ -115,26 +69,22 @@ export async function enqueueRetryAfterRateLimit(
     attemptNum: number,
     delayMs: number,
 ): Promise<void> {
-    const queues = getProducerQueues();
-    const queue = queues[shardFor(payload.phone)];
-    const opts: JobsOptions = {
-        jobId: `${payload.metaMessageId}:retry:${attemptNum}`,
-        delay: Math.max(1, Math.floor(delayMs)),
+    const msg: ServiceBusMessage = {
+        body: payload,
+        sessionId: payload.phone,
+        messageId: `${payload.metaMessageId}:retry:${attemptNum}`,
+        scheduledEnqueueTimeUtc: new Date(Date.now() + Math.max(1, Math.floor(delayMs))),
     };
-    await queue.add('inbound', payload, opts);
+    await getSender().sendMessages(msg);
 }
 
 // Pure helper lives in src/utils/jobIdRetry so smoke tests can import it
-// without pulling in BullMQ + ioredis transitively.
+// without pulling in @azure/service-bus transitively.
 export { parseRetryAttempt } from '../utils/jobIdRetry';
 
 export async function closeProducerQueues(): Promise<void> {
-    if (producerQueues) {
-        await Promise.all(producerQueues.map(q => q.close()));
-        producerQueues = null;
-    }
-    if (producerConnections) {
-        await Promise.all(producerConnections.map(c => c.quit()));
-        producerConnections = null;
+    if (sender) {
+        await sender.close();
+        sender = null;
     }
 }

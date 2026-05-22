@@ -1,9 +1,11 @@
-import { Worker, Job } from 'bullmq';
-import { Redis } from 'ioredis';
-import { createRedisConnection } from '../queue/connection';
 import {
-    getNumShards,
-    shardQueueName,
+    ServiceBusSessionReceiver,
+    ProcessErrorArgs,
+    ServiceBusReceivedMessage,
+} from '@azure/service-bus';
+import { getServiceBusClient } from '../queue/connection';
+import {
+    WHATSAPP_INBOUND_QUEUE,
     WhatsAppJobPayload,
     enqueueRetryAfterRateLimit,
     parseRetryAttempt,
@@ -16,144 +18,204 @@ import { RateLimitError } from '../utils/anthropicRateLimit';
 // WhatsApp client has moved on past that.
 const MAX_RATE_LIMIT_RETRIES = 5;
 
-// One Worker per shard. concurrency=1 guarantees strict in-order processing
-// within a shard, which (combined with hash-routing in whatsappQueue.ts)
-// gives strict FIFO per phone number. Across shards runs in parallel.
+// ASB session-based consumer. Each accepted session gives us strict per-phone
+// FIFO; we run multiple sessions concurrently up to MAX_CONCURRENT_SESSIONS.
+//
+// We use the manual `acceptNextSession` loop rather than `createSessionProcessor`
+// so we can take a session that has messages, drain it to empty, and release it
+// — the processor's session-rotation semantics are opaque enough that the loop
+// is easier to reason about and matches the BullMQ "one worker per shard" model
+// the rest of the code expects.
 
-type StartedWorker = Worker<WhatsAppJobPayload>;
+function getMaxConcurrentSessions(): number {
+    return Math.max(1, parseInt(process.env.MAX_CONCURRENT_SESSIONS || '8', 10));
+}
 
-let workers: StartedWorker[] | null = null;
-let workerConnections: Redis[] | null = null;
+let running = false;
+let sessionLoops: Promise<void>[] = [];
+const activeReceivers = new Set<ServiceBusSessionReceiver>();
 
-export function startWhatsAppWorkers(): StartedWorker[] {
-    if (workers) return workers;
-
-    // One ioredis connection per Worker — sharing a single connection across
-    // all shards breaks on Upstash with mid-stream ECONNRESET.
-    workerConnections = Array.from({ length: getNumShards() }, () => createRedisConnection());
-    workers = workerConnections.map((connection, shardIndex) => {
-        const name = shardQueueName(shardIndex);
-        const worker = new Worker<WhatsAppJobPayload>(
-            name,
-            async (job: Job<WhatsAppJobPayload>) => {
-                const queuedFor = Date.now() - job.data.receivedAt;
-                console.log(
-                    `[Worker:${shardIndex}] job=${job.id} phone=${job.data.phone} queuedMs=${queuedFor} attempt=${job.attemptsMade + 1}`
-                );
-                try {
-                    await processInboundJob(job.data);
-                } catch (err) {
-                    // RateLimitError MUST be checked before the generic handler
-                    // (per breakdown §5.1) so we re-enqueue with delay instead
-                    // of letting BullMQ's exponential backoff run — that would
-                    // block the entire shard for tens of seconds.
-                    if (err instanceof RateLimitError) {
-                        const currentAttempt = parseRetryAttempt(job.id);
-                        const nextAttempt = currentAttempt + 1;
-                        if (currentAttempt >= MAX_RATE_LIMIT_RETRIES) {
-                            console.error(
-                                `[Worker:${shardIndex}] rate-limit retry cap reached for job=${job.id} phone=${job.data.phone} — DLQ`
-                            );
-                            await idempotencyService.recordDeadLetter({
-                                jobId: job.id,
-                                queueName: name,
-                                metaMessageId: job.data?.metaMessageId ?? null,
-                                phoneNumber: job.data?.phone ?? null,
-                                payload: job.data,
-                                failedReason: 'rate_limit_exceeded_after_5_retries',
-                                attemptsMade: currentAttempt,
-                                stackTrace: err.stack ?? null,
-                            });
-                            // Returning normally marks the original job complete —
-                            // no BullMQ retry storm, no shard blocking.
-                            return;
-                        }
-                        console.warn(
-                            `[Worker:${shardIndex}] 429 — re-enqueue job=${job.id} as retry:${nextAttempt} delayMs=${err.retryAfterMs}`
-                        );
-                        await enqueueRetryAfterRateLimit(job.data, nextAttempt, err.retryAfterMs);
-                        return;
-                    }
-                    throw err;
-                }
-            },
-            {
-                connection,
-                concurrency: 1,
-                // Upstash bills per-command and caps daily requests. Default
-                // BullMQ polling (drainDelay=5s, stalledInterval=30s) plus
-                // per-shard workers easily exceeds the 500K/day cap when
-                // idle. Stretching both intervals cuts idle traffic ~6×
-                // with no functional impact for our latency target.
-                drainDelay: 30,
-                stalledInterval: 60_000,
-            }
+async function handleOne(
+    receiver: ServiceBusSessionReceiver,
+    msg: ServiceBusReceivedMessage,
+    slot: number,
+): Promise<void> {
+    const payload = msg.body as WhatsAppJobPayload;
+    const queuedFor = Date.now() - payload.receivedAt;
+    const deliveryCount = (msg.deliveryCount ?? 0) + 1;
+    console.log(
+        `[Worker:${slot}] msg=${msg.messageId} phone=${payload.phone} queuedMs=${queuedFor} delivery=${deliveryCount}`
+    );
+    try {
+        await processInboundJob(payload);
+        await receiver.completeMessage(msg);
+        console.log(
+            `[Worker:${slot}] completed msg=${msg.messageId} totalMs=${Date.now() - payload.receivedAt}`
         );
-
-        worker.on('completed', (job, _result, prev) => {
-            console.log(
-                `[Worker:${shardIndex}] completed job=${job.id} prev=${prev} totalMs=${Date.now() - job.data.receivedAt}`
-            );
-        });
-
-        worker.on('failed', async (job, err) => {
-            if (!job) {
-                console.error(`[Worker:${shardIndex}] failed with no job:`, err.message);
+    } catch (err: any) {
+        // RateLimitError MUST be checked before the generic handler so we
+        // re-enqueue with delay instead of letting ASB redeliver — that
+        // would block the whole session waiting on the same backoff.
+        if (err instanceof RateLimitError) {
+            const currentAttempt = parseRetryAttempt(msg.messageId?.toString());
+            const nextAttempt = currentAttempt + 1;
+            if (currentAttempt >= MAX_RATE_LIMIT_RETRIES) {
+                console.error(
+                    `[Worker:${slot}] rate-limit retry cap reached for msg=${msg.messageId} phone=${payload.phone} — DLQ`
+                );
+                await idempotencyService.recordDeadLetter({
+                    jobId: msg.messageId?.toString(),
+                    queueName: WHATSAPP_INBOUND_QUEUE,
+                    metaMessageId: payload?.metaMessageId ?? null,
+                    phoneNumber: payload?.phone ?? null,
+                    payload,
+                    failedReason: 'rate_limit_exceeded_after_5_retries',
+                    attemptsMade: currentAttempt,
+                    stackTrace: err.stack ?? null,
+                });
+                // Complete the original so ASB drops it — no redelivery storm,
+                // no session blocking.
+                await receiver.completeMessage(msg);
                 return;
             }
-            const attemptsMade = job.attemptsMade;
-            const maxAttempts = job.opts.attempts ?? 1;
             console.warn(
-                `[Worker:${shardIndex}] failed job=${job.id} phone=${job.data?.phone} attempt=${attemptsMade}/${maxAttempts} err=${err.message}`
+                `[Worker:${slot}] 429 — re-enqueue msg=${msg.messageId} as retry:${nextAttempt} delayMs=${err.retryAfterMs}`
             );
+            await enqueueRetryAfterRateLimit(payload, nextAttempt, err.retryAfterMs);
+            await receiver.completeMessage(msg);
+            return;
+        }
 
-            // Only DLQ once we've exhausted retries. Intermediate failures stay
-            // in BullMQ's normal retry loop with exponential backoff.
-            if (attemptsMade >= maxAttempts) {
-                try {
-                    await idempotencyService.recordDeadLetter({
-                        jobId: job.id,
-                        queueName: name,
-                        metaMessageId: job.data?.metaMessageId ?? null,
-                        phoneNumber: job.data?.phone ?? null,
-                        payload: job.data,
-                        failedReason: err.message,
-                        attemptsMade,
-                        stackTrace: err.stack ?? null,
-                    });
-                    console.error(
-                        `[Worker:${shardIndex}] DLQ landed job=${job.id} phone=${job.data?.phone}`
-                    );
-                } catch (dlqErr: any) {
-                    console.error(
-                        `[Worker:${shardIndex}] DLQ write failed for job=${job.id}:`,
-                        dlqErr?.message || dlqErr
-                    );
-                }
+        // Generic failure path: if we've hit the max-delivery ceiling, write
+        // to the DLQ row ourselves and dead-letter the ASB message so it
+        // stops being redelivered. Otherwise abandon — ASB will redeliver
+        // with its built-in backoff and increment deliveryCount.
+        const maxDelivery = 5; // matches queue config
+        console.warn(
+            `[Worker:${slot}] failed msg=${msg.messageId} phone=${payload?.phone} delivery=${deliveryCount}/${maxDelivery} err=${err?.message || err}`
+        );
+        if (deliveryCount >= maxDelivery) {
+            try {
+                await idempotencyService.recordDeadLetter({
+                    jobId: msg.messageId?.toString(),
+                    queueName: WHATSAPP_INBOUND_QUEUE,
+                    metaMessageId: payload?.metaMessageId ?? null,
+                    phoneNumber: payload?.phone ?? null,
+                    payload,
+                    failedReason: err?.message ?? 'unknown',
+                    attemptsMade: deliveryCount,
+                    stackTrace: err?.stack ?? null,
+                });
+                console.error(
+                    `[Worker:${slot}] DLQ landed msg=${msg.messageId} phone=${payload?.phone}`
+                );
+            } catch (dlqErr: any) {
+                console.error(
+                    `[Worker:${slot}] DLQ write failed for msg=${msg.messageId}:`,
+                    dlqErr?.message || dlqErr
+                );
             }
-        });
+            await receiver.deadLetterMessage(msg, {
+                deadLetterReason: 'MaxDeliveryExceeded',
+                deadLetterErrorDescription: err?.message ?? 'unknown',
+            });
+        } else {
+            await receiver.abandonMessage(msg);
+        }
+    }
+}
 
-        worker.on('error', (err) => {
-            console.error(`[Worker:${shardIndex}] worker error:`, err.message);
-        });
+async function sessionLoop(slot: number): Promise<void> {
+    const client = getServiceBusClient();
+    while (running) {
+        let receiver: ServiceBusSessionReceiver;
+        try {
+            // No sessionId arg → ASB hands us the next available session
+            // with messages. The maxWaitTime is enforced by the SDK.
+            receiver = await client.acceptNextSession(WHATSAPP_INBOUND_QUEUE, {
+                receiveMode: 'peekLock',
+            });
+        } catch (err: any) {
+            // No-sessions-available comes back as a timeout — three flavours in
+            // the wild: `code: 'OperationTimeoutError'`, `name:
+            // 'OperationTimeoutError'`, or a `ServiceBusError` whose message
+            // contains "did not complete within the allotted timeout" or
+            // "Unable to create the amqp receiver". All of these are normal
+            // when the queue is idle — loop silently.
+            const code = err?.code || err?.name || '';
+            const message = err?.message || '';
+            const isIdleTimeout =
+                code === 'OperationTimeoutError' ||
+                /did not complete within the allotted timeout/i.test(message) ||
+                /Unable to create the amqp receiver/i.test(message);
+            if (isIdleTimeout) {
+                await new Promise(r => setTimeout(r, 1000));
+                continue;
+            }
+            console.error(`[Worker:${slot}] acceptNextSession error:`, err?.message || err);
+            await new Promise(r => setTimeout(r, 5000));
+            continue;
+        }
 
-        return worker;
-    });
+        activeReceivers.add(receiver);
+        const sid = receiver.sessionId;
+        console.log(`[Worker:${slot}] session opened phone=${sid}`);
 
-    console.log(`[Worker] Started ${getNumShards()} shard workers (concurrency=1 each)`);
-    return workers;
+        try {
+            while (running) {
+                const batch = await receiver.receiveMessages(1, { maxWaitTimeInMs: 5000 });
+                if (batch.length === 0) {
+                    // Session idle — release it so another slot can take a
+                    // different session.
+                    break;
+                }
+                await handleOne(receiver, batch[0], slot);
+            }
+        } catch (err: any) {
+            // Session lock lost is normal if the loop sat idle past the
+            // session lock duration; just close and re-accept.
+            console.warn(`[Worker:${slot}] session ${sid} loop error:`, err?.message || err);
+        } finally {
+            activeReceivers.delete(receiver);
+            try {
+                await receiver.close();
+            } catch (e: any) {
+                console.warn(`[Worker:${slot}] receiver.close error:`, e?.message || e);
+            }
+            console.log(`[Worker:${slot}] session closed phone=${sid}`);
+        }
+    }
+}
+
+export function startWhatsAppWorkers(): void {
+    if (running) return;
+    running = true;
+    const slots = getMaxConcurrentSessions();
+    sessionLoops = Array.from({ length: slots }, (_, i) =>
+        sessionLoop(i).catch(err => {
+            console.error(`[Worker:${i}] loop crashed:`, err?.message || err);
+        })
+    );
+    console.log(`[Worker] Started ${slots} session loops on ${WHATSAPP_INBOUND_QUEUE}`);
 }
 
 export async function stopWhatsAppWorkers(): Promise<void> {
-    if (!workers && !workerConnections) return;
-    console.log('[Worker] Stopping workers...');
-    if (workers) {
-        await Promise.all(workers.map(w => w.close()));
-        workers = null;
-    }
-    if (workerConnections) {
-        await Promise.all(workerConnections.map(c => c.quit()));
-        workerConnections = null;
-    }
-    console.log('[Worker] Workers stopped.');
+    if (!running) return;
+    console.log('[Worker] Stopping session loops...');
+    running = false;
+    // Close any active receivers so in-flight acceptNextSession / receiveMessages
+    // calls return promptly.
+    await Promise.all(
+        Array.from(activeReceivers).map(r =>
+            r.close().catch(e => console.warn('[Worker] receiver.close on stop:', e?.message || e))
+        )
+    );
+    activeReceivers.clear();
+    await Promise.all(sessionLoops);
+    sessionLoops = [];
+    console.log('[Worker] Session loops stopped.');
 }
+
+// `ProcessErrorArgs` is exported only to keep the import surface stable for
+// any future top-level error handler.
+export type { ProcessErrorArgs };

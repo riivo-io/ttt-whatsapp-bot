@@ -1,38 +1,28 @@
-import IORedis, { Redis, RedisOptions } from 'ioredis';
+import { ServiceBusClient } from '@azure/service-bus';
 
-// Factory pattern for BullMQ Redis connections.
-//
-// Sharing one ioredis instance across many Queue/Worker objects causes
-// mid-stream ECONNRESET on Upstash (BullMQ pipelines setup commands across
-// all queues onto the shared socket, which Upstash drops). The canonical
-// fix per BullMQ docs is to let each Queue/Worker own its own connection
-// — call `createRedisConnection()` per consumer.
-//
-// Upstash works fine when the URL uses `rediss://` (TLS); do NOT pass an
-// explicit `tls` option, as a partial tls config overrides the scheme-
-// derived defaults and breaks the handshake.
+// Single ServiceBusClient shared across all senders and processors. Unlike
+// the previous Upstash setup (which needed one ioredis connection per
+// Queue/Worker to avoid mid-stream ECONNRESET), the AMQP transport
+// multiplexes senders/receivers over a single connection — sharing is the
+// recommended pattern.
 
-function getBaseOptions(): RedisOptions {
-    return {
-        // BullMQ requirements for blocking ops:
-        maxRetriesPerRequest: null,
-        enableReadyCheck: false,
-        // Force IPv4. Upstash hostnames resolve to both A and AAAA; when Node
-        // picks the AAAA record and the egress network has flaky IPv6 (most
-        // home/ISP networks), TLS reads hang and get reset.
-        family: 4,
-        connectTimeout: 30_000,
-    };
+let cachedClient: ServiceBusClient | null = null;
+
+export function getServiceBusClient(): ServiceBusClient {
+    if (cachedClient) return cachedClient;
+    const conn = process.env.SERVICE_BUS_CONNECTION_STRING;
+    if (!conn) {
+        throw new Error(
+            'SERVICE_BUS_CONNECTION_STRING is not set — the queue cannot connect to Azure Service Bus.'
+        );
+    }
+    cachedClient = new ServiceBusClient(conn);
+    return cachedClient;
 }
 
-export function createRedisConnection(): Redis {
-    const url = process.env.REDIS_URL;
-    if (!url) {
-        throw new Error('REDIS_URL is not set — the queue cannot connect to Redis.');
+export async function closeServiceBusClient(): Promise<void> {
+    if (cachedClient) {
+        await cachedClient.close();
+        cachedClient = null;
     }
-    const conn = new IORedis(url, getBaseOptions());
-    conn.on('error', (err) => {
-        console.error('[Redis] connection error:', err.message);
-    });
-    return conn;
 }

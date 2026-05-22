@@ -17,7 +17,7 @@ export function buildLoeMagicLink(leadId: string): string | null {
         return null;
     }
     if (!leadId) return null;
-    const host = process.env.LOE_ONBOARDING_HOST || 'ttt-tax.co.za';
+    const host = process.env.LOE_ONBOARDING_HOST || 'ttt-financial-forms.vercel.app';
     const token = mintLoeToken(leadId, secret);
     return `https://${host}/onboarding/loe/${leadId}?token=${encodeURIComponent(token)}`;
 }
