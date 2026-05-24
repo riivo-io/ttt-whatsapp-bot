@@ -40,12 +40,13 @@ class SharePointService {
     private tokenExpiry: number = 0;
     private cachedSiteId: string | null = null;
     private cachedDocsSiteId: string | null = null;
+    private cachedDocsDriveId: string | null = null;
 
     private readonly hostname: string;
     private readonly sitePath: string;
     private readonly kbFolder: string;
     private readonly docsSitePath: string;
-    private readonly docsRootFolder: string;
+    private readonly docsLibraryName: string;
 
     constructor() {
         if (!process.env.GRAPH_CLIENT_ID || !process.env.GRAPH_CLIENT_SECRET || !process.env.GRAPH_TENANT_ID) {
@@ -59,7 +60,11 @@ class SharePointService {
         this.sitePath = process.env.SHAREPOINT_SITE_PATH || '';
         this.kbFolder = process.env.SHAREPOINT_KB_FOLDER || '';
         this.docsSitePath = process.env.SHAREPOINT_DOCS_SITE_PATH || '';
-        this.docsRootFolder = process.env.SHAREPOINT_DOCS_ROOT_FOLDER || 'contact';
+        // Name of the SharePoint document library client docs live in. Matches
+        // Power Automate's target: a top-level library called "Contact" (not
+        // a folder inside the default "Shared Documents" library, which is
+        // where Graph's /drive endpoint lands by default).
+        this.docsLibraryName = process.env.SHAREPOINT_DOCS_LIBRARY || process.env.SHAREPOINT_DOCS_ROOT_FOLDER || 'Contact';
 
         this.cca = new msal.ConfidentialClientApplication({
             auth: {
@@ -183,6 +188,30 @@ class SharePointService {
     }
 
     /**
+     * Resolve the drive ID for the named document library on the docs site
+     * (e.g. "Contact"). Cached for the process lifetime. We list drives and
+     * match by name case-insensitively because SharePoint URLs use the
+     * lowercase slug while the library display name is capitalised.
+     */
+    private async resolveDocsDriveId(): Promise<string> {
+        if (this.cachedDocsDriveId) return this.cachedDocsDriveId;
+
+        const siteId = await this.resolveDocsSiteId();
+        const url = `${GRAPH_BASE}/sites/${siteId}/drives`;
+        const headers = await this.authedHeaders();
+        const response = await axios.get<{ value: Array<{ id: string; name: string }> }>(url, { headers });
+        const drives = response.data.value || [];
+        const target = drives.find(d => d.name?.toLowerCase() === this.docsLibraryName.toLowerCase());
+        if (!target) {
+            const available = drives.map(d => d.name).join(', ');
+            throw new Error(`[SharePoint] No document library named "${this.docsLibraryName}" on docs site. Available: ${available}`);
+        }
+        this.cachedDocsDriveId = target.id;
+        console.log(`[SharePoint] Resolved docs library "${target.name}" → drive ${target.id}`);
+        return this.cachedDocsDriveId!;
+    }
+
+    /**
      * Build the per-client folder slug Power Automate uses:
      *   "{contact fullname} _ {contact GUID, uppercased, no dashes}"
      * Marina Loggenberg / ccc2b7c3-579e-... → "Marina Loggenberg_CCC2B7C3579E..."
@@ -232,14 +261,14 @@ class SharePointService {
         mimeType: string;
         buffer: Buffer;
     }): Promise<{ webUrl: string; itemId: string; finalName: string }> {
-        const siteId = await this.resolveDocsSiteId();
+        const driveId = await this.resolveDocsDriveId();
 
         const folderSlug = this.buildClientFolderSlug(params.contactFullName, params.contactId);
         const safeFileName = this.sanitiseSharePointFileName(params.fileName);
-        const path = `${this.docsRootFolder}/${folderSlug}/${params.uploadYear}/${safeFileName}`;
+        const path = `${folderSlug}/${params.uploadYear}/${safeFileName}`;
         const encodedPath = path.split('/').map(encodeURIComponent).join('/');
 
-        const url = `${GRAPH_BASE}/sites/${siteId}/drive/root:/${encodedPath}:/content?@microsoft.graph.conflictBehavior=rename`;
+        const url = `${GRAPH_BASE}/drives/${driveId}/root:/${encodedPath}:/content?@microsoft.graph.conflictBehavior=rename`;
         const headers = await this.authedHeaders({ 'Content-Type': params.mimeType });
 
         const response = await axios.put<GraphDriveItem>(url, params.buffer, {
