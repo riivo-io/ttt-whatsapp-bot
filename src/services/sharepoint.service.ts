@@ -197,6 +197,22 @@ class SharePointService {
     }
 
     /**
+     * SharePoint rejects filenames with leading/trailing spaces, and also
+     * spaces immediately before the extension dot (e.g. "foo .pdf"). Strip
+     * those without changing the rest of the name so consultants still see
+     * something recognisable. Collapses internal whitespace runs too — Graph
+     * accepts them but they're a usability hazard in the SharePoint UI.
+     */
+    private sanitiseSharePointFileName(fileName: string): string {
+        const lastDot = fileName.lastIndexOf('.');
+        const base = lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
+        const ext = lastDot > 0 ? fileName.slice(lastDot) : '';
+        const cleanBase = base.replace(/\s+/g, ' ').trim();
+        const cleanExt = ext.replace(/\s+/g, '').trim();
+        return cleanBase + cleanExt;
+    }
+
+    /**
      * Upload a file into the per-client/per-upload-year folder structure that
      * the email→Power Automate flow uses. Graph's "PUT to path" endpoint
      * auto-creates parent folders, so we don't need to pre-check or pre-create
@@ -219,7 +235,8 @@ class SharePointService {
         const siteId = await this.resolveDocsSiteId();
 
         const folderSlug = this.buildClientFolderSlug(params.contactFullName, params.contactId);
-        const path = `${this.docsRootFolder}/${folderSlug}/${params.uploadYear}/${params.fileName}`;
+        const safeFileName = this.sanitiseSharePointFileName(params.fileName);
+        const path = `${this.docsRootFolder}/${folderSlug}/${params.uploadYear}/${safeFileName}`;
         const encodedPath = path.split('/').map(encodeURIComponent).join('/');
 
         const url = `${GRAPH_BASE}/sites/${siteId}/drive/root:/${encodedPath}:/content?@microsoft.graph.conflictBehavior=rename`;
