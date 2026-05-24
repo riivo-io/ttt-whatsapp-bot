@@ -1499,7 +1499,7 @@ export class DynamicsService {
             'riivo_taxyear': inferred.taxYear,
             'riivo_uploaded': true,
             'riivo_documentnotes': params.documentNotes,
-            '_riivo_client_value@odata.bind': `/contacts(${params.contactId})`,
+            'riivo_Client@odata.bind': `/contacts(${params.contactId})`,
         };
 
         // Case + preseason auto-links are gated behind env flags because the
