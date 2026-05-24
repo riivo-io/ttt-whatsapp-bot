@@ -439,6 +439,20 @@ export class DynamicsService {
         return this.querySubmissionDocs(`_riivo_preseasondoc_value eq ${preseasonId} and statecode eq 0`);
     }
 
+    /**
+     * All active document rows uploaded for a client (across all cases and
+     * tax years). Primary source of truth for "what have I uploaded?" —
+     * every WhatsApp upload writes a row here with `_riivo_client_value`
+     * set, and Power Automate does the same for emailed docs.
+     */
+    async getTaxSubmissionDocsByClient(contactId: string, taxYear?: number): Promise<any[]> {
+        let filter = `_riivo_client_value eq ${contactId} and statecode eq 0`;
+        if (typeof taxYear === 'number' && Number.isFinite(taxYear)) {
+            filter += ` and riivo_taxyear eq ${taxYear}`;
+        }
+        return this.querySubmissionDocs(filter);
+    }
+
     private async querySubmissionDocs(filter: string): Promise<any[]> {
         const token = await this.getToken();
         const selectFields = [

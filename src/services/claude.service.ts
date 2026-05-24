@@ -152,7 +152,7 @@ You provide accurate, helpful advice about South African tax matters and have ac
 
 **Tax Guidelines**:
 - Always be helpful and warm. Professional doesn't mean stiff.
-- Do NOT proactively offer to loop in a TTT consultant or broker a callback. Answer the question directly with the best information you can give. Only request a consultant callback when the client explicitly asks to speak to a consultant, asks for a human, or asks someone to call them back.
+- **ABSOLUTE RULE — NEVER OFFER A CONSULTANT.** Do NOT, under any circumstance, end a reply with an offer to involve a consultant. Banned phrasings include (but are not limited to): "Want me to flag this to your consultant", "Should I loop in your consultant", "Want me to ask your consultant", "I can ask your consultant to set this up", "Want me to get your consultant to handle this", "Should I have someone reach out", "Want me to arrange a callback", or any rephrasing of the same idea. The reply must end with the answer itself, or a direct follow-up question to the client. Only call request_consultant_callback when the client has explicitly asked to speak to a consultant / human / for a callback — never as a courtesy offer at the end of an answer.
 - Do NOT say "consult a registered tax practitioner" — if the client asks for escalation, promote TTT's own team.`;
 
 // Tool Definitions (Anthropic Claude tool schema)
@@ -225,7 +225,7 @@ const TOOLS: Anthropic.Tool[] = [
     },
     {
         name: "get_required_documents",
-        description: "Tell the client which tax documents are still outstanding for their tax submission. Use this whenever the client asks what documents they need to send, upload, submit, or provide — \"what do I need?\", \"what must I send for my tax return?\", \"what docs do you need from me?\", \"what's outstanding?\". The tool first checks for an active Pre-Season Documentation record (per tax year) and lists every applicable type whose status is not yet 'received'. If no preseason record exists yet, falls back to the generic per-industry list. The tool's returned message is already formatted — relay it verbatim; do NOT paraphrase it or mention SARS source codes.",
+        description: "Tell the client which tax documents are still outstanding. Use this whenever the client asks what documents they need to send, upload, submit, or provide — \"what do I need?\", \"what must I send for my tax return?\", \"what docs do you need from me?\", \"what's outstanding?\". The tool builds the expected list from the client's SARS source codes + industry (falling back to a typical-return baseline if none are on file), then cross-references the riivo_taxsubmissionsdocuments entity to mark what's already been uploaded and what's still missing. The returned message is already formatted — relay it verbatim; do NOT paraphrase it or mention SARS source codes.",
         input_schema: {
             type: "object",
             properties: {
@@ -258,7 +258,7 @@ const TOOLS: Anthropic.Tool[] = [
     },
     {
         name: "get_received_documents",
-        description: "Answer 'have you received my docs?' / 'what have you got from me so far?'. Reads the client's preseason record per-type fields (status = received OR file uploaded) and also lists individual document rows from riivo_taxsubmissionsdocuments for any active tax return. Returns a grouped list — clients see what we have, by document type. When relaying to the client, ALWAYS use the phrase \"tax return\" — never \"case\". Use whenever the client wants to confirm what TTT has received from them.",
+        description: "Answer 'have you received my docs?' / 'what have you got from me so far?'. Reads every active row from riivo_taxsubmissionsdocuments linked to the client (single source of truth — covers both WhatsApp uploads and Power Automate emailed-doc rows) and returns a flat list of document types received. When relaying to the client, ALWAYS use the phrase \"tax return\" — never \"case\". Use whenever the client wants to confirm what TTT has received from them.",
         input_schema: {
             type: "object",
             properties: {

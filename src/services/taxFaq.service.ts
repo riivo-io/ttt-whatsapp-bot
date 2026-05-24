@@ -1,15 +1,16 @@
 /**
- * Handlers for the 5 tax-season FAQ tools wired into claude.service.ts:
+ * Handlers for the tax-season FAQ tools wired into claude.service.ts:
  *   - get_refund_status
  *   - get_submission_status
- *   - get_received_documents
+ *   - get_received_documents — lists rows from riivo_taxsubmissionsdocuments
  *   - get_audit_status
- *   - get_required_documents (delegates to the existing computed-list path
- *     when no preseason record exists for the year)
+ *   - get_required_documents — computes the SARS-code/industry checklist
+ *     (with a typical-return baseline fallback) and cross-references the
+ *     uploaded entity to flag what's still outstanding.
  *
  * Every handler returns a JSON string the Claude turn loop relays as a
- * tool_result. Each is independently gated by an env flag so the tax team
- * can disable any one if data quality issues surface in production.
+ * tool_result. Document-side tools are intentionally NOT feature-flagged:
+ * riivo_taxsubmissionsdocuments is the single source of truth for uploads.
  *
  * Tax-year filtering is done in-memory against the OptionSet's
  * FormattedValue annotation (the Dynamics `Prefer: odata.include-annotations`
@@ -21,15 +22,12 @@
 
 import { dynamicsService } from './dynamics.service';
 import { graphMailService } from './graphMail.service';
-import { computeRequiredDocuments, formatRequiredDocumentsMessage } from './requiredDocuments.service';
+import { computeRequiredDocuments } from './requiredDocuments.service';
 import { summariseAuditDuration } from '../utils/workingDays';
-import { readPreseasonDocStates, PRESEASON_STATUS_READY } from '../utils/preseasonDocTypes';
 
 const FAQ_FEATURE_FLAGS = {
     refund:        'ENABLE_REFUND_ANSWERS',
     submission:    'ENABLE_SUBMISSION_ANSWERS',
-    requiredDocs:  'ENABLE_REQUIRED_DOC_ANSWERS',
-    receivedDocs:  'ENABLE_RECEIVED_DOC_ANSWERS',
     audit:         'ENABLE_AUDIT_ANSWERS',
 } as const;
 
@@ -61,12 +59,6 @@ function filterCasesByYear(cases: any[], year?: number): any[] {
     if (!year) return cases;
     const target = String(year);
     return cases.filter(c => getCaseTaxYearLabel(c) === target);
-}
-
-function filterPreseasonByYear(rows: any[], year?: number): any[] {
-    if (!year) return rows;
-    const target = String(year);
-    return rows.filter(r => r?.['riivo_taxyear@OData.Community.Display.V1.FormattedValue'] === target);
 }
 
 function isOnAuditStage(stageLabel: string | null): boolean {
@@ -269,56 +261,22 @@ export async function handleGetAuditStatus(params: {
     return JSON.stringify({ status: 'on_audit', cases: perCase });
 }
 
-// ─── get_required_documents ───────────────────────────────────────────────
+// ─── Document tools ───────────────────────────────────────────────────────
+//
+// Both tools read from a single source of truth: the
+// `riivo_taxsubmissionsdocuments` entity. Every WhatsApp upload writes a row
+// there (with `_riivo_client_value` set to the contact); Power Automate does
+// the same for emailed docs. No preseason-record reads — the entity rows are
+// authoritative.
 
-export async function handleGetRequiredDocuments(params: {
-    contactId: string;
-    taxYear?: number;
-}): Promise<string> {
-    if (!isEnabled('requiredDocs')) return disabledResponse('required documents');
+function pickSubmissionDocLabel(row: any): string {
+    return row?.['_riivo_documenttype_value@OData.Community.Display.V1.FormattedValue']
+        || row?.riivo_taxsubmissionsdocument
+        || 'Document';
+}
 
-    const allPreseason = await dynamicsService.getPreseasonDocsForClient(params.contactId);
-    const preseason = filterPreseasonByYear(allPreseason, params.taxYear);
-
-    if (preseason.length > 0) {
-        // Use the most recently modified preseason record for the chosen
-        // year (the year filter already narrowed if specified).
-        const record = preseason.sort((a, b) => new Date(b.modifiedon || 0).getTime() - new Date(a.modifiedon || 0).getTime())[0];
-        const states = readPreseasonDocStates(record);
-        const outstanding = states.filter(s => s.applicable && !s.received);
-        const yearLabel = record?.['riivo_taxyear@OData.Community.Display.V1.FormattedValue'] || null;
-
-        if (outstanding.length === 0) {
-            const isReady = record?.statuscode === PRESEASON_STATUS_READY;
-            const readyFlag = isReady ? ' Your preseason record is already marked ready for submission.' : '';
-            return JSON.stringify({
-                status: 'all_received',
-                message: `Looking at your${yearLabel ? ` ${yearLabel}` : ''} preseason record, we've received everything that's applicable to you.${readyFlag}`,
-            });
-        }
-
-        const lines = outstanding.map(o => `• ${o.label}`);
-        return JSON.stringify({
-            status: 'preseason_outstanding',
-            message: `Still outstanding for your${yearLabel ? ` ${yearLabel}` : ''} return:\n${lines.join('\n')}\n\nReply with the file directly — I'll route it to your consultant.`,
-            outstanding,
-        });
-    }
-
-    // No preseason record exists for this year yet — fall back to the
-    // generic per-industry computed list. Keeps existing behaviour for
-    // clients who are pre-onboarding.
-    const profile = await dynamicsService.getContactTaxProfile(params.contactId);
-    const sourceCodes = profile?.sourceCodes || [];
-    const industryName = profile?.industryName || null;
-    const result = computeRequiredDocuments(sourceCodes, industryName);
-    const message = formatRequiredDocumentsMessage(result);
-
-    return JSON.stringify({
-        status: 'computed_fallback',
-        message,
-        has_personalisation: result.hasPersonalisation,
-    });
+function formatYearTag(year: number | null): string {
+    return year ? ` (${year})` : '';
 }
 
 // ─── get_received_documents ───────────────────────────────────────────────
@@ -327,80 +285,120 @@ export async function handleGetReceivedDocuments(params: {
     contactId: string;
     taxYear?: number;
 }): Promise<string> {
-    if (!isEnabled('receivedDocs')) return disabledResponse('received documents');
+    const rows = await dynamicsService.getTaxSubmissionDocsByClient(params.contactId, params.taxYear);
 
-    const allPreseason = await dynamicsService.getPreseasonDocsForClient(params.contactId);
-    const preseason = filterPreseasonByYear(allPreseason, params.taxYear);
-
-    const allCases = await dynamicsService.getActiveTaxCases(params.contactId);
-    const cases = filterCasesByYear(allCases, params.taxYear);
-
-    const receivedFromPreseason: { label: string; taxYear: string | null }[] = [];
-    for (const record of preseason) {
-        const yearLabel = record?.['riivo_taxyear@OData.Community.Display.V1.FormattedValue'] || null;
-        const states = readPreseasonDocStates(record);
-        states
-            .filter(s => s.applicable && s.received)
-            .forEach(s => receivedFromPreseason.push({ label: s.label, taxYear: yearLabel }));
-    }
-
-    const submissionDocs: { label: string; createdOn: string | null; taxYear: string | null }[] = [];
-    const seenSubmissionDocIds = new Set<string>();
-
-    const pickDocLabel = (r: any): string =>
-        r?.['_riivo_documenttype_value@OData.Community.Display.V1.FormattedValue']
-        || r?.riivo_taxsubmissionsdocument
-        || 'Document';
-
-    for (const c of cases) {
-        const rows = await dynamicsService.getTaxSubmissionDocsByCase(c.new_caseid);
-        const yearLabel = getCaseTaxYearLabel(c);
-        for (const r of rows) {
-            const id = r?.riivo_taxsubmissionsdocumentsid;
-            if (id && seenSubmissionDocIds.has(id)) continue;
-            if (id) seenSubmissionDocIds.add(id);
-            submissionDocs.push({ label: pickDocLabel(r), createdOn: r?.createdon || null, taxYear: yearLabel });
-        }
-    }
-
-    // Also pick up rows linked to preseason records (the WhatsApp bot writes
-    // these once ENABLE_PRESEASON_DOC_LINK is on, and Power Automate is being
-    // updated to do the same). querySubmissionDocs swallows errors if the
-    // _riivo_preseasondoc_value lookup isn't shipped yet, so this is safe to
-    // run unconditionally.
-    for (const record of preseason) {
-        const rows = await dynamicsService.getTaxSubmissionDocsByPreseason(record.riivo_preseasondocumentationid);
-        const yearLabel = record?.['riivo_taxyear@OData.Community.Display.V1.FormattedValue'] || null;
-        for (const r of rows) {
-            const id = r?.riivo_taxsubmissionsdocumentsid;
-            if (id && seenSubmissionDocIds.has(id)) continue;
-            if (id) seenSubmissionDocIds.add(id);
-            submissionDocs.push({ label: pickDocLabel(r), createdOn: r?.createdon || null, taxYear: yearLabel });
-        }
-    }
-
-    if (receivedFromPreseason.length === 0 && submissionDocs.length === 0) {
+    if (rows.length === 0) {
         return JSON.stringify({
             status: 'none_received',
-            message: `I can't see anything received from you yet${params.taxYear ? ` for ${params.taxYear}` : ''}. If you've already sent docs and they aren't showing up, your consultant can confirm — want me to flag it?`,
+            message: `I can't see anything received from you yet${params.taxYear ? ` for ${params.taxYear}` : ''}. If you've already sent docs and they're not showing up here, send them through and I'll get them logged.`,
         });
     }
 
-    const lines: string[] = [];
-    if (receivedFromPreseason.length > 0) {
-        lines.push('On your preseason record:');
-        receivedFromPreseason.forEach(d => lines.push(`• ${d.label}${d.taxYear ? ` (${d.taxYear})` : ''}`));
-    }
-    if (submissionDocs.length > 0) {
-        if (lines.length > 0) lines.push('');
-        lines.push('Uploaded to your tax return file:');
-        submissionDocs.forEach(d => lines.push(`• ${d.label}${d.taxYear ? ` (${d.taxYear})` : ''}`));
-    }
+    const docs = rows.map(r => ({
+        label: pickSubmissionDocLabel(r),
+        tax_year: typeof r?.riivo_taxyear === 'number' ? r.riivo_taxyear : null,
+        created_on: r?.createdon || null,
+    }));
+
+    const lines = [`Here's what we've got on file from you${params.taxYear ? ` for ${params.taxYear}` : ''}:`];
+    docs.forEach(d => lines.push(`• ${d.label}${formatYearTag(d.tax_year)}`));
 
     return JSON.stringify({
         status: 'received',
         message: lines.join('\n'),
-        preseason_count: receivedFromPreseason.length,
-        submission_doc_count: submissionDocs.length,
+        documents: docs,
+        count: docs.length,
+    });
+}
+
+// ─── get_required_documents ───────────────────────────────────────────────
+
+/**
+ * Normalise a label so we can match required-list entries against uploaded
+ * rows (which carry canonical strings like "IRP5", "Bank Statements",
+ * "Medical Aid Tax Certificate", "Logbook", "Other"). Lowercases, strips
+ * punctuation and trailing notes in brackets.
+ */
+function normaliseDocLabel(label: string): string {
+    return label
+        .toLowerCase()
+        .replace(/\([^)]*\)/g, '')
+        .replace(/[—–-]/g, ' ')
+        .replace(/[^a-z0-9 ]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function labelsMatch(required: string, uploaded: string): boolean {
+    const a = normaliseDocLabel(required);
+    const b = normaliseDocLabel(uploaded);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    // Loose substring match — "irp5" matches "irp5", "bank statement" matches
+    // "bank statements", "medical aid tax certificate" matches "medical aid
+    // tax certificate", etc.
+    return a.includes(b) || b.includes(a);
+}
+
+export async function handleGetRequiredDocuments(params: {
+    contactId: string;
+    taxYear?: number;
+}): Promise<string> {
+    const profile = await dynamicsService.getContactTaxProfile(params.contactId);
+    const sourceCodes = profile?.sourceCodes || [];
+    const industryName = profile?.industryName || null;
+    const expected = computeRequiredDocuments(sourceCodes, industryName);
+
+    // The target year for the upload cross-reference: caller-supplied if
+    // given, otherwise the current SA tax year (which also matches the
+    // checklist computed above).
+    const targetYear = typeof params.taxYear === 'number' && Number.isFinite(params.taxYear)
+        ? params.taxYear
+        : expected.taxYear.label;
+    const uploadedRows = await dynamicsService.getTaxSubmissionDocsByClient(params.contactId, targetYear);
+    const uploadedLabels = uploadedRows.map(pickSubmissionDocLabel);
+
+    const allExpected = [...expected.bySourceCode, ...expected.byIndustry, ...expected.baseline];
+    const seen = new Set<string>();
+    const received: { label: string }[] = [];
+    const outstanding: { label: string; notes?: string }[] = [];
+    for (const doc of allExpected) {
+        const key = doc.label.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const hit = uploadedLabels.some(u => labelsMatch(doc.label, u));
+        if (hit) received.push({ label: doc.label });
+        else outstanding.push({ label: doc.label, notes: doc.notes });
+    }
+
+    const yearLabel = targetYear;
+    const lines: string[] = [];
+
+    if (received.length > 0) {
+        lines.push(`Here's what we've got on file from you for ${yearLabel}:`);
+        received.forEach(d => lines.push(`• ${d.label}`));
+        lines.push('');
+    }
+
+    if (outstanding.length === 0) {
+        lines.push(`Looks like we've got everything we need for your ${yearLabel} return. Your consultant will be in touch if anything else comes up.`);
+    } else {
+        lines.push(`Still outstanding for your ${yearLabel} return:`);
+        outstanding.forEach(d => lines.push(`• ${d.label}${d.notes ? ` (${d.notes})` : ''}`));
+        if (!expected.hasPersonalisation) {
+            lines.push('');
+            lines.push('This is a typical list. Once your consultant has set up your income sources and industry, I can give you a more specific list.');
+        }
+        lines.push('');
+        lines.push("Reply with the file directly — I'll route it to your consultant.");
+    }
+
+    return JSON.stringify({
+        status: outstanding.length === 0 ? 'all_received' : 'outstanding',
+        message: lines.join('\n'),
+        tax_year: yearLabel,
+        received,
+        outstanding,
+        has_personalisation: expected.hasPersonalisation,
     });
 }
