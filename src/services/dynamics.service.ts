@@ -1502,7 +1502,12 @@ export class DynamicsService {
             '_riivo_client_value@odata.bind': `/contacts(${params.contactId})`,
         };
 
-        if (inferred.caseId) {
+        // Case + preseason auto-links are gated behind env flags because the
+        // corresponding lookup columns aren't always present on the entity
+        // (depends on the CRM admin's schema state). Power Automate doesn't
+        // write either — consultants attach manually — so leaving both off
+        // is the safe default. Turn on once the lookup names are confirmed.
+        if (inferred.caseId && process.env.ENABLE_CASE_DOC_LINK === 'true') {
             payload['_riivo_case_value@odata.bind'] = `/new_cases(${inferred.caseId})`;
         }
 
