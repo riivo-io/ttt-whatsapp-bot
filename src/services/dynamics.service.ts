@@ -1376,6 +1376,33 @@ export class DynamicsService {
         }
     }
 
+    async markLeadOtpCompleteAndReadyToConvert(leadId: string, triggeredBy: string): Promise<{ success: boolean; error?: string }> {
+        const payload = {
+            [LEAD_OTP_COMPLETED_FIELD]: true,
+            icon_converttoclient: true,
+        };
+        try {
+            await this.crmPatch(
+                'new_leads',
+                `${this.baseUrl}/api/data/v9.2/new_leads(${leadId})`,
+                payload,
+                triggeredBy
+            );
+            await supabaseService.logCrmWrite({
+                crmEntity: 'new_leads',
+                crmRecordId: leadId,
+                action: 'update',
+                payload,
+                triggeredBy,
+            });
+            return { success: true };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[Dynamics CRM] Failed to flag OTP done + convert for lead ${leadId}:`, errMsg);
+            return { success: false, error: errMsg };
+        }
+    }
+
     /**
      * Log an "invoice PDF sent via WhatsApp" annotation to a Contact's timeline.
      * Separate from uploadDocument because we're not attaching a file here —

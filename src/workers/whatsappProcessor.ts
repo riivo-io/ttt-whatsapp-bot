@@ -10,6 +10,7 @@ import {
 } from '../services/case.service';
 import { handleClientRelayResponse, RELAY_BUTTON_PAYLOAD } from '../controllers/emailRelay.controller';
 import { knowledgeBaseService, KbChunkHit } from '../services/knowledgeBase.service';
+import { graphMailService } from '../services/graphMail.service';
 import { messageContextStorage } from '../utils/messageContext';
 import { WhatsAppJobPayload } from '../queue/whatsappQueue';
 import { enqueueFeedbackPrompt } from '../queue/feedbackPromptQueue';
@@ -52,6 +53,23 @@ const CLIENT_MENU_CANONICAL_TEXT: Record<string, string> = {
 };
 
 const CLIENT_MENU_OTHER_ACK = "Sure — what's on your mind?";
+
+const LOE_BUTTON_PAYLOAD = {
+    SIGNED: 'loe:signed',
+    LATER: 'loe:later',
+} as const;
+
+// The OTP instructions go out via a CRM-initiated WhatsApp template (sent
+// manually by a consultant once they've added the client on SARS eFiling).
+// The template defines two quick-reply buttons whose payloads MUST match the
+// ids below — `otp:done` flags the lead for auto-conversion to a contact,
+// `otp:help` escalates to taxcrew@ttt-tax.co.za with a tracked request.
+const OTP_BUTTON_PAYLOAD = {
+    DONE: 'otp:done',
+    HELP: 'otp:help',
+} as const;
+
+const TAXCREW_EMAIL = 'taxcrew@ttt-tax.co.za';
 
 // Conversation caps. Apply to clients, leads, and unknown users — staff
 // (entityType === 'user') are exempt because their tool-driven workflows
@@ -311,10 +329,94 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
     console.log(`[Processor] Sign-up flow created lead ${created.new_leadid} for ${from}`);
 
     const loeLink = buildLoeMagicLink(created.new_leadid);
-    const welcome = loeLink
-        ? `Thanks, ${firstName}! You're signed up with TTT Financial Group. 🎉\n\nNext step: sign your Letter of Engagement using your unique link (valid for 72 hours):\n\n${loeLink}\n\nOnce that's signed, message us back here and we'll take it from there.`
-        : `Thanks, ${firstName}! You're all signed up with TTT Financial Group. A consultant will be in touch shortly. In the meantime, feel free to message any questions.`;
-    await metaWhatsAppService.sendMessage(from, welcome);
+    if (loeLink) {
+        const welcome = `Thanks, ${firstName}! You're signed up with TTT Financial Group. 🎉\n\nNext step: sign your Letter of Engagement using your unique link (valid for 72 hours):\n\n${loeLink}\n\nOnce that's signed, let us know below.`;
+        await metaWhatsAppService.sendReplyButtons(from, welcome, [
+            { id: LOE_BUTTON_PAYLOAD.SIGNED, title: "I've signed it" },
+            { id: LOE_BUTTON_PAYLOAD.LATER, title: "I'll do it later" },
+        ]);
+    } else {
+        await metaWhatsAppService.sendMessage(
+            from,
+            `Thanks, ${firstName}! You're all signed up with TTT Financial Group. A consultant will be in touch shortly. In the meantime, feel free to message any questions.`
+        );
+    }
+}
+
+// Tap on the OTP template's two quick-reply buttons. DONE flags the lead for
+// auto-conversion in Dynamics (a Power Automate flow converts the lead to a
+// contact once icon_converttoclient flips). HELP creates and escalates a
+// riivo_request, and emails taxcrew@ttt-tax.co.za from the tina-bot mailbox
+// so a human picks it up.
+async function handleOtpTemplateResponse(from: string, payload: string, crmEntity: any): Promise<void> {
+    if (crmEntity?.type !== 'lead' || !crmEntity?.id) {
+        console.warn(`[Processor] OTP button "${payload}" from ${from} but sender is not a lead (type=${crmEntity?.type}). Ignoring.`);
+        await metaWhatsAppService.sendMessage(
+            from,
+            "Thanks for the update! Someone from our team will reach out if anything's still outstanding."
+        );
+        return;
+    }
+
+    const leadId: string = crmEntity.id;
+    const leadName: string = (crmEntity.fullname || '').trim() || 'Lead';
+
+    if (payload === OTP_BUTTON_PAYLOAD.DONE) {
+        const result = await dynamicsService.markLeadOtpCompleteAndReadyToConvert(leadId, leadId);
+        if (!result.success) {
+            console.error(`[Processor] markLeadOtpCompleteAndReadyToConvert failed for lead ${leadId}: ${result.error}`);
+            await metaWhatsAppService.sendMessage(
+                from,
+                "Thanks for confirming! 🙌 We hit a snag on our side updating your profile — a consultant will check on it shortly and reach out here."
+            );
+            return;
+        }
+        await metaWhatsAppService.sendMessage(
+            from,
+            "Amazing, thank you! 🎉 You're all set. We'll finalise your account on our side and a TTT consultant will be in touch shortly to welcome you in properly."
+        );
+        return;
+    }
+
+    // HELP path: create + escalate a request so the consultant has a tracked
+    // record, then email taxcrew so a human picks it up.
+    const description = `Lead "${leadName}" tapped "Need help" on the SARS eFiling OTP template. They need a consultant to walk them through the OTP step.`;
+    const created = await dynamicsService.createRequest({
+        leadId,
+        contactType: 'lead',
+        phoneNumber: from,
+        description,
+    });
+    if (created?.riivo_requestid) {
+        await dynamicsService.updateRequest(created.riivo_requestid, {
+            statuscode: REQUEST_STATUSCODE.ESCALATED,
+            riivo_escalationreason: 'Lead requested help with SARS eFiling OTP',
+            riivo_escalatedon: new Date().toISOString(),
+        });
+    }
+
+    const emailSubject = `Lead needs help with SARS OTP — ${leadName}`;
+    const emailBody = [
+        `Lead "${leadName}" (${from}) has tapped the "Need help" button on the SARS eFiling OTP template.`,
+        '',
+        'They need a consultant to walk them through the OTP step on https://secure.sarsefiling.co.za/app/profileTaxType/taxTypeActivation.',
+        '',
+        created?.riivo_requestid
+            ? `An escalated riivo_request has been created for tracking: ${created.riivo_requestid}.`
+            : 'NOTE: we were unable to create a riivo_request for this lead — please pick this up from the email and follow up manually.',
+        '',
+        `Dynamics lead id: ${leadId}`,
+    ].join('\n');
+    await graphMailService.sendMail({
+        to: TAXCREW_EMAIL,
+        subject: emailSubject,
+        bodyText: emailBody,
+    });
+
+    await metaWhatsAppService.sendMessage(
+        from,
+        "No worries — I've flagged this for the team. A TTT consultant will reach out here on WhatsApp to walk you through it."
+    );
 }
 
 async function processMessage(incoming: IncomingMessage, outboundPrefix?: string): Promise<void> {
@@ -344,6 +446,22 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
 
         const synthetic: IncomingMessage = { from, text: outcome.pending.relay_body };
         await processMessage(synthetic, prefix);
+        return;
+    }
+
+    if (interactiveId === LOE_BUTTON_PAYLOAD.SIGNED) {
+        await metaWhatsAppService.sendMessage(
+            from,
+            "Awesome, thank you! 🙌 Once we have your LoE on file, the last step is the SARS eFiling OTP. A TTT consultant will reach out here on WhatsApp during working hours (Mon-Fri, 8am-4pm SAST) to walk you through it — expect either a message or a call."
+        );
+        return;
+    }
+
+    if (interactiveId === LOE_BUTTON_PAYLOAD.LATER) {
+        await metaWhatsAppService.sendMessage(
+            from,
+            "No problem. Your link is valid for 72 hours. Just message us back here once you're done and we'll take it from there."
+        );
         return;
     }
 
@@ -390,6 +508,11 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         console.log(`[Processor] ${from} not found — sending sign-up link`);
         await metaWhatsAppService.sendMessage(from, SIGN_UP_GREETING);
         await metaWhatsAppService.sendMessage(from, SIGN_UP_LINK);
+        return;
+    }
+
+    if (interactiveId === OTP_BUTTON_PAYLOAD.DONE || interactiveId === OTP_BUTTON_PAYLOAD.HELP) {
+        await handleOtpTemplateResponse(from, interactiveId, crmEntity);
         return;
     }
 

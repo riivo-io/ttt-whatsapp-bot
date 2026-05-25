@@ -742,15 +742,17 @@ export class ClaudeService {
                 const otpDone = !otpRequired || leadOnboarding?.otpCompleted === true;
                 const loeLink = (contactId && buildLoeMagicLink(contactId)) || SIGNUP_URL;
 
-                const otpInstructions = `Please complete the SARS One-Time Pin so TTT can access your eFiling profile:\n\n1. Go to https://www.sarsefiling.co.za/\n2. Click on "Manage Access requests"\n3. Click "Yes" to South African Citizen, then fill in your ID Number and Income Tax Number. Click Submit.\n4. Click on "Cellphone/Email". The OTP will be sent to you via SMS/Email — fill in the last 6 digits of the number you receive.\n5. Click Accept.\n\nReply here once you've done it and we'll take it from there.`;
-
                 let stateGuidance = '';
                 if (loeDone && otpDone) {
                     // State D — both gates clear, awaiting staff conversion to contact.
                     stateGuidance = `**Onboarding state — BOTH GATES CLEAR.** The lead has signed the LoE${otpRequired ? ' and completed the SARS OTP' : ''}. They're awaiting staff to convert them into a client. Reassure them that they're all set on our end and a TTT consultant will be in touch shortly to confirm. Do NOT ask them to do anything else.`;
                 } else if (loeDone && !otpDone) {
-                    // State B — LoE done, OTP outstanding (Tax track only).
-                    stateGuidance = `**Onboarding state — LoE DONE, OTP OUTSTANDING.** Thank them for the signed LoE (we have it on file ✅). The one remaining step is the SARS eFiling OTP so TTT can attach as their tax practitioner. Send these instructions VERBATIM as the next step (use plain WhatsApp formatting, numbered list, no HTML):\n\n${otpInstructions}\n\nThe lead does the OTP themselves on the SARS site. Do NOT ask them to send the OTP digits to us — we don't capture or relay them.`;
+                    // State B — LoE done, OTP outstanding (Tax track only). The
+                    // SARS OTP step is a manual hand-off: a consultant adds the
+                    // client on eFiling, then initiates a WhatsApp template
+                    // from the CRM with the step-by-step instructions and two
+                    // quick-reply buttons. Bot does NOT send instructions here.
+                    stateGuidance = `**Onboarding state — LoE DONE, OTP OUTSTANDING.** Thank them warmly for the signed LoE (we have it on file ✅). Tell them the last step is the SARS eFiling OTP, which requires a TTT consultant to set them up on our side first. Reassure them that we've flagged this internally and a TTT consultant will reach out here on WhatsApp during working hours (Mon-Fri, 8am-4pm SAST) with the step-by-step instructions — they can expect either a WhatsApp message or a call. Do NOT send SARS OTP instructions yourself; the consultant initiates that flow from our CRM. Do NOT ask the lead to do anything else right now.`;
                 } else if (!loeDone && otpDone && otpRequired) {
                     // State C (Tax) — OTP done first, LoE still outstanding.
                     stateGuidance = `**Onboarding state — OTP DONE, LoE OUTSTANDING.** Thank them for completing the SARS OTP ✅. The remaining step is the signed Letter of Engagement. Direct them to their unique signing link: ${loeLink} (valid 72 hours from issue). Once signed, they can upload it here on WhatsApp.`;

@@ -191,6 +191,41 @@ Sorry, something went wrong on our side. Please try again in a moment.
 
 ---
 
+## 10. `ttt_otp_instructions` 🔴
+
+Interactive button template manually initiated by a consultant from Dynamics once they've added the lead on SARS eFiling. Sends the step-by-step OTP instructions plus two quick-reply buttons so the lead can confirm completion (auto-converts the lead to a client) or request help (escalates a `riivo_request` and emails taxcrew@ttt-tax.co.za from the tina-bot mailbox).
+
+**Inbound handler:** [whatsappProcessor.ts](../src/workers/whatsappProcessor.ts) — `handleOtpTemplateResponse` (search for `OTP_BUTTON_PAYLOAD`).
+
+**Template type:** Interactive — Quick Reply Buttons
+**Category:** UTILITY
+
+**Body:**
+```
+Hi {{1}}, here's the last step to get you set up — the SARS eFiling OTP. It takes about a minute:
+
+1. Go to https://secure.sarsefiling.co.za/app/profileTaxType/taxTypeActivation
+2. Fill in your ID Number and Income Tax Number, then click Submit.
+3. Choose Cellphone (easier than email). SARS will SMS you an OTP — fill in the last 6 digits.
+4. Click Accept.
+
+Tap a button below once you're done, or if you'd like a hand.
+```
+
+**Variables:**
+- `{{1}}` — Lead first name
+
+**Buttons (must use these exact payload ids):**
+1. Title: `Done ✅` — payload: `otp:done`
+2. Title: `Need help` — payload: `otp:help`
+
+**Notes:**
+- Button payloads must match `OTP_BUTTON_PAYLOAD` constants in [whatsappProcessor.ts](../src/workers/whatsappProcessor.ts). Mismatched ids will silently fall through to the AI path.
+- The "Done ✅" tap sets both `riivo_efilingotpcompleted=true` and `icon_converttoclient=true` on the lead row; a Power Automate flow on the CRM side converts the lead to a contact when `icon_converttoclient` flips.
+- The "Need help" tap creates an escalated `riivo_request` for the lead and emails taxcrew so a consultant picks it up.
+
+---
+
 ## Deferred until guardrails land (Phase E)
 
 These templates only become relevant once [src/services/guardrails.service.ts](../src/services/guardrails.service.ts) ships.
