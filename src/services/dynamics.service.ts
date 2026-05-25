@@ -739,6 +739,8 @@ export class DynamicsService {
             const industryName: string | null =
                 c['_riivo_industryid_value@OData.Community.Display.V1.FormattedValue'] || null;
 
+            console.log(`[tax profile] contact=${contactId} sourceLabel="${sourceLabel}" codes=${JSON.stringify(sourceCodes)} industry="${industryName}"`);
+
             return { sourceCodes, industryName };
         } catch (error: any) {
             const errMsg = error?.response?.data?.error?.message || error.message;
