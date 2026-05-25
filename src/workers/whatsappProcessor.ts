@@ -25,7 +25,7 @@ function getFeedbackPromptMode(): 'immediate' | 'idle' {
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
-const SIGN_UP_GREETING = `👋 Hi there! It looks like you're not registered with TTT yet.\n\nTo get started, please sign up using the link below. Once registered, message us again and we'll be able to assist you with all your tax needs!`;
+const SIGN_UP_GREETING = `👋 Welcome to TTT Financial Group!\n\nLooks like you're new here. Tap Sign up to register in under a minute, or use the web form if you'd rather. Once you're in, we'll handle your tax, accounting and insurance right here on WhatsApp. 💬`;
 const SIGN_UP_LINK = `https://www.ttt-tax.co.za/client-onboarding`;
 
 const SIGNUP_TEMPLATE_NAME = process.env.WHATSAPP_SIGNUP_TEMPLATE_NAME || '';
