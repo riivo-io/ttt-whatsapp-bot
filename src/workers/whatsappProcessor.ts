@@ -1,6 +1,6 @@
 import { claudeService } from '../services/claude.service';
 import { metaWhatsAppService } from '../services/meta.service';
-import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.service';
+import { dynamicsService, REQUEST_STATUSCODE, LEAD_TYPE_TAX } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
 import { stagePendingUpload } from '../services/pendingUpload.service';
 import {
@@ -70,6 +70,15 @@ const OTP_BUTTON_PAYLOAD = {
 } as const;
 
 const TAXCREW_EMAIL = 'taxcrew@ttt-tax.co.za';
+
+// Proactive OTP escalation: fired when a Tax lead in State B (LoE done, OTP
+// outstanding) mentions OTP in natural language — i.e. when the CRM-initiated
+// OTP template hasn't been sent yet but the lead is already asking. The
+// sentinel below is a unique phrase we save to assistant history right after
+// escalating, so subsequent OTP-mentioning inbounds in the same session can
+// detect "already handled" without a CRM round-trip.
+const OTP_PROACTIVE_SENTINEL = 'taxcrew has been flagged about your SARS eFiling OTP';
+const OTP_KEYWORD_RE = /\b(otp|one[- ]?time[- ]?pin|sars[- ]?efiling)\b/i;
 
 // Conversation caps. Apply to clients, leads, and unknown users — staff
 // (entityType === 'user') are exempt because their tool-driven workflows
@@ -343,6 +352,69 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
     }
 }
 
+function isOtpAsk(text: string): boolean {
+    return OTP_KEYWORD_RE.test(text || '');
+}
+
+function hasRecentOtpEscalation(history: { role: string; content: string }[]): boolean {
+    for (let i = history.length - 1; i >= 0 && i >= history.length - 20; i--) {
+        const m = history[i];
+        if (m.role === 'assistant' && m.content.includes(OTP_PROACTIVE_SENTINEL)) return true;
+    }
+    return false;
+}
+
+// Tax lead in State B (LoE done, OTP outstanding) asked about the SARS OTP
+// step in natural language. The CRM-initiated OTP template (with its Done/Help
+// buttons) may not have gone out yet, so taxcrew has no signal the lead is
+// waiting. Mirror what the HELP-button handler does — create + escalate a
+// riivo_request, email taxcrew — and additionally surface the same Done/Help
+// quick-reply buttons so the lead can self-serve from here. Dedupe is via the
+// sentinel saved to assistant history by the caller; failures are best-effort.
+async function triggerProactiveOtpEscalation(from: string, leadId: string, leadName: string): Promise<void> {
+    const description = `Lead "${leadName}" asked about the SARS eFiling OTP step on WhatsApp. Tina auto-escalated — they need a consultant to walk them through the OTP.`;
+    const created = await dynamicsService.createRequest({
+        leadId,
+        contactType: 'lead',
+        phoneNumber: from,
+        description,
+    });
+    if (created?.riivo_requestid) {
+        await dynamicsService.updateRequest(created.riivo_requestid, {
+            statuscode: REQUEST_STATUSCODE.ESCALATED,
+            riivo_escalationreason: 'Lead asked about SARS eFiling OTP on WhatsApp',
+            riivo_escalatedon: new Date().toISOString(),
+        });
+    }
+
+    const emailSubject = `Lead asking about SARS OTP — ${leadName}`;
+    const emailBody = [
+        `Lead "${leadName}" (${from}) asked about the SARS eFiling OTP step on WhatsApp.`,
+        '',
+        'Tina has acknowledged on the WhatsApp side and surfaced the Done / Need-help buttons. A consultant should reach out to walk them through the OTP step on https://secure.sarsefiling.co.za/app/profileTaxType/taxTypeActivation.',
+        '',
+        created?.riivo_requestid
+            ? `An escalated riivo_request has been created for tracking: ${created.riivo_requestid}.`
+            : 'NOTE: we were unable to create a riivo_request for this lead — please pick this up from the email and follow up manually.',
+        '',
+        `Dynamics lead id: ${leadId}`,
+    ].join('\n');
+    await graphMailService.sendMail({
+        to: TAXCREW_EMAIL,
+        subject: emailSubject,
+        bodyText: emailBody,
+    });
+
+    await metaWhatsAppService.sendReplyButtons(
+        from,
+        "Quick heads-up — taxcrew has been flagged about your SARS eFiling OTP and a TTT consultant will be in touch on WhatsApp. If you've already sorted it on your end, or want to flag it as urgent, tap below.",
+        [
+            { id: OTP_BUTTON_PAYLOAD.DONE, title: "Sorted, OTP done" },
+            { id: OTP_BUTTON_PAYLOAD.HELP, title: "Need help" },
+        ],
+    );
+}
+
 // Tap on the OTP template's two quick-reply buttons. DONE flags the lead for
 // auto-conversion in Dynamics (a Power Automate flow converts the lead to a
 // contact once icon_converttoclient flips). HELP creates and escalates a
@@ -453,6 +525,14 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         await metaWhatsAppService.sendMessage(
             from,
             "Awesome, thank you! 🙌 Once we have your LoE on file, the last step is the SARS eFiling OTP. A TTT consultant will reach out here on WhatsApp during working hours (Mon-Fri, 8am-4pm SAST) to walk you through it — expect either a message or a call."
+        );
+        // Run the IRP5 ask in parallel with the OTP wait. The lead won't be
+        // a client yet so we can't write a riivo_irp5s row for them, but
+        // we can pre-stage the request so the cert is ready the moment
+        // they're converted to a contact.
+        await metaWhatsAppService.sendMessage(
+            from,
+            "While we wait on the OTP step, the next thing I'll need from you is your latest IRP5. That's the tax certificate your employer issues every season. Just send through the PDF here whenever you have it."
         );
         return;
     }
@@ -793,6 +873,52 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     await supabaseService.saveMessage(session.id, 'assistant', finalResponseText);
 
     await metaWhatsAppService.sendMessage(from, finalResponseText);
+
+    // Tax lead in State B (LoE done, OTP outstanding) asked about OTP in
+    // natural language. The CRM-initiated OTP template might not have been
+    // sent yet, so taxcrew has no signal. Escalate proactively (email + the
+    // same Done/Help buttons the template uses) so the lead always has the
+    // self-serve path within reach. Dedupes via a sentinel phrase written to
+    // assistant history — one-shot per session unless the marker ages out of
+    // the lookback window.
+    if (
+        crmEntity.type === 'lead'
+        && leadOnboarding?.loeReceived === true
+        && leadOnboarding?.otpCompleted === false
+        && (leadOnboarding.leadType == null || leadOnboarding.leadType === LEAD_TYPE_TAX)
+        && isOtpAsk(effectiveText)
+        && !hasRecentOtpEscalation(historyWithoutCurrent)
+    ) {
+        try {
+            await triggerProactiveOtpEscalation(from, crmEntity.id, (crmEntity.fullname || '').trim() || 'Lead');
+            const sentinelMessage = `Quick heads-up — ${OTP_PROACTIVE_SENTINEL} and a TTT consultant will be in touch on WhatsApp.`;
+            await supabaseService.saveMessage(session.id, 'assistant', sentinelMessage);
+        } catch (e) {
+            console.warn('[Processor] Proactive OTP escalation failed:', (e as Error).message);
+        }
+    }
+
+    // For leads with LoE still outstanding, follow the first-message AI reply
+    // with a tiny buttoned prompt so the action is one tap away. Gated on
+    // first-message-in-session so subsequent turns don't keep nagging.
+    if (
+        crmEntity.type === 'lead'
+        && leadOnboarding?.loeReceived === false
+        && historyWithoutCurrent.length === 0
+    ) {
+        try {
+            await metaWhatsAppService.sendReplyButtons(
+                from,
+                "Once you've signed, let me know here:",
+                [
+                    { id: LOE_BUTTON_PAYLOAD.SIGNED, title: "I've signed it" },
+                    { id: LOE_BUTTON_PAYLOAD.LATER, title: "I'll do it later" },
+                ]
+            );
+        } catch (e) {
+            console.warn('[Processor] LoE button follow-up failed:', (e as Error).message);
+        }
+    }
 
     // After the main answer lands, close the case loop.
     if (newCaseId) {
