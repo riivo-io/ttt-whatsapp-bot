@@ -372,7 +372,7 @@ function hasRecentOtpEscalation(history: { role: string; content: string }[]): b
 // quick-reply buttons so the lead can self-serve from here. Dedupe is via the
 // sentinel saved to assistant history by the caller; failures are best-effort.
 async function triggerProactiveOtpEscalation(from: string, leadId: string, leadName: string): Promise<void> {
-    const description = `Lead "${leadName}" asked about the SARS eFiling OTP step on WhatsApp. Tina auto-escalated — they need a consultant to walk them through the OTP.`;
+    const description = `Lead "${leadName}" asked about SARS OTP on WhatsApp — auto-escalated for consultant follow-up.`;
     const created = await dynamicsService.createRequest({
         leadId,
         contactType: 'lead',
@@ -452,7 +452,7 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
 
     // HELP path: create + escalate a request so the consultant has a tracked
     // record, then email taxcrew so a human picks it up.
-    const description = `Lead "${leadName}" tapped "Need help" on the SARS eFiling OTP template. They need a consultant to walk them through the OTP step.`;
+    const description = `Lead "${leadName}" tapped Need-help on SARS OTP template — consultant to walk them through.`;
     const created = await dynamicsService.createRequest({
         leadId,
         contactType: 'lead',
@@ -874,11 +874,14 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
 
     await metaWhatsAppService.sendMessage(from, finalResponseText);
 
-    // Tax lead in State B (LoE done, OTP outstanding) asked about OTP in
-    // natural language. The CRM-initiated OTP template might not have been
-    // sent yet, so taxcrew has no signal. Escalate proactively (email + the
-    // same Done/Help buttons the template uses) so the lead always has the
-    // self-serve path within reach. Dedupes via a sentinel phrase written to
+    // Tax lead in State B (LoE done, OTP outstanding) is having an OTP-flavoured
+    // turn. The CRM-initiated OTP template might not have been sent yet, so
+    // taxcrew has no signal. Escalate proactively (email + the same Done/Help
+    // buttons the template uses) so the lead always has the self-serve path
+    // within reach. We check both the inbound AND Tina's reply for OTP / SARS
+    // eFiling keywords — paraphrased progress questions ("what's next?") miss on
+    // the inbound but always trip on the reply because State B guidance forces
+    // Claude to mention the OTP step. Dedupes via a sentinel phrase written to
     // assistant history — one-shot per session unless the marker ages out of
     // the lookback window.
     if (
@@ -886,13 +889,14 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         && leadOnboarding?.loeReceived === true
         && leadOnboarding?.otpCompleted === false
         && (leadOnboarding.leadType == null || leadOnboarding.leadType === LEAD_TYPE_TAX)
-        && isOtpAsk(effectiveText)
+        && (isOtpAsk(effectiveText) || isOtpAsk(finalResponseText))
         && !hasRecentOtpEscalation(historyWithoutCurrent)
     ) {
         try {
             await triggerProactiveOtpEscalation(from, crmEntity.id, (crmEntity.fullname || '').trim() || 'Lead');
             const sentinelMessage = `Quick heads-up — ${OTP_PROACTIVE_SENTINEL} and a TTT consultant will be in touch on WhatsApp.`;
             await supabaseService.saveMessage(session.id, 'assistant', sentinelMessage);
+            console.log(`[Processor] Proactive OTP escalation fired for ${from} (lead ${crmEntity.id})`);
         } catch (e) {
             console.warn('[Processor] Proactive OTP escalation failed:', (e as Error).message);
         }

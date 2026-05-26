@@ -1637,12 +1637,22 @@ export class DynamicsService {
             return null;
         }
 
+        // riivo_description is capped at 100 chars in Dynamics — anything longer
+        // is rejected with a validation error and the whole record fails to
+        // create. Truncate defensively so a long lead name or chatty query
+        // doesn't sink the request; warn so we can spot truncation in logs.
+        const rawDescription = params.description || '';
+        const description = rawDescription.slice(0, 100);
+        if (rawDescription.length > 100) {
+            console.warn(`[Dynamics CRM] createRequest: description truncated from ${rawDescription.length} to 100 chars`);
+        }
+
         const payload: any = {
             riivo_clientmobilenumber: params.phoneNumber,
             riivo_channel: 1,
             riivo_category: params.category ?? 0,
             riivo_priority: params.priority ?? 1,
-            riivo_description: params.description,
+            riivo_description: description,
             statecode: REQUEST_STATE.ACTIVE,
             statuscode: REQUEST_STATUSCODE.NEW,
         };
