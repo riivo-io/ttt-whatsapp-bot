@@ -96,6 +96,7 @@ export class MetaWhatsAppService {
         params: {
             name: string;
             languageCode: string;
+            headerImageLink?: string;
             bodyVariables?: string[];
             bodyNamedVariables?: Record<string, string>;
             buttonPayloads?: { index: number; payload: string }[];
@@ -108,6 +109,15 @@ export class MetaWhatsAppService {
         }
 
         const components: any[] = [];
+        // Image header — Meta requires this when the template was defined
+        // with an image header type. The `link` must be a public HTTPS URL
+        // Meta's servers can fetch (we use an Azure blob).
+        if (params.headerImageLink) {
+            components.push({
+                type: 'header',
+                parameters: [{ type: 'image', image: { link: params.headerImageLink } }],
+            });
+        }
         // Named parameters take precedence — Meta rejects the send if the
         // template was defined with named vars ({{customer_name}}) but the
         // request omits parameter_name (or vice-versa).

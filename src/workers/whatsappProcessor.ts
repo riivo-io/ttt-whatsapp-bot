@@ -28,9 +28,13 @@ const SIGN_UP_GREETING = `Welcome to TTT Financial Group 👋\n\nYou're one tap 
 
 const SIGNUP_TEMPLATE_NAME = process.env.WHATSAPP_SIGNUP_TEMPLATE_NAME || '';
 const SIGNUP_TEMPLATE_LANG = process.env.WHATSAPP_SIGNUP_TEMPLATE_LANG || 'en';
+const SIGNUP_TEMPLATE_HEADER_URL = process.env.WHATSAPP_SIGNUP_TEMPLATE_HEADER_URL
+    || 'https://tttassets.blob.core.windows.net/assets/Welcome_TTTFinancialGroup.png';
 
 const REFERRAL_TEMPLATE_NAME = process.env.WHATSAPP_REFERRAL_TEMPLATE_NAME || '';
 const REFERRAL_TEMPLATE_LANG = process.env.WHATSAPP_REFERRAL_TEMPLATE_LANG || 'en';
+const REFERRAL_TEMPLATE_HEADER_URL = process.env.WHATSAPP_REFERRAL_TEMPLATE_HEADER_URL
+    || 'https://tttassets.blob.core.windows.net/assets/referral.png';
 
 // Stable ids for the client first-message interactive menu. Kept namespaced
 // (`menu:client:*`) so future lead/staff menus can coexist without colliding.
@@ -617,6 +621,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
                 const result = await metaWhatsAppService.sendTemplate(from, {
                     name: REFERRAL_TEMPLATE_NAME,
                     languageCode: REFERRAL_TEMPLATE_LANG,
+                    headerImageLink: REFERRAL_TEMPLATE_HEADER_URL,
                     bodyNamedVariables: { '1': referrerFirstName || 'A friend' },
                     flowButton: {
                         index: 0,
@@ -639,6 +644,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             const result = await metaWhatsAppService.sendTemplate(from, {
                 name: SIGNUP_TEMPLATE_NAME,
                 languageCode: SIGNUP_TEMPLATE_LANG,
+                headerImageLink: SIGNUP_TEMPLATE_HEADER_URL,
                 flowButton: { index: 0 },
             });
             if (result.delivered) {
