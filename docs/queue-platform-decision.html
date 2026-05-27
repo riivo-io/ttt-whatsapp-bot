@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Queue Platform Decision: Stay or Migrate to Azure Service Bus</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600;9..144,700;9..144,900&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #F5F1E8;
+    --bg-tint: #EDE7D6;
+    --paper: #FBF8F0;
+    --ink: #14110F;
+    --ink-soft: #3A332C;
+    --ink-mute: #6B6358;
+    --rule: #D9D1BC;
+    --rule-soft: #E8E1CC;
+    --accent: #B8431A;
+    --accent-soft: #E89A6F;
+    --stay: #3D6B3A;
+    --stay-soft: #C8DCC4;
+    --stay-bg: #ECF2EA;
+    --move: #5A3A8C;
+    --move-soft: #D4C5E8;
+    --move-bg: #F0EAF7;
+    --gold: #B8901C;
+    --gold-bg: #F5E9C4;
+    --green: #3D6B3A;
+    --red: #A8321E;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter Tight', sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(circle at 20% 10%, rgba(184,67,26,0.04) 0%, transparent 40%),
+      radial-gradient(circle at 80% 80%, rgba(61,107,58,0.03) 0%, transparent 40%);
+    background-attachment: fixed;
+  }
+
+  .container { max-width: 1180px; margin: 0 auto; padding: 64px 48px 96px; }
+
+  header.masthead {
+    border-bottom: 1.5px solid var(--ink);
+    padding-bottom: 32px;
+    margin-bottom: 56px;
+  }
+
+  .masthead-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-mute);
+    margin-bottom: 32px;
+  }
+
+  .masthead-top .dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    margin: 0 8px;
+    transform: translateY(-2px);
+  }
+
+  h1.title {
+    font-family: 'Fraunces', serif;
+    font-variation-settings: "opsz" 144;
+    font-weight: 400;
+    font-size: clamp(48px, 7vw, 84px);
+    line-height: 0.95;
+    letter-spacing: -0.025em;
+    margin-bottom: 24px;
+  }
+
+  h1.title em { font-style: italic; font-weight: 300; color: var(--accent); }
+
+  .subtitle {
+    font-family: 'Fraunces', serif;
+    font-size: 22px;
+    line-height: 1.4;
+    color: var(--ink-soft);
+    max-width: 760px;
+    margin-bottom: 32px;
+    font-weight: 400;
+  }
+
+  .meta-row {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-mute);
+  }
+  .meta-row strong { color: var(--ink); font-weight: 600; }
+
+  section { margin-bottom: 80px; }
+
+  .section-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .section-label::before {
+    content: '';
+    display: inline-block;
+    width: 24px; height: 1.5px;
+    background: var(--accent);
+  }
+
+  h2.section-title {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: 44px;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin-bottom: 36px;
+    max-width: 820px;
+  }
+  h2.section-title em { font-style: italic; font-weight: 400; }
+
+  .verdict {
+    background: var(--paper);
+    border: 1.5px solid var(--ink);
+    padding: 40px 44px;
+    position: relative;
+    box-shadow: 8px 8px 0 var(--ink);
+    margin-bottom: 56px;
+  }
+
+  .verdict-ribbon {
+    position: absolute;
+    top: -12px;
+    left: 28px;
+    background: var(--accent);
+    color: var(--paper);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    padding: 6px 14px;
+  }
+
+  .verdict h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 36px;
+    font-weight: 500;
+    line-height: 1.1;
+    margin-bottom: 18px;
+    letter-spacing: -0.015em;
+  }
+  .verdict h3 em { font-style: italic; color: var(--accent); }
+
+  .verdict p {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    max-width: 820px;
+  }
+  .verdict p + p { margin-top: 14px; }
+
+  .verdict-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    margin-top: 32px;
+    padding-top: 28px;
+    border-top: 1px solid var(--rule);
+  }
+  .verdict-stat { border-left: 1px solid var(--rule); padding-left: 20px; }
+  .verdict-stat:first-child { border-left: none; padding-left: 0; }
+  .verdict-stat .label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-mute);
+    margin-bottom: 6px;
+  }
+  .verdict-stat .value {
+    font-family: 'Fraunces', serif;
+    font-size: 28px;
+    font-weight: 500;
+    line-height: 1.1;
+    color: var(--ink);
+  }
+  .verdict-stat .value small {
+    font-size: 14px;
+    color: var(--ink-mute);
+    font-weight: 400;
+    margin-left: 4px;
+  }
+
+  .scope-note {
+    background: var(--gold-bg);
+    border-left: 4px solid var(--gold);
+    padding: 18px 22px;
+    margin-bottom: 28px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+  }
+  .scope-note strong {
+    display: block;
+    margin-bottom: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink);
+  }
+
+  .arch-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    margin-bottom: 24px;
+  }
+
+  .arch-card {
+    background: var(--paper);
+    border: 1.5px solid var(--ink);
+    padding: 28px;
+    position: relative;
+  }
+  .arch-card.stay { border-color: var(--stay); }
+  .arch-card.move { border-color: var(--move); }
+
+  .arch-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 24px;
+    padding-bottom: 18px;
+    border-bottom: 1px dashed var(--rule);
+  }
+  .arch-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--ink-mute);
+    margin-bottom: 6px;
+  }
+  .arch-card.stay .arch-tag { color: var(--stay); }
+  .arch-card.move .arch-tag { color: var(--move); }
+
+  .arch-name {
+    font-family: 'Fraunces', serif;
+    font-size: 26px;
+    font-weight: 500;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+  }
+  .arch-name em { font-style: italic; font-weight: 400; }
+
+  .winner-badge {
+    background: var(--gold-bg);
+    border: 1px solid var(--gold);
+    color: var(--gold);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    padding: 4px 10px;
+    font-weight: 600;
+  }
+
+  .arch-flow { display: flex; flex-direction: column; gap: 6px; }
+
+  .flow-step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--bg-tint);
+    border-left: 3px solid var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .arch-card.stay .flow-step { border-left-color: var(--stay); background: var(--stay-bg); }
+  .arch-card.move .flow-step { border-left-color: var(--move); background: var(--move-bg); }
+
+  .flow-num { font-size: 10px; color: var(--ink-mute); font-weight: 600; min-width: 18px; }
+  .flow-label { font-weight: 600; color: var(--ink); flex: 1; }
+  .flow-role { font-size: 10px; color: var(--ink-mute); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
+  .flow-arrow { text-align: center; color: var(--ink-mute); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+
+  .flow-fanout {
+    margin-top: 6px;
+    padding: 14px;
+    background: var(--bg);
+    border: 1px dashed var(--rule);
+  }
+  .flow-fanout-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-mute);
+    margin-bottom: 10px;
+  }
+  .fanout-services { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  .fanout-service {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 6px 10px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    font-weight: 500;
+  }
+
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--paper);
+    border: 1.5px solid var(--ink);
+    margin-bottom: 32px;
+  }
+  .compare-table th {
+    text-align: left;
+    padding: 16px 20px;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+    vertical-align: top;
+  }
+  .compare-table th:first-child { width: 20%; }
+  .compare-table th.stay-h { background: var(--stay); }
+  .compare-table th.move-h { background: var(--move); }
+  .compare-table td {
+    padding: 18px 20px;
+    border-top: 1px solid var(--rule);
+    vertical-align: top;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .compare-table td:first-child {
+    font-weight: 600;
+    background: var(--bg-tint);
+    color: var(--ink);
+    width: 20%;
+  }
+  .compare-table tr:hover td:not(:first-child) { background: var(--bg); }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-right: 4px;
+  }
+  .pill.good { background: #DFE9D6; color: var(--green); }
+  .pill.bad { background: #F5D9D3; color: var(--red); }
+  .pill.neutral { background: var(--bg-tint); color: var(--ink-soft); }
+  .pill.equal { background: #E4DCC4; color: var(--ink-soft); }
+
+  .pc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  .pc-card { background: var(--paper); border: 1.5px solid var(--rule); padding: 28px; }
+  .pc-card.stay { border-top: 4px solid var(--stay); }
+  .pc-card.move { border-top: 4px solid var(--move); }
+  .pc-card h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 24px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    letter-spacing: -0.01em;
+  }
+  .pc-card .pc-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-mute);
+    margin-bottom: 22px;
+  }
+  .pc-list { list-style: none; padding: 0; }
+  .pc-list-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 18px 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+    font-weight: 600;
+  }
+  .pc-list-title.pros { color: var(--green); }
+  .pc-list-title.cons { color: var(--red); }
+  .pc-list li {
+    padding: 8px 0 8px 22px;
+    position: relative;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+  .pc-list.pros li::before { content: '+'; position: absolute; left: 0; top: 8px; font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--green); }
+  .pc-list.cons li::before { content: '−'; position: absolute; left: 0; top: 8px; font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--red); }
+  .pc-list li strong { color: var(--ink); font-weight: 600; }
+
+  .cost-card { background: var(--paper); border: 1.5px solid var(--ink); padding: 32px; }
+  .cost-assumptions {
+    background: var(--bg-tint);
+    padding: 18px 22px;
+    margin-bottom: 28px;
+    border-left: 3px solid var(--accent);
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+  .cost-assumptions strong {
+    color: var(--ink);
+    display: block;
+    margin-bottom: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .cost-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .cost-table th {
+    text-align: left;
+    padding: 12px 16px 12px 0;
+    border-bottom: 1.5px solid var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .cost-table th.num { text-align: right; padding-right: 0; }
+  .cost-table td { padding: 14px 16px 14px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  .cost-table td.num { text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 500; padding-right: 0; }
+  .cost-table td.svc { font-weight: 600; }
+  .cost-table tr.subtotal td {
+    border-top: 1.5px solid var(--ink);
+    border-bottom: none;
+    padding-top: 18px;
+    font-weight: 700;
+    background: var(--bg-tint);
+  }
+  .cost-table tr.subtotal td.num { font-family: 'Fraunces', serif; font-size: 22px; font-weight: 500; }
+  .cost-note { font-size: 12px; color: var(--ink-mute); margin-top: 16px; line-height: 1.5; font-style: italic; }
+
+  .score-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--paper);
+    border: 1.5px solid var(--ink);
+  }
+  .score-table th {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 16px 20px;
+    text-align: left;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+  }
+  .score-table th.stay-h { background: var(--stay); text-align: center; width: 18%; }
+  .score-table th.move-h { background: var(--move); text-align: center; width: 18%; }
+  .score-table th.weight-h { text-align: center; width: 12%; }
+  .score-table td { padding: 14px 20px; border-top: 1px solid var(--rule); font-size: 14px; vertical-align: middle; }
+  .score-table td.score-cell { text-align: center; font-family: 'Fraunces', serif; font-weight: 500; }
+  .score-bar { display: inline-flex; align-items: center; gap: 6px; }
+  .score-num { font-size: 20px; line-height: 1; }
+  .score-dots { display: inline-flex; gap: 2px; }
+  .sdot { width: 7px; height: 7px; background: var(--rule); border-radius: 50%; }
+  .sdot.on.stay { background: var(--stay); }
+  .sdot.on.move { background: var(--move); }
+  .score-table tr.total td { background: var(--bg-tint); font-weight: 700; border-top: 1.5px solid var(--ink); }
+  .score-table tr.total td.score-cell { font-size: 26px; }
+  .weight-cell { text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--ink-mute); }
+
+  .caveats { background: var(--paper); border: 1.5px solid var(--ink); padding: 36px 40px; }
+  .caveats h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 28px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    letter-spacing: -0.01em;
+  }
+  .caveats > p.lead {
+    color: var(--ink-mute);
+    margin-bottom: 24px;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+  }
+  .caveat-item {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    gap: 20px;
+    padding: 18px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .caveat-item:first-of-type { border-top: 1.5px solid var(--ink); }
+  .caveat-num {
+    font-family: 'Fraunces', serif;
+    font-size: 32px;
+    font-weight: 400;
+    font-style: italic;
+    color: var(--accent);
+    line-height: 1;
+  }
+  .caveat-body h4 {
+    font-family: 'Fraunces', serif;
+    font-size: 19px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    letter-spacing: -0.005em;
+  }
+  .caveat-body p { font-size: 14px; line-height: 1.6; color: var(--ink-soft); }
+
+  .final-rec {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 48px;
+    margin-top: 32px;
+    position: relative;
+    overflow: hidden;
+  }
+  .final-rec::before {
+    content: '';
+    position: absolute;
+    top: 0; right: 0;
+    width: 200px; height: 200px;
+    background: radial-gradient(circle, var(--accent) 0%, transparent 70%);
+    opacity: 0.35;
+  }
+  .final-rec-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--accent-soft);
+    margin-bottom: 14px;
+  }
+  .final-rec h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 48px;
+    font-weight: 400;
+    line-height: 1.05;
+    margin-bottom: 20px;
+    letter-spacing: -0.02em;
+    max-width: 800px;
+  }
+  .final-rec h3 em { font-style: italic; color: var(--accent-soft); }
+  .final-rec p { font-size: 16px; line-height: 1.65; color: rgba(251, 248, 240, 0.85); max-width: 720px; }
+  .final-rec p + p { margin-top: 12px; }
+  .final-rec ul { margin-top: 18px; max-width: 720px; padding-left: 20px; }
+  .final-rec ul li { color: rgba(251, 248, 240, 0.85); padding: 4px 0; font-size: 15px; }
+
+  footer {
+    margin-top: 96px;
+    padding-top: 32px;
+    border-top: 1px solid var(--rule);
+    display: flex;
+    justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-mute);
+  }
+
+  .intro p:first-child::first-letter {
+    font-family: 'Fraunces', serif;
+    font-size: 68px;
+    font-weight: 400;
+    float: left;
+    line-height: 0.85;
+    margin: 6px 8px 0 0;
+    color: var(--accent);
+  }
+  .intro p { font-size: 17px; line-height: 1.65; color: var(--ink-soft); max-width: 760px; margin-bottom: 14px; }
+  .intro p strong { color: var(--ink); font-weight: 600; }
+
+  @media (max-width: 880px) {
+    .container { padding: 40px 24px 64px; }
+    h1.title { font-size: 42px; }
+    .arch-grid, .pc-grid { grid-template-columns: 1fr; }
+    .verdict-stats { grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .verdict-stat { border-left: none; padding-left: 0; }
+    .compare-table { font-size: 13px; }
+    .compare-table th, .compare-table td { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- MASTHEAD -->
+  <header class="masthead">
+    <div class="masthead-top">
+      <span>Decision Memo <span class="dot"></span> Queue Platform <span class="dot"></span> Internal</span>
+      <span>Riivo / TTT <span class="dot"></span> Vol. 02</span>
+    </div>
+    <h1 class="title">Stay, <em>or migrate.</em></h1>
+    <p class="subtitle">A decision memo on whether the WhatsApp bot queue should move from Upstash Redis (current production) to Azure Service Bus. Honest about what's deployed today, what would change, and what the migration actually buys.</p>
+    <div class="meta-row">
+      <span><strong>Bot</strong> &nbsp; Tina, TTT tax assistant on WhatsApp</span>
+      <span><strong>Scope today</strong> &nbsp; SA tax services (insurance / accounting / FP not yet wired)</span>
+      <span><strong>Audience</strong> &nbsp; Internal (Luc + TTT leadership)</span>
+    </div>
+  </header>
+
+  <!-- INTRO / VERDICT -->
+  <section>
+    <div class="section-label">Executive verdict</div>
+    <h2 class="section-title">The short answer, <em>before the detail.</em></h2>
+
+    <div class="verdict">
+      <div class="verdict-ribbon">TL;DR</div>
+      <h3>Stay on the <em>current stack.</em> Don't migrate today.</h3>
+      <p>The migration's only durable argument is consolidating identity and audit into the TTT Microsoft tenant for a future FSP audit. That's real, but it's not load-bearing yet, and every other argument in favour of Azure Service Bus is weaker than it first looks.</p>
+      <p>Per-phone FIFO, the queue feature most often cited for Service Bus, is already solved in production by 16 sharded BullMQ queues with <code style="font-family:'JetBrains Mono',monospace;font-size:13px">concurrency=1</code> per shard, keyed by WhatsApp number. The migration would not improve message ordering. It would mostly move boxes around on an org chart.</p>
+
+      <div class="verdict-stats">
+        <div class="verdict-stat">
+          <div class="label">Current infra cost</div>
+          <div class="value">$40–80<small>/mo</small></div>
+        </div>
+        <div class="verdict-stat">
+          <div class="label">Proposed infra cost</div>
+          <div class="value">$30–70<small>/mo</small></div>
+        </div>
+        <div class="verdict-stat">
+          <div class="label">Migration effort</div>
+          <div class="value">2–4 weeks</div>
+        </div>
+        <div class="verdict-stat">
+          <div class="label">Recommendation</div>
+          <div class="value">Stay</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="scope-note">
+      <strong>Scope clarification</strong>
+      Tina serves TTT's SA tax service line. The bot's tools, prompt, referral programme, and feedback flows are all tax-only. Insurance, accounting, and financial planning exist as service categories inside Dynamics 365 but the bot does not route or onboard those clients yet. Customer counts and conversation volume cited below should be read against tax-only steady state, not the full TTT book.
+    </div>
+
+    <div class="intro">
+      <p><strong>Where this memo lands:</strong> The current production stack works. It already does the things people most often migrate to Azure Service Bus to get. The migration's main pitch (a single Microsoft tenant for identity, billing, and audit) is true but the bot is small enough that the saved governance surface is not yet worth the engineering hours or the schedule risk on a live customer-facing channel.</p>
+      <p>This memo treats the question honestly as <strong>"should we move from production to a different stack"</strong>, not as a clean greenfield bake-off. Migration cost belongs in the comparison, not in a footnote.</p>
+    </div>
+  </section>
+
+  <!-- ARCHITECTURE DIAGRAMS -->
+  <section>
+    <div class="section-label">Architecture</div>
+    <h2 class="section-title">What's deployed today, <em>and what would change.</em></h2>
+
+    <div class="arch-grid">
+
+      <!-- STAY -->
+      <div class="arch-card stay">
+        <div class="arch-header">
+          <div>
+            <div class="arch-tag">Stay / Production today</div>
+            <div class="arch-name"><em>Vercel</em> + Upstash Redis + Fly/Railway</div>
+          </div>
+          <div class="winner-badge">Recommended</div>
+        </div>
+
+        <div class="arch-flow">
+          <div class="flow-step"><span class="flow-num">01</span><span class="flow-label">WhatsApp</span><span class="flow-role">Client device</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">02</span><span class="flow-label">Meta Cloud API</span><span class="flow-role">Webhook</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">03</span><span class="flow-label">Vercel (Express)</span><span class="flow-role">Ingester, 200 in ~50ms</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">04</span><span class="flow-label">Upstash Redis (BullMQ)</span><span class="flow-role">16 sharded queues, FIFO per phone</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">05</span><span class="flow-label">Fly.io / Railway worker</span><span class="flow-role">Long-lived Node container</span></div>
+          <div class="flow-fanout">
+            <div class="flow-fanout-label">Downstream services (unchanged either way)</div>
+            <div class="fanout-services">
+              <div class="fanout-service">Dynamics 365</div>
+              <div class="fanout-service">Claude API</div>
+              <div class="fanout-service">MS Graph (mail)</div>
+              <div class="fanout-service">SharePoint (KB)</div>
+              <div class="fanout-service">Mistral OCR (LoE PDFs)</div>
+              <div class="fanout-service">OpenAI (embeddings)</div>
+              <div class="fanout-service">Supabase (Postgres)</div>
+              <div class="fanout-service">WhatsApp send</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MOVE -->
+      <div class="arch-card move">
+        <div class="arch-header">
+          <div>
+            <div class="arch-tag">Migrate / Proposed</div>
+            <div class="arch-name"><em>Vercel</em> + Azure Service Bus + Azure Container Apps</div>
+          </div>
+        </div>
+
+        <div class="arch-flow">
+          <div class="flow-step"><span class="flow-num">01</span><span class="flow-label">WhatsApp</span><span class="flow-role">Client device</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">02</span><span class="flow-label">Meta Cloud API</span><span class="flow-role">Webhook</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">03</span><span class="flow-label">Vercel (Express)</span><span class="flow-role">Ingester, 200 in ~50ms</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">04</span><span class="flow-label">Azure Service Bus</span><span class="flow-role">Sessions per WhatsApp number</span></div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-step"><span class="flow-num">05</span><span class="flow-label">Azure Container Apps</span><span class="flow-role">Long-lived worker, Entra-authed</span></div>
+          <div class="flow-fanout">
+            <div class="flow-fanout-label">Downstream services (unchanged either way)</div>
+            <div class="fanout-services">
+              <div class="fanout-service">Dynamics 365</div>
+              <div class="fanout-service">Claude API</div>
+              <div class="fanout-service">MS Graph (mail)</div>
+              <div class="fanout-service">SharePoint (KB)</div>
+              <div class="fanout-service">Mistral OCR (LoE PDFs)</div>
+              <div class="fanout-service">OpenAI (embeddings)</div>
+              <div class="fanout-service">Supabase (Postgres)</div>
+              <div class="fanout-service">WhatsApp send</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="cost-assumptions" style="margin-top:8px">
+      <strong>What changes, what doesn't</strong>
+      Only two boxes change: the queue and the worker host. Vercel keeps the HTTP plane in both options because Meta needs a fast 200 on the webhook. Everything below the worker (Dynamics, Claude, Graph, Mistral on LoE PDFs, Supabase, OpenAI embeddings) is identical, identical code, identical credentials. The migration is bounded to roughly two files: <code style="font-family:'JetBrains Mono',monospace;font-size:13px">src/services/queue.service.ts</code> and the worker bootstrap. The Bicep / Terraform for ASB plus a new container app deployment is the bigger chunk of the work.
+    </div>
+  </section>
+
+  <!-- DIMENSION COMPARISON TABLE -->
+  <section>
+    <div class="section-label">Capability comparison</div>
+    <h2 class="section-title">Where the migration <em>actually changes something.</em></h2>
+
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>Dimension</th>
+          <th class="stay-h">Stay: Upstash + Fly/Railway</th>
+          <th class="move-h">Migrate: Azure Service Bus + Container Apps</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Per-phone FIFO</td>
+          <td><span class="pill good">Solved</span> 16 BullMQ queues, shard = <code>hash(phone) % 16</code>, <code>concurrency=1</code> per shard. Three messages from one phone arrive at the worker in order.</td>
+          <td><span class="pill good">Solved</span> Service Bus sessions keyed by WhatsApp number. Same outcome, different mechanism. Not a reason to move.</td>
+        </tr>
+        <tr>
+          <td>Idempotency</td>
+          <td><span class="pill good">Solved</span> BullMQ <code>jobId = wamid</code> plus Supabase <code>whatsapp_webhook_events</code> unique constraint as second line.</td>
+          <td><span class="pill good">Solved</span> ASB duplicate detection window plus the same Supabase guard. Same outcome.</td>
+        </tr>
+        <tr>
+          <td>Dead-letter queue</td>
+          <td><span class="pill good">In place</span> 4 retries with exponential backoff, then drop to <code>whatsapp_queue_dlq</code> Supabase table.</td>
+          <td><span class="pill good">Native</span> ASB has DLQ as a built-in subqueue. Slightly cleaner ops surface.</td>
+        </tr>
+        <tr>
+          <td>Identity surface</td>
+          <td><span class="pill neutral">Split</span> Upstash uses a connection token. Fly.io / Railway use their own auth. Two more vendor logins for InfoSec to track.</td>
+          <td><span class="pill good">Unified</span> ASB and Container Apps both auth via Entra ID. Same tenant as Dynamics + Graph + M365. One audit log, one RBAC model.</td>
+        </tr>
+        <tr>
+          <td>Compliance evidence</td>
+          <td><span class="pill neutral">Adequate</span> Upstash and the worker host have SOC 2 Type II. Audit binder needs separate sections for each.</td>
+          <td><span class="pill good">Mature</span> Azure compliance pack (ISO 27001, SOC 2, GDPR, POPIA) drops straight into an FSP audit. Less paperwork.</td>
+        </tr>
+        <tr>
+          <td>Data residency</td>
+          <td><span class="pill bad">No SA region</span> Upstash closest options are EU or Mumbai. Fly.io has JNB region; Railway does not. POPIA documentation needs to spell this out for queue contents (mostly wamid + phone + raw text).</td>
+          <td><span class="pill good">SA region</span> Azure South Africa North (Johannesburg) supports Service Bus and Container Apps. Cleanest POPIA story.</td>
+        </tr>
+        <tr>
+          <td>Local development</td>
+          <td><span class="pill good">Excellent</span> <code>docker compose up</code> with Redis is byte-identical to production semantics. No emulator drift.</td>
+          <td><span class="pill neutral">Decent</span> ASB has an emulator but feature parity drifts behind the SaaS. Sessions in particular are fiddly in the emulator.</td>
+        </tr>
+        <tr>
+          <td>Worker timeouts</td>
+          <td><span class="pill good">Unbounded</span> Long-running container. Mistral OCR on a dense LoE PDF, multi-turn Claude tool chains, all comfortable.</td>
+          <td><span class="pill good">Unbounded</span> Container Apps is also long-running. Equal here.</td>
+        </tr>
+        <tr>
+          <td>Vendor lock-in</td>
+          <td><span class="pill good">Low</span> Redis protocol and standard Docker. An exit ramp is an afternoon.</td>
+          <td><span class="pill neutral">Medium</span> ASB SDK is portable but the feature set is Azure-flavoured. Sessions, transactions, scheduled delivery would all need replacing.</td>
+        </tr>
+        <tr>
+          <td>Reliability track record</td>
+          <td><span class="pill neutral">Solid</span> Upstash and Fly.io both have visible incident histories. No production incidents on Tina to date.</td>
+          <td><span class="pill good">Deep</span> Azure Service Bus is one of the oldest SaaS queues in the industry. Fewer surprises at scale.</td>
+        </tr>
+        <tr>
+          <td>Cost at current volume</td>
+          <td><span class="pill equal">~$40–80/mo</span> Vercel Pro + Upstash + small Fly/Railway. Rounding error against Meta conversation fees.</td>
+          <td><span class="pill equal">~$30–70/mo</span> Vercel Pro + ASB Standard + Container Apps. Also rounding error.</td>
+        </tr>
+        <tr>
+          <td>Migration cost</td>
+          <td><span class="pill good">Zero</span> Already in production.</td>
+          <td><span class="pill bad">2–4 weeks engineer time</span> Plus a careful production cutover on a live customer channel. Plus DLQ reconciliation. Plus retraining the team on ASB concepts.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- PROS / CONS -->
+  <section>
+    <div class="section-label">Pros &amp; cons of moving</div>
+    <h2 class="section-title">What the migration <em>actually gives and costs.</em></h2>
+
+    <div class="pc-grid">
+
+      <div class="pc-card stay">
+        <h3>Staying on current stack</h3>
+        <div class="pc-sub">Vercel + Upstash + Fly/Railway</div>
+
+        <div class="pc-list-title pros">Where it wins</div>
+        <ul class="pc-list pros">
+          <li><strong>Zero migration cost.</strong> Already in production, handling live customer conversations.</li>
+          <li><strong>Local dev parity.</strong> Docker Compose with Redis is identical to prod. Tightest iteration loop in the toolchain.</li>
+          <li><strong>FIFO is already solved.</strong> Sharded BullMQ keyed by phone gives the same per-conversation ordering guarantee ASB sessions would.</li>
+          <li><strong>Low lock-in.</strong> Redis protocol and Docker mean an exit ramp is short. Useful optionality.</li>
+          <li><strong>Fly.io has a JHB region.</strong> Closes most of the POPIA residency gap for the worker. Upstash is still EU/Mumbai but the queue payload is small (wamid + phone + raw text).</li>
+        </ul>
+
+        <div class="pc-list-title cons">Where it hurts</div>
+        <ul class="pc-list cons">
+          <li><strong>Two extra vendors in the InfoSec register.</strong> Upstash and the worker host both need their own contract, SOC 2 letter, and access review.</li>
+          <li><strong>Upstash residency.</strong> Queue contents live outside SA. Small payloads, but the POPIA documentation has to acknowledge cross-border data flow.</li>
+          <li><strong>Compliance binder is thicker.</strong> Each vendor produces its own evidence; the auditor has to read more docs.</li>
+        </ul>
+      </div>
+
+      <div class="pc-card move">
+        <h3>Migrating to Azure</h3>
+        <div class="pc-sub">Service Bus + Container Apps</div>
+
+        <div class="pc-list-title pros">Where it wins</div>
+        <ul class="pc-list pros">
+          <li><strong>One Microsoft tenant.</strong> ASB, Container Apps, Dynamics, Graph, M365 all live in the same Entra ID. One audit log, one billing surface.</li>
+          <li><strong>SA region for the queue.</strong> Azure South Africa North in JHB. Cleanest POPIA story for an FSP audit.</li>
+          <li><strong>Mature compliance pack.</strong> Azure produces the ISO 27001 / SOC 2 / GDPR / POPIA evidence in a format auditors expect.</li>
+          <li><strong>Native DLQ.</strong> Slightly cleaner than the Supabase table dance, though not a meaningful behaviour change.</li>
+        </ul>
+
+        <div class="pc-list-title cons">Where it hurts</div>
+        <ul class="pc-list cons">
+          <li><strong>2–4 weeks of engineering.</strong> Queue service rewrite, Bicep / Terraform for ASB, container app deployment, staged cutover on a live channel.</li>
+          <li><strong>Cutover risk.</strong> The bot is live, doing real customer work. A botched migration drops messages or duplicates them. Drain and dual-write protocols add complexity.</li>
+          <li><strong>Worse local dev.</strong> ASB emulator drifts behind the SaaS, especially on sessions. Docker Compose + Redis is just better.</li>
+          <li><strong>Two more concepts to teach.</strong> Sessions, topics, subscriptions, SAS tokens, namespaces. New engineers ramp faster on Redis lists.</li>
+          <li><strong>No FIFO win.</strong> The argument most often used to justify ASB doesn't apply because sharded BullMQ already delivers it.</li>
+          <li><strong>Higher lock-in.</strong> ASB's session API is Azure-flavoured. Coming back from ASB to Redis is a project, not an afternoon.</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- COST -->
+  <section>
+    <div class="section-label">Cost modelling</div>
+    <h2 class="section-title">What you actually <em>pay each month.</em></h2>
+
+    <div class="cost-card">
+
+      <div class="cost-assumptions">
+        <strong>Volume assumptions</strong>
+        Tax-only steady state. Inbound + outbound WhatsApp message events estimated in the low-to-mid tens of thousands per month, plus Vercel cron jobs (case-timeout, graph-renew-subscription, webhook-cleanup) and the email-relay path via the tina-bot mailbox. Confirm with the team if the volume baseline is materially different. Mistral OCR triggers only on signed Letters of Engagement, so OCR cost is small and proportional to LoE submissions, not message volume.
+      </div>
+
+      <table class="cost-table">
+        <thead>
+          <tr>
+            <th>Component</th>
+            <th>Plan</th>
+            <th>Driver</th>
+            <th class="num">Monthly</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- STAY -->
+          <tr>
+            <td class="svc" style="background:var(--stay-bg); color:var(--stay); font-family:'JetBrains Mono',monospace; font-size:11px; text-transform:uppercase; letter-spacing:0.1em" colspan="4">Stay: Vercel + Upstash + Fly/Railway</td>
+          </tr>
+          <tr>
+            <td class="svc">Vercel</td>
+            <td>Pro (1 seat)</td>
+            <td>HTTP ingester, cron, PDF route</td>
+            <td class="num">$20</td>
+          </tr>
+          <tr>
+            <td class="svc">Vercel functions</td>
+            <td>Included + overage</td>
+            <td>Webhook + email + PDF invocations</td>
+            <td class="num">$0–10</td>
+          </tr>
+          <tr>
+            <td class="svc">Upstash Redis</td>
+            <td>Pay as you go</td>
+            <td>BullMQ backing store, GroupMQ FIFO</td>
+            <td class="num">$5–20</td>
+          </tr>
+          <tr>
+            <td class="svc">Fly.io / Railway</td>
+            <td>Container</td>
+            <td>Persistent worker, ~0.5–1 vCPU</td>
+            <td class="num">$10–30</td>
+          </tr>
+          <tr class="subtotal">
+            <td colspan="3">Subtotal: Stay</td>
+            <td class="num">$40–80</td>
+          </tr>
+
+          <!-- MOVE -->
+          <tr>
+            <td class="svc" style="background:var(--move-bg); color:var(--move); font-family:'JetBrains Mono',monospace; font-size:11px; text-transform:uppercase; letter-spacing:0.1em" colspan="4">Migrate: Vercel + Azure Service Bus + Container Apps</td>
+          </tr>
+          <tr>
+            <td class="svc">Vercel</td>
+            <td>Pro (1 seat)</td>
+            <td>HTTP ingester, cron, PDF route</td>
+            <td class="num">$20</td>
+          </tr>
+          <tr>
+            <td class="svc">Vercel functions</td>
+            <td>Included + overage</td>
+            <td>Same as above</td>
+            <td class="num">$0–10</td>
+          </tr>
+          <tr>
+            <td class="svc">Azure Service Bus</td>
+            <td>Standard</td>
+            <td>$10 base + ops at this volume</td>
+            <td class="num">$10–15</td>
+          </tr>
+          <tr>
+            <td class="svc">Azure Container Apps</td>
+            <td>Consumption</td>
+            <td>Persistent worker, scales to zero off-hours</td>
+            <td class="num">$0–25</td>
+          </tr>
+          <tr class="subtotal">
+            <td colspan="3">Subtotal: Migrate</td>
+            <td class="num">$30–70</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="cost-note">Excludes shared costs that are identical across both options: Meta WhatsApp conversation fees (largest line item by a wide margin), Claude API tokens, Mistral OCR per-page fees on LoE PDFs, OpenAI embeddings, Dynamics 365 licensing, Microsoft Graph access, SharePoint storage, and Supabase. At Tina's scale, the WhatsApp conversation bill alone dwarfs the infra line by an order of magnitude, which is why the queue platform choice is an ops and audit question, not a cost question.</p>
+    </div>
+  </section>
+
+  <!-- SCORE / WEIGHTED -->
+  <section>
+    <div class="section-label">Weighted scorecard</div>
+    <h2 class="section-title">Scored honestly, <em>including the cost of moving.</em></h2>
+
+    <table class="score-table">
+      <thead>
+        <tr>
+          <th>Criterion</th>
+          <th class="weight-h">Weight</th>
+          <th class="stay-h">Stay</th>
+          <th class="move-h">Migrate</th>
+          <th>Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Compliance &amp; audit fit (FSP)</td>
+          <td class="weight-cell">15%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">3</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span></span></span></td>
+          <td>Azure compliance pack is genuinely easier for auditors.</td>
+        </tr>
+        <tr>
+          <td>Microsoft tenant alignment</td>
+          <td class="weight-cell">10%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">2</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span></span></span></td>
+          <td>Dynamics + Graph + M365 already on Entra.</td>
+        </tr>
+        <tr>
+          <td>Data residency (SA / POPIA)</td>
+          <td class="weight-cell">10%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">3</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span></span></span></td>
+          <td>Fly.io has JHB; Upstash does not. Azure has both.</td>
+        </tr>
+        <tr>
+          <td>Stability of live channel</td>
+          <td class="weight-cell">20%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">2</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td>Migrating a live customer-facing queue is the real risk.</td>
+        </tr>
+        <tr>
+          <td>Migration cost (eng weeks)</td>
+          <td class="weight-cell">15%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">1</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot"></span><span class="sdot"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td>Already in prod vs 2–4 weeks of build + cutover.</td>
+        </tr>
+        <tr>
+          <td>Local dev experience</td>
+          <td class="weight-cell">10%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">3</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td>Docker + Redis is identical to prod.</td>
+        </tr>
+        <tr>
+          <td>Queue semantics for this workload</td>
+          <td class="weight-cell">5%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span></span></span></td>
+          <td>FIFO per phone, dedupe, DLQ all solved on both sides.</td>
+        </tr>
+        <tr>
+          <td>Cost</td>
+          <td class="weight-cell">5%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">4</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span></span></span></td>
+          <td>Sub-$50 either way. Effectively a wash.</td>
+        </tr>
+        <tr>
+          <td>Vendor lock-in</td>
+          <td class="weight-cell">5%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">3</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td>Redis + Docker portability vs ASB-flavoured features.</td>
+        </tr>
+        <tr>
+          <td>Reliability track record</td>
+          <td class="weight-cell">5%</td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">3</span><span class="score-dots"><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot on stay"></span><span class="sdot"></span><span class="sdot"></span></span></span></td>
+          <td class="score-cell"><span class="score-bar"><span class="score-num">5</span><span class="score-dots"><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span><span class="sdot on move"></span></span></span></td>
+          <td>Azure is older and quieter at scale.</td>
+        </tr>
+        <tr class="total">
+          <td>Weighted total</td>
+          <td class="weight-cell">100%</td>
+          <td class="score-cell">4.1</td>
+          <td class="score-cell">3.6</td>
+          <td>Higher is better.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- CAVEATS -->
+  <section>
+    <div class="section-label">Watch list for the current stack</div>
+    <h2 class="section-title">Things to keep an eye on <em>if we stay.</em></h2>
+
+    <div class="caveats">
+      <h3>Stay confidently, but track these.</h3>
+      <p class="lead">Items that could flip the decision later</p>
+
+      <div class="caveat-item">
+        <div class="caveat-num">01</div>
+        <div class="caveat-body">
+          <h4>POPIA documentation for cross-border queue contents.</h4>
+          <p>Upstash sits in EU or Mumbai. Queue payloads are small (wamid, phone, raw message text) but they do leave SA. If an FSP audit explicitly requires SA-resident queueing for personal data, that flips the recommendation toward Azure. Worth getting in front of with legal before a reviewer asks.</p>
+        </div>
+      </div>
+
+      <div class="caveat-item">
+        <div class="caveat-num">02</div>
+        <div class="caveat-body">
+          <h4>Service scope expansion past tax.</h4>
+          <p>The bot is tax-only today. If TTT wires up insurance, accounting, or financial planning flows, the bot becomes the front door for a broader regulated portfolio. That raises the bar on identity and audit, which is when the Microsoft-aligned stack starts to actually pay off.</p>
+        </div>
+      </div>
+
+      <div class="caveat-item">
+        <div class="caveat-num">03</div>
+        <div class="caveat-body">
+          <h4>Vendor count creeping into the InfoSec register.</h4>
+          <p>Today: Vercel, Upstash, Fly.io / Railway, Supabase, Anthropic, Mistral, OpenAI, plus the Microsoft estate. If InfoSec pushes back on the vendor sprawl, collapsing the queue and worker into Azure becomes the cheapest win on paper.</p>
+        </div>
+      </div>
+
+      <div class="caveat-item">
+        <div class="caveat-num">04</div>
+        <div class="caveat-body">
+          <h4>Worker host pick.</h4>
+          <p>Fly.io has a JHB region; Railway does not. If we settle on Railway long term, the worker compute also lives outside SA, which compounds the residency story. Locking to Fly.io for the JHB region is a small move that buys back some POPIA narrative.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FINAL -->
+  <section>
+    <div class="final-rec">
+      <div class="final-rec-tag">Recommendation</div>
+      <h3>Stay on the current stack. <em>Revisit if the audit, the scope, or the vendor count moves.</em></h3>
+      <p>The migration's case is real but not yet load-bearing. The bot is tax-only, the queue payload is small, and per-phone ordering is already solved. Moving today swaps a working production system for a comparable one at the cost of 2–4 weeks of engineering and live-channel cutover risk.</p>
+      <p>The trigger for revisiting is concrete:</p>
+      <ul>
+        <li>An FSP auditor explicitly flags Upstash's EU/Mumbai residency for queue contents.</li>
+        <li>TTT wires the bot up for insurance, accounting, or financial planning, widening the regulatory surface.</li>
+        <li>InfoSec asks us to collapse vendors into the Microsoft estate as part of a broader tenant consolidation.</li>
+      </ul>
+      <p>None of those are true today. When one becomes true, this memo's recommendation flips and the migration becomes a 2–4 week project, not a 6-month one. The current stack was built to be portable on purpose.</p>
+    </div>
+  </section>
+
+  <footer>
+    <span>Riivo / TTT &middot; Decision Memo &middot; Vol. 02</span>
+    <span>Drafted 2026-05-20</span>
+  </footer>
+
+</div>
+
+</body>
+</html>

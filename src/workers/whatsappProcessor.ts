@@ -3,11 +3,7 @@ import { metaWhatsAppService } from '../services/meta.service';
 import { dynamicsService, REQUEST_STATUSCODE, LEAD_TYPE_TAX } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
 import { stagePendingUpload } from '../services/pendingUpload.service';
-import {
-    caseService,
-    CASE_FEEDBACK_BUTTON_YES,
-    CASE_FEEDBACK_BUTTON_NO,
-} from '../services/case.service';
+import { caseService } from '../services/case.service';
 import { handleClientRelayResponse, RELAY_BUTTON_PAYLOAD } from '../controllers/emailRelay.controller';
 import { knowledgeBaseService, KbChunkHit } from '../services/knowledgeBase.service';
 import { graphMailService } from '../services/graphMail.service';
@@ -15,22 +11,26 @@ import { messageContextStorage } from '../utils/messageContext';
 import { WhatsAppJobPayload } from '../queue/whatsappQueue';
 import { enqueueFeedbackPrompt } from '../queue/feedbackPromptQueue';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
-
-// Idle-vs-immediate feedback prompt mode. `immediate` (default) preserves
-// the pre-PRD behavior: buttons go out right after the bot's L1 answer.
-// `idle` schedules a 2.5-min delayed job that only fires if the client has
-// gone silent — set by env var, single check at the enqueue site below.
-function getFeedbackPromptMode(): 'immediate' | 'idle' {
-    return (process.env.FEEDBACK_PROMPT_MODE || 'immediate') === 'idle' ? 'idle' : 'immediate';
-}
+import { postWhatsAppSignupNotification } from '../services/whatsappSignupNotifier';
+import {
+    REFERRAL_CODE_PATTERN,
+    REFERRAL_KEYWORD_PATTERN,
+    buildReferralFallback,
+    serviceLabelFromLeadType,
+} from '../utils/firstContactRouting';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
-const SIGN_UP_GREETING = `👋 Welcome to TTT Financial Group!\n\nLooks like you're new here. Tap Sign up to register in under a minute, or use the web form if you'd rather. Once you're in, we'll handle your tax, accounting and insurance right here on WhatsApp. 💬`;
-const SIGN_UP_LINK = `https://www.ttt-tax.co.za/client-onboarding`;
+// Text-only fallback fired only when the cold-signup Meta template send fails.
+// The branded templates (`ttt_welcome_signup`, `ttt_referral_welcome`) are
+// the primary path — see PRD-first-contact-templates.md §5.1(b).
+const SIGN_UP_GREETING = `Welcome to TTT Financial Group 👋\n\nYou're one tap from having your tax, accounting and insurance handled here on WhatsApp.\n\nRegister in under a minute: https://www.ttt-tax.co.za/client-onboarding`;
 
 const SIGNUP_TEMPLATE_NAME = process.env.WHATSAPP_SIGNUP_TEMPLATE_NAME || '';
 const SIGNUP_TEMPLATE_LANG = process.env.WHATSAPP_SIGNUP_TEMPLATE_LANG || 'en';
+
+const REFERRAL_TEMPLATE_NAME = process.env.WHATSAPP_REFERRAL_TEMPLATE_NAME || '';
+const REFERRAL_TEMPLATE_LANG = process.env.WHATSAPP_REFERRAL_TEMPLATE_LANG || 'en';
 
 // Stable ids for the client first-message interactive menu. Kept namespaced
 // (`menu:client:*`) so future lead/staff menus can coexist without colliding.
@@ -337,6 +337,18 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
 
     console.log(`[Processor] Sign-up flow created lead ${created.new_leadid} for ${from}`);
 
+    // Fire-and-await the LOE app's team-notification + thank-you emailer.
+    // Failures are logged and swallowed inside the helper — the lead is already
+    // in Dynamics, so we never block the user-visible welcome on email delivery.
+    await postWhatsAppSignupNotification({
+        name: `${firstName} ${lastName}`.trim(),
+        email,
+        phone: from,
+        service: serviceLabelFromLeadType(leadType),
+        clientType,
+        dynamicsId: created.new_leadid,
+    });
+
     const loeLink = buildLoeMagicLink(created.new_leadid);
     if (loeLink) {
         const welcome = `Thanks, ${firstName}! You're signed up with TTT Financial Group. 🎉\n\nNext step: sign your Letter of Engagement using your unique link (valid for 72 hours):\n\n${loeLink}\n\nOnce that's signed, let us know below.`;
@@ -367,12 +379,16 @@ function hasRecentOtpEscalation(history: { role: string; content: string }[]): b
 // Tax lead in State B (LoE done, OTP outstanding) asked about the SARS OTP
 // step in natural language. The CRM-initiated OTP template (with its Done/Help
 // buttons) may not have gone out yet, so taxcrew has no signal the lead is
-// waiting. Mirror what the HELP-button handler does — create + escalate a
-// riivo_request, email taxcrew — and additionally surface the same Done/Help
-// quick-reply buttons so the lead can self-serve from here. Dedupe is via the
-// sentinel saved to assistant history by the caller; failures are best-effort.
+// waiting. Create a tracked riivo_request, email taxcrew, and surface the
+// Done/Help quick-reply buttons so the lead can self-serve from here. Dedupe
+// is via the sentinel saved to assistant history by the caller; failures are
+// best-effort.
+//
+// Request lands in AWAITING_FEEDBACK (not ESCALATED): Tina has done everything
+// she can on the bot side and the consultant outreach is the normal next step
+// of the signup flow during working hours, not an escalation.
 async function triggerProactiveOtpEscalation(from: string, leadId: string, leadName: string): Promise<void> {
-    const description = `Lead "${leadName}" asked about SARS OTP on WhatsApp — auto-escalated for consultant follow-up.`;
+    const description = `Lead "${leadName}" asked about SARS OTP on WhatsApp — flagged for consultant follow-up.`;
     const created = await dynamicsService.createRequest({
         leadId,
         contactType: 'lead',
@@ -381,9 +397,8 @@ async function triggerProactiveOtpEscalation(from: string, leadId: string, leadN
     });
     if (created?.riivo_requestid) {
         await dynamicsService.updateRequest(created.riivo_requestid, {
-            statuscode: REQUEST_STATUSCODE.ESCALATED,
-            riivo_escalationreason: 'Lead asked about SARS eFiling OTP on WhatsApp',
-            riivo_escalatedon: new Date().toISOString(),
+            statuscode: REQUEST_STATUSCODE.AWAITING_FEEDBACK,
+            riivo_classificationtopic: 'otp_signup',
         });
     }
 
@@ -394,7 +409,7 @@ async function triggerProactiveOtpEscalation(from: string, leadId: string, leadN
         'Tina has acknowledged on the WhatsApp side and surfaced the Done / Need-help buttons. A consultant should reach out to walk them through the OTP step on https://secure.sarsefiling.co.za/app/profileTaxType/taxTypeActivation.',
         '',
         created?.riivo_requestid
-            ? `An escalated riivo_request has been created for tracking: ${created.riivo_requestid}.`
+            ? `A tracked riivo_request has been created for follow-up: ${created.riivo_requestid}.`
             : 'NOTE: we were unable to create a riivo_request for this lead — please pick this up from the email and follow up manually.',
         '',
         `Dynamics lead id: ${leadId}`,
@@ -417,9 +432,11 @@ async function triggerProactiveOtpEscalation(from: string, leadId: string, leadN
 
 // Tap on the OTP template's two quick-reply buttons. DONE flags the lead for
 // auto-conversion in Dynamics (a Power Automate flow converts the lead to a
-// contact once icon_converttoclient flips). HELP creates and escalates a
-// riivo_request, and emails taxcrew@ttt-tax.co.za from the tina-bot mailbox
-// so a human picks it up.
+// contact once icon_converttoclient flips) and resolves any open OTP-flavoured
+// riivo_requests for the lead. HELP creates a tracked riivo_request and emails
+// taxcrew@ttt-tax.co.za from the tina-bot mailbox so a human picks it up.
+// Neither path uses ESCALATED — the OTP step is the normal next handoff in
+// signup, not an escalation; consultants pick it up during working hours.
 async function handleOtpTemplateResponse(from: string, payload: string, crmEntity: any): Promise<void> {
     if (crmEntity?.type !== 'lead' || !crmEntity?.id) {
         console.warn(`[Processor] OTP button "${payload}" from ${from} but sender is not a lead (type=${crmEntity?.type}). Ignoring.`);
@@ -443,6 +460,7 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
             );
             return;
         }
+        await dynamicsService.resolveOpenOtpRequestsForLead(leadId);
         await metaWhatsAppService.sendMessage(
             from,
             "Amazing, thank you! 🎉 You're all set. We'll finalise your account on our side and a TTT consultant will be in touch shortly to welcome you in properly."
@@ -450,8 +468,9 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
         return;
     }
 
-    // HELP path: create + escalate a request so the consultant has a tracked
-    // record, then email taxcrew so a human picks it up.
+    // HELP path: create a tracked request and email taxcrew so a human picks
+    // it up. Lands in AWAITING_FEEDBACK rather than ESCALATED — the consultant
+    // outreach during working hours is the normal handoff, not an escalation.
     const description = `Lead "${leadName}" tapped Need-help on SARS OTP template — consultant to walk them through.`;
     const created = await dynamicsService.createRequest({
         leadId,
@@ -461,9 +480,8 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
     });
     if (created?.riivo_requestid) {
         await dynamicsService.updateRequest(created.riivo_requestid, {
-            statuscode: REQUEST_STATUSCODE.ESCALATED,
-            riivo_escalationreason: 'Lead requested help with SARS eFiling OTP',
-            riivo_escalatedon: new Date().toISOString(),
+            statuscode: REQUEST_STATUSCODE.AWAITING_FEEDBACK,
+            riivo_classificationtopic: 'otp_help',
         });
     }
 
@@ -474,7 +492,7 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
         'They need a consultant to walk them through the OTP step on https://secure.sarsefiling.co.za/app/profileTaxType/taxTypeActivation.',
         '',
         created?.riivo_requestid
-            ? `An escalated riivo_request has been created for tracking: ${created.riivo_requestid}.`
+            ? `A tracked riivo_request has been created for follow-up: ${created.riivo_requestid}.`
             : 'NOTE: we were unable to create a riivo_request for this lead — please pick this up from the email and follow up manually.',
         '',
         `Dynamics lead id: ${leadId}`,
@@ -573,6 +591,50 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     const { crmEntity, staffRoleId: initialStaffRoleId, permittedTools: initialTools } = await resolveSender(from);
 
     if (!crmEntity) {
+        const codeMatch = effectiveText.match(REFERRAL_CODE_PATTERN);
+        const code = codeMatch ? codeMatch[1] : null;
+        const isReferralInbound = !!code || REFERRAL_KEYWORD_PATTERN.test(effectiveText);
+
+        if (isReferralInbound) {
+            let referrerFirstName: string | null = null;
+            if (code) {
+                try {
+                    const referrer = await dynamicsService.getContactByReferralCode(code);
+                    if (referrer) {
+                        referrerFirstName = (referrer.firstname || '').trim() || null;
+                        console.log(`[Processor] Referral inbound from ${from} matched code ${code} → ${referrer.fullname}`);
+                    } else {
+                        console.warn(`[Processor] Referral inbound from ${from} had code ${code} but no contact match`);
+                    }
+                } catch (e) {
+                    console.warn('[Processor] Referral code lookup failed:', (e as Error).message);
+                }
+            } else {
+                console.log(`[Processor] Referral inbound from ${from} with no code in text`);
+            }
+
+            if (REFERRAL_TEMPLATE_NAME) {
+                const result = await metaWhatsAppService.sendTemplate(from, {
+                    name: REFERRAL_TEMPLATE_NAME,
+                    languageCode: REFERRAL_TEMPLATE_LANG,
+                    bodyNamedVariables: { '1': referrerFirstName || 'A friend' },
+                    flowButton: {
+                        index: 0,
+                        ...(code ? { flowActionData: { referral_code: code } } : {}),
+                    },
+                });
+                if (result.delivered) {
+                    console.log(`[Processor] ${from} → referral template "${REFERRAL_TEMPLATE_NAME}" (referrer=${referrerFirstName || 'A friend'}, code=${code || 'none'})`);
+                    return;
+                }
+                console.warn(`[Processor] sendTemplate "${REFERRAL_TEMPLATE_NAME}" failed (${result.error}), falling back to text`);
+            }
+
+            await metaWhatsAppService.sendMessage(from, buildReferralFallback(referrerFirstName, code));
+            return;
+        }
+
+        // Generic (cold) first-contact path
         if (SIGNUP_TEMPLATE_NAME) {
             const result = await metaWhatsAppService.sendTemplate(from, {
                 name: SIGNUP_TEMPLATE_NAME,
@@ -583,11 +645,10 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
                 console.log(`[Processor] ${from} not found — sent sign-up template "${SIGNUP_TEMPLATE_NAME}"`);
                 return;
             }
-            console.warn(`[Processor] sendTemplate "${SIGNUP_TEMPLATE_NAME}" failed (${result.error}), falling back to link`);
+            console.warn(`[Processor] sendTemplate "${SIGNUP_TEMPLATE_NAME}" failed (${result.error}), falling back to text`);
         }
-        console.log(`[Processor] ${from} not found — sending sign-up link`);
+        console.log(`[Processor] ${from} not found — sending sign-up fallback text`);
         await metaWhatsAppService.sendMessage(from, SIGN_UP_GREETING);
-        await metaWhatsAppService.sendMessage(from, SIGN_UP_LINK);
         return;
     }
 
@@ -924,50 +985,28 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         }
     }
 
-    // After the main answer lands, close the case loop.
+    // After the main answer lands, close the case loop. Escalations skip the
+    // feedback prompt entirely — those go straight to a human, no point
+    // asking the client whether the bot answered. Every other case schedules
+    // the idle prompt; the worker decides at fire time whether to send it.
     if (newCaseId) {
-        if (classifyOutcome.level === 'L1') {
+        if (classifyOutcome.level === 'escalation') {
+            await caseService.markEscalated(newCaseId, 'Bot classified as escalation', crmRequestId);
+        } else {
             const botAnswerSentAt = new Date().toISOString();
             await caseService.recordBotResponse(newCaseId, 'direct_answer', finalResponseText, crmRequestId);
-
-            if (getFeedbackPromptMode() === 'idle') {
-                // Delay the buttons by 2.5 minutes and only fire them if the
-                // client has gone silent (state check happens at job fire time).
-                try {
-                    await enqueueFeedbackPrompt({
-                        caseId: newCaseId,
-                        sessionId: session.id,
-                        phoneNumber: from,
-                        crmRequestId: crmRequestId,
-                        botAnswerSentAt,
-                    });
-                    console.log(`[FeedbackPrompt] scheduled caseId=${newCaseId} sessionId=${session.id}`);
-                } catch (e: any) {
-                    console.warn(`[FeedbackPrompt] enqueue_failed caseId=${newCaseId} sessionId=${session.id} err=${e?.message || e}`);
-                }
-            } else {
-                // Immediate-mode: pre-PRD behavior. Buttons go out now.
-                try {
-                    await metaWhatsAppService.sendReplyButtons(
-                        from,
-                        'Did that answer your question?',
-                        [
-                            { id: CASE_FEEDBACK_BUTTON_YES, title: 'Yes, thanks' },
-                            { id: CASE_FEEDBACK_BUTTON_NO, title: 'Still need help' },
-                        ]
-                    );
-                    await supabaseService.setSessionPendingCase(session.id, newCaseId);
-                    if (crmRequestId) {
-                        await dynamicsService.updateRequest(crmRequestId, {
-                            statuscode: REQUEST_STATUSCODE.AWAITING_FEEDBACK,
-                        });
-                    }
-                } catch (e: any) {
-                    console.warn('[Processor] feedback buttons failed:', e?.message || e);
-                }
+            try {
+                await enqueueFeedbackPrompt({
+                    caseId: newCaseId,
+                    sessionId: session.id,
+                    phoneNumber: from,
+                    crmRequestId: crmRequestId,
+                    botAnswerSentAt,
+                });
+                console.log(`[FeedbackPrompt] scheduled caseId=${newCaseId} sessionId=${session.id}`);
+            } catch (e: any) {
+                console.warn(`[FeedbackPrompt] enqueue_failed caseId=${newCaseId} sessionId=${session.id} err=${e?.message || e}`);
             }
-        } else if (classifyOutcome.level === 'escalation') {
-            await caseService.markEscalated(newCaseId, 'Bot classified as escalation', crmRequestId);
         }
     }
 

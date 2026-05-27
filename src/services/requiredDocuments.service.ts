@@ -1,3 +1,5 @@
+import { dynamicsService } from './dynamics.service';
+
 /**
  * Mapping of SARS source code / industry → the tax documents the client
  * needs to upload for the current South African tax filing season.
@@ -247,4 +249,86 @@ export function formatRequiredDocumentsMessage(result: RequiredDocumentsResult):
     lines.push('Bank statements, logbooks and payslips should cover the full tax year unless noted otherwise. Send documents one at a time — I\'ll file each one to your profile.');
 
     return lines.join('\n');
+}
+
+export type MissingDocsResult = {
+    taxYear: TaxYear;
+    /** Docs the client still needs to send, in priority order (source-code, industry, baseline). */
+    outstanding: DocSpec[];
+    /** Docs already on file for the year — surfaced so the caller can acknowledge them. */
+    received: DocSpec[];
+    matchedSourceCodes: string[];
+    matchedIndustry: string | null;
+};
+
+/**
+ * Compute the docs a specific client still owes us, given the SARS source
+ * codes we've inferred for them (e.g. from a freshly-OCR'd IRP5 unioned
+ * with prior IRP5s for the same year). Fetches the contact's industry and
+ * the rows already in `riivo_taxsubmissionsdocuments` for the target year,
+ * then subtracts anything that's already on file. Used by the IRP5 upload
+ * tool to drive the "next, I'll need your logbook..." follow-up message.
+ *
+ * Defensive: if any CRM read fails we fall back to the full required list
+ * — the caller would rather over-ask than silently skip a doc.
+ */
+export async function computeMissingDocsForClient(
+    contactId: string,
+    sourceCodes: string[],
+    today: Date = new Date(),
+): Promise<MissingDocsResult> {
+    const profile = await dynamicsService.getContactTaxProfile(contactId);
+    const industryName = profile?.industryName || null;
+
+    // Union the caller-supplied source codes with whatever's on the contact
+    // profile, so an IRP5 that doesn't redundantly carry every code already
+    // flagged on the contact (e.g. retirement-only codes the consultant
+    // entered manually) still drives the correct doc asks.
+    const allCodes = Array.from(new Set([...sourceCodes, ...(profile?.sourceCodes || [])]));
+
+    const expected = computeRequiredDocuments(allCodes, industryName, today);
+
+    const uploadedRows = await dynamicsService.getTaxSubmissionDocsByClient(contactId, expected.taxYear.label);
+    const uploadedLabels: string[] = uploadedRows
+        .map((r: any) => (r?.riivo_taxsubmissionsdocument as string | undefined) || '')
+        .filter((s: string) => s.length > 0);
+
+    const allExpected = [...expected.bySourceCode, ...expected.byIndustry, ...expected.baseline];
+    const seen = new Set<string>();
+    const outstanding: DocSpec[] = [];
+    const received: DocSpec[] = [];
+    for (const doc of allExpected) {
+        const key = doc.label.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const hit = uploadedLabels.some(u => labelsLooseMatch(doc.label, u));
+        if (hit) received.push(doc);
+        else outstanding.push(doc);
+    }
+
+    return {
+        taxYear: expected.taxYear,
+        outstanding,
+        received,
+        matchedSourceCodes: expected.matchedSourceCodes,
+        matchedIndustry: expected.matchedIndustry,
+    };
+}
+
+function normaliseDocLabel(label: string): string {
+    return label
+        .toLowerCase()
+        .replace(/\([^)]*\)/g, '')
+        .replace(/[—–-]/g, ' ')
+        .replace(/[^a-z0-9 ]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function labelsLooseMatch(required: string, uploaded: string): boolean {
+    const a = normaliseDocLabel(required);
+    const b = normaliseDocLabel(uploaded);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    return a.includes(b) || b.includes(a);
 }

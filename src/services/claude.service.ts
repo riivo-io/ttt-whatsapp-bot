@@ -11,9 +11,11 @@ import { metaWhatsAppService } from './meta.service';
 console.log('[boot] claude.service: imports done');
 import { mistralService } from './mistral.service';
 import { loeExtractorService } from './loe-extractor.service';
+import { irp5ExtractorService, inferSourceCodesFromIrp5Row } from './irp5-extractor.service';
 import { supabaseService } from './supabase.service';
 import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from './pendingUpload.service';
-import { computeRequiredDocuments, formatRequiredDocumentsMessage } from './requiredDocuments.service';
+import { sharePointService } from './sharepoint.service';
+import { computeRequiredDocuments, formatRequiredDocumentsMessage, computeMissingDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
 import { computeCostUsd, totalTokens } from './claudePricing.service';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
 import { RateLimitError, callAnthropicMessages, type RateLimitHeaders } from '../utils/anthropicRateLimit';
@@ -517,6 +519,17 @@ const TOOLS: Anthropic.Tool[] = [
             required: ["field_name", "new_value"],
         },
     },
+    {
+        name: "upload_irp5",
+        description: "Process an IRP5 (or IT3(a)) tax certificate the client has just uploaded. Uploads it to SharePoint, files a riivo_taxsubmissionsdocuments row, OCRs and parses the cert into a riivo_irp5s record, then returns the employer/year + a list of any other docs we still need. ONLY call after the client has confirmed in chat that the file they sent is their IRP5 (set confirmed_by_user=true once they've said so). Do NOT call for any other doc type — use save_document for those.",
+        input_schema: {
+            type: "object",
+            properties: {
+                confirmed_by_user: { type: "boolean", description: "True once the client has confirmed in WhatsApp that the staged file is their IRP5 (or IT3(a) equivalent). Never call this tool with confirmed_by_user=false — ask first, then call." },
+            },
+            required: ["confirmed_by_user"],
+        },
+    },
 ];
 
 // CLAUDE_MODEL is the model used for every main-assistant and tool-loop call.
@@ -730,7 +743,29 @@ export class ClaudeService {
 
             let roleContext = '';
             if (entityType === 'client') {
-                roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. Address them as a valued client, by first name.\n\n**Document uploads — IMPORTANT**: Clients CAN upload tax documents (IRP5, IT3(a), IT3(b), payslips, medical certificates, till slips / receipts, logbooks, ID documents, bank statements, tax certificates, etc.) directly on WhatsApp. If the client asks whether they can send a document, or says they want to upload something, say yes and invite them to send the file. NEVER tell them they cannot upload documents here — they can. Once they send the file, you will be prompted to ask the document type and call save_document.\n\n**What docs do I need?**: If the client asks what documents they need to upload, send, submit or provide — or anything about what their tax return requires — call get_required_documents. The tool returns a pre-formatted list tailored to the client's income sources and industry; relay the message verbatim. Do NOT guess or list docs yourself, and do NOT mention SARS source codes to the client.${isFirstMessage ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Under 45 words total.\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, their TTT tax sidekick.\n- Mention 4 quick things you can help with using emoji signposts: 📄 invoices, 📂 tax return updates, 📎 document uploads, 📞 consultant callbacks.\n- End with ONE open question, not a menu.\n- Do NOT list every capability. Do NOT use bullet points in the greeting.\n- Example: "Hey Luc! 👋 Tina here, your TTT tax sidekick 🇿🇦\\n\\nI can help with 📄 invoices, 📂 tax return updates, 📎 uploading tax docs, and 📞 consultant callbacks. What do you need today?"` : ''}`;
+                // First-message-only: check whether the client has an IRP5
+                // on file for the current SA tax year. If not, the model
+                // should weave a one-line ask into its greeting. Only fires
+                // once per session (first message) and only past 1 April
+                // of the assessment year — earlier than that employers
+                // haven't issued certs yet so asking is just noise.
+                let irp5Hint = '';
+                if (isFirstMessage && contactId) {
+                    const taxYear = getCurrentSaTaxYear();
+                    const today = new Date();
+                    const aprilFirst = new Date(taxYear.label, 3, 1); // month index 3 = April
+                    if (today >= aprilFirst) {
+                        try {
+                            const irp5s = await dynamicsService.getIrp5RecordsForClient(contactId, taxYear.label);
+                            if (irp5s.length === 0) {
+                                irp5Hint = `\n\n**IRP5 STATUS**: No IRP5 is on file for this client for the ${taxYear.label} tax year (${taxYear.rangeText}). In your opening message, after the greeting, add ONE friendly sentence asking if they have their latest IRP5 to send through. Do NOT mention the tax year explicitly unless they ask; do NOT list other docs. Just the IRP5 ask, woven naturally into the greeting.`;
+                            }
+                        } catch (e: any) {
+                            console.warn(`[Claude] IRP5 status lookup failed for ${contactId}: ${e?.message || e}`);
+                        }
+                    }
+                }
+                roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. Address them as a valued client, by first name.\n\n**Document uploads — IMPORTANT**: Clients CAN upload tax documents (IRP5, IT3(a), IT3(b), payslips, medical certificates, till slips / receipts, logbooks, ID documents, bank statements, tax certificates, etc.) directly on WhatsApp. If the client asks whether they can send a document, or says they want to upload something, say yes and invite them to send the file. NEVER tell them they cannot upload documents here — they can. Once they send the file, you will be prompted to ask the document type and call save_document (or upload_irp5 for IRP5 / IT3(a) certs).\n\n**IRP5 routing**: When the client confirms a staged upload is an IRP5 (or IT3(a)), call upload_irp5 with confirmed_by_user=true. That tool stores the cert, parses it, and tells you which doc to ask for NEXT — ask for ONE doc at a time, not the whole outstanding list. For every other doc type, use save_document.\n\n**What docs do I need?**: If the client asks what documents they need to upload, send, submit or provide — or anything about what their tax return requires — call get_required_documents. The tool returns a pre-formatted list tailored to the client's income sources and industry; relay the message verbatim. Do NOT guess or list docs yourself, and do NOT mention SARS source codes to the client.${irp5Hint}${isFirstMessage ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Under 45 words total.\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, their TTT tax sidekick.\n- Mention 4 quick things you can help with using emoji signposts: 📄 invoices, 📂 tax return updates, 📎 document uploads, 📞 consultant callbacks.\n- End with ONE open question, not a menu.\n- Do NOT list every capability. Do NOT use bullet points in the greeting.\n- Example: "Hey Luc! 👋 Tina here, your TTT tax sidekick 🇿🇦\\n\\nI can help with 📄 invoices, 📂 tax return updates, 📎 uploading tax docs, and 📞 consultant callbacks. What do you need today?"` : ''}`;
             } else if (entityType === 'lead') {
                 // Tax leads have two onboarding gates: signed LoE + SARS eFiling OTP.
                 // Non-tax tracks (Accounting / Insurance / FP) only gate on LoE.
@@ -835,7 +870,7 @@ export class ClaudeService {
                     // document (goes to a Client as an annotation). Ask which.
                     roleContext += `\n\n**PENDING DOCUMENT — IMPORTANT**: The staff member has just uploaded a file. Ask them what type of document this is:\n\n1. **Signed Letter of Engagement (LOE)** — if they say LOE, letter of engagement, or similar:\n   - Ask which LEAD it's for (use search_lead_by_name, NOT search_contact_by_name).\n   - Call upload_letter_of_engagement with the resolved lead_id.\n\n2. **Other document** (IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, etc.) — if they say anything else:\n   - Ask which CLIENT it's for (use search_contact_by_name).\n   - Ask what type of document it is.\n   - Call save_document with the doc_type and client.\n\nDo NOT assume it's an LOE. Ask first.`;
                 } else {
-                    roleContext += `\n\n**PENDING DOCUMENT**: The client has uploaded a file. Ask them what type of document it is: IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, or Other. Then call save_document with the doc_type. Accept clear synonyms (e.g. "tax certificate from my employer" → IRP5, "slip" or "receipt" → Till Slip / Receipt) instead of making the client pick from the exact list.`;
+                    roleContext += `\n\n**PENDING DOCUMENT**: The client has uploaded a file. Ask them what type of document it is: IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, or Other. Accept clear synonyms (e.g. "tax certificate from my employer" → IRP5, "slip" or "receipt" → Till Slip / Receipt) instead of making the client pick from the exact list.\n\n**Routing rules — IMPORTANT**:\n- If the client confirms it is an **IRP5 or IT3(a)** (employee tax certificate from their employer), call **upload_irp5** with confirmed_by_user=true. The tool stores the file, parses it, files the cert in CRM, and tells you which doc to ask for NEXT — relay that follow-up naturally.\n- For every other doc type, call **save_document** with the canonical doc_type as before.\n- Ask for ONE doc at a time. After upload_irp5 returns a missing_docs list, ask only for the FIRST item; do NOT dump the whole list on the client.\n- If a non-IRP5 doc arrives BEFORE the client has sent their IRP5 for the year, still accept and save it via save_document, then politely add that we still need the IRP5 as well.`;
                 }
             }
 
@@ -865,7 +900,7 @@ export class ClaudeService {
             ];
 
             // Filter tools by role
-            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'refer_friend', 'get_my_referral_code', 'save_document'];
+            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'refer_friend', 'get_my_referral_code', 'save_document', 'upload_irp5'];
             const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field'];
             const leadTools = ['save_document'];
             const unknownTools = ['verify_identity'];
@@ -1464,6 +1499,156 @@ export class ClaudeService {
                     });
                 };
 
+                // Helper: handle upload_irp5 — full IRP5 processing flow.
+                // SharePoint upload → riivo_taxsubmissionsdocuments row →
+                // Mistral OCR → Claude extraction → riivo_irp5s row →
+                // computeMissingDocsForClient (unioned with prior IRP5s for
+                // the same year). Returns a structured payload the model
+                // uses to compose the follow-up WhatsApp message.
+                const handleUploadIrp5 = async (
+                    toolCall: any,
+                    phone: string | undefined,
+                ): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    if (!phone) {
+                        return JSON.stringify({ status: 'error', error: 'no_phone', message: 'No phone number on session — cannot resolve the staged upload.' });
+                    }
+                    if (!contactId) {
+                        return JSON.stringify({ status: 'error', error: 'no_contact', message: 'IRP5 uploads require a known client. Ask staff to use save_document instead, or have the client message us directly.' });
+                    }
+                    if (entityType !== 'client') {
+                        return JSON.stringify({ status: 'error', error: 'wrong_role', message: 'upload_irp5 is for client-uploaded certs. Staff should use save_document with doc_type="IRP5".' });
+                    }
+                    if (args.confirmed_by_user !== true) {
+                        return JSON.stringify({ status: 'error', error: 'not_confirmed', message: 'Ask the client to confirm the file is their IRP5 first, then call upload_irp5 with confirmed_by_user=true.' });
+                    }
+                    const staged = peekPendingUpload(phone);
+                    if (!staged) {
+                        return JSON.stringify({ status: 'error', error: 'no_pending_upload', message: 'No file is staged. Ask the client to resend the IRP5.' });
+                    }
+
+                    const contact = await dynamicsService.getContactDetails(contactId);
+                    if (!contact?.fullname) {
+                        return JSON.stringify({ status: 'error', error: 'no_contact_record', message: 'Could not load the contact record from CRM. Please retry in a moment.' });
+                    }
+
+                    const currentTaxYear = getCurrentSaTaxYear();
+
+                    // Step 1: SharePoint upload.
+                    let webUrl: string | undefined;
+                    try {
+                        const spResult = await sharePointService.uploadDocumentFile({
+                            contactFullName: contact.fullname,
+                            contactId,
+                            uploadYear: new Date().getFullYear(),
+                            fileName: staged.fileName,
+                            mimeType: staged.mimeType,
+                            buffer: staged.buffer,
+                        });
+                        webUrl = spResult.webUrl;
+                    } catch (err: any) {
+                        const msg = err?.response?.data?.error?.message || err?.message || 'unknown error';
+                        console.error(`[upload_irp5] SharePoint upload failed for ${contactId}/${staged.fileName}:`, msg);
+                        return JSON.stringify({ status: 'error', error: 'sharepoint_failed', message: `Couldn't store the file in SharePoint: ${msg}. Ask the client to resend in a moment.` });
+                    }
+
+                    // Step 2: riivo_taxsubmissiondocuments row (canonical IRP5 tag + SharePoint link).
+                    const tsdResult = await dynamicsService.createTaxSubmissionDocument({
+                        contactId,
+                        canonicalDocType: 'IRP5',
+                        fileReferenceUrl: webUrl,
+                        documentNotes: `Uploaded via WhatsApp Bot on ${new Date().toISOString().slice(0, 10)}. Bot doc type: IRP5. File: ${staged.fileName}.`,
+                        triggeredBy: contactId,
+                    });
+                    if (!tsdResult.success) {
+                        console.warn(`[upload_irp5] taxsubmissionsdocuments row create failed for ${contactId} — file is at ${webUrl}`);
+                    }
+
+                    // Step 3 + 4: OCR + structured extraction (best-effort —
+                    // failure here doesn't undo the file upload).
+                    let ocrMarkdown: string | null = null;
+                    if (mistralService.isConfigured()) {
+                        try {
+                            const ocr = await mistralService.ocrDocument(staged.fileName, staged.buffer, staged.mimeType || 'application/pdf');
+                            ocrMarkdown = ocr.fullMarkdown;
+                            console.log(`[upload_irp5] OCR'd ${staged.fileName} → ${ocr.pageCount} pages, ${ocrMarkdown.length} chars`);
+                        } catch (err: any) {
+                            console.warn(`[upload_irp5] OCR failed: ${err?.message || err}`);
+                        }
+                    }
+
+                    const extracted = ocrMarkdown
+                        ? await irp5ExtractorService.extractIrp5Fields(ocrMarkdown)
+                        : { riivoFields: {}, sourceCodes: [] as string[] };
+
+                    // Out-of-season detection: warn but proceed. The client
+                    // sometimes sends last year's cert by mistake.
+                    let wrongYearWarning: string | undefined;
+                    if (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear !== currentTaxYear.label) {
+                        wrongYearWarning = `The cert reads as the ${extracted.assessmentYear} assessment year, but we're collecting docs for ${currentTaxYear.label} (${currentTaxYear.rangeText}). Ask the client to confirm whether they meant to send this older one before you proceed asking for more docs.`;
+                    }
+
+                    // Step 5: riivo_irp5s row (with cert-number dedupe).
+                    let irp5RecordId: string | undefined;
+                    let irp5Updated = false;
+                    if (Object.keys(extracted.riivoFields).length > 0) {
+                        const irp5Result = await dynamicsService.createIrp5Record({
+                            contactId,
+                            filename: staged.fileName,
+                            sharepointUrl: webUrl,
+                            fields: extracted.riivoFields,
+                        });
+                        if (irp5Result.success) {
+                            irp5RecordId = irp5Result.recordId;
+                            irp5Updated = Boolean(irp5Result.updated);
+                        } else {
+                            console.warn(`[upload_irp5] riivo_irp5s row create failed: ${irp5Result.error}`);
+                        }
+                    } else {
+                        console.warn(`[upload_irp5] No fields extracted — skipping riivo_irp5s row create (file + taxsubmissionsdocuments row already on file)`);
+                    }
+
+                    // Step 6: union source codes across this IRP5 + every
+                    // other IRP5 on file for the same assessment year (multi-
+                    // employer flow). We use the just-extracted assessment
+                    // year if confident, otherwise the current SA tax year.
+                    const targetYear = (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear === currentTaxYear.label)
+                        ? extracted.assessmentYear
+                        : currentTaxYear.label;
+                    const priorIrp5s = await dynamicsService.getIrp5RecordsForClient(contactId, targetYear);
+                    const priorCodes = priorIrp5s
+                        .filter((r: any) => r?.riivo_irp5id !== irp5RecordId) // skip the row we just wrote
+                        .flatMap((r: any) => inferSourceCodesFromIrp5Row(r));
+                    const allCodes = Array.from(new Set([...extracted.sourceCodes, ...priorCodes]));
+
+                    // Step 7: compute outstanding docs.
+                    const missing = await computeMissingDocsForClient(contactId, allCodes, new Date());
+
+                    // Remove "IRP5" from the outstanding list — they've just sent one.
+                    const outstandingForClient = missing.outstanding.filter(d => !/^irp5\b/i.test(d.label));
+
+                    // Clear the staged upload — we're done with it. The PDF
+                    // is in SharePoint and the cert is parsed into CRM.
+                    clearPendingUpload(phone);
+
+                    return JSON.stringify({
+                        status: 'irp5_processed',
+                        employer_name: extracted.employerName || null,
+                        assessment_year: extracted.assessmentYear || targetYear,
+                        certificate_number: extracted.certificateNumber || null,
+                        source_codes_found: extracted.sourceCodes,
+                        irp5_record_id: irp5RecordId || null,
+                        irp5_updated: irp5Updated,
+                        taxsubmissionsdocument_id: tsdResult.recordId || null,
+                        sharepoint_url: webUrl,
+                        wrong_year_warning: wrongYearWarning,
+                        missing_docs: outstandingForClient.map(d => ({ label: d.label, notes: d.notes })),
+                        message: outstandingForClient.length === 0
+                            ? `IRP5${extracted.employerName ? ` from ${extracted.employerName}` : ''} for the ${targetYear} tax year is on file. Looks like that's everything we need — your consultant will be in touch if anything else comes up.`
+                            : `IRP5${extracted.employerName ? ` from ${extracted.employerName}` : ''} for the ${targetYear} tax year is on file. Compose a short warm reply that (a) thanks the client, (b) names the employer + year, (c) asks for the NEXT single outstanding doc only (do NOT list the full outstanding list — one doc at a time). The next doc is "${outstandingForClient[0].label}"${outstandingForClient[0].notes ? ` (${outstandingForClient[0].notes})` : ''}.${wrongYearWarning ? ' But first: ' + wrongYearWarning : ''}`,
+                    });
+                };
+
                 // Helper: handle update_loe_field — correct a single field before confirming.
                 const handleUpdateLoeField = async (toolCall: any): Promise<string> => {
                     if (!sessionId) {
@@ -2032,6 +2217,8 @@ export class ClaudeService {
                             functionResponse = await handleConfirmLoe();
                         } else if (functionName === 'update_loe_field') {
                             functionResponse = await handleUpdateLoeField(toolCall);
+                        } else if (functionName === 'upload_irp5') {
+                            functionResponse = await handleUploadIrp5(toolCall, phoneNumber);
                         } else if (functionName === 'send_invoice_pdf') {
                             functionResponse = await handleSendInvoicePdf(toolCall);
                         } else if (functionName === 'save_document') {
@@ -2336,6 +2523,8 @@ export class ClaudeService {
                                 functionResponse = await handleConfirmLoe();
                             } else if (functionName === 'update_loe_field') {
                                 functionResponse = await handleUpdateLoeField(toolCall);
+                            } else if (functionName === 'upload_irp5') {
+                                functionResponse = await handleUploadIrp5(toolCall, phoneNumber);
                             } else if (functionName === 'send_invoice_pdf') {
                                 functionResponse = await handleSendInvoicePdf(toolCall);
                             } else if (functionName === 'create_lead') {

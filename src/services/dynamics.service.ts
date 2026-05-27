@@ -971,17 +971,21 @@ export class DynamicsService {
         return contact?.riivo_referralcode || null;
     }
 
-    async getContactByReferralCode(code: string): Promise<{ id: string; fullname: string } | null> {
+    async getContactByReferralCode(code: string): Promise<{ id: string; fullname: string; firstname: string } | null> {
         const trimmed = code.trim();
         if (!trimmed) return null;
         const safe = trimmed.replace(/'/g, "''");
         const contact = await this.searchEntity(
             'contacts',
             `riivo_referralcode eq '${safe}' and statecode eq 0`,
-            ['contactid', 'fullname']
+            ['contactid', 'fullname', 'firstname']
         );
         if (!contact?.contactid) return null;
-        return { id: contact.contactid, fullname: contact.fullname || '' };
+        return {
+            id: contact.contactid,
+            fullname: contact.fullname || '',
+            firstname: contact.firstname || '',
+        };
     }
 
     async createLead(params: {
@@ -1570,6 +1574,112 @@ export class DynamicsService {
     }
 
     /**
+     * Active IRP5 records for a client in a specific assessment year. One
+     * row per employer is the expected pattern — multi-job filers will have
+     * several. Used by the IRP5 upload flow to (a) dedupe re-sends by
+     * certificate number and (b) union source codes across all of a client's
+     * IRP5s before computing the outstanding-doc list.
+     */
+    async getIrp5RecordsForClient(contactId: string, assessmentYear: number): Promise<any[]> {
+        const token = await this.getToken();
+        const filter = `_riivo_client_value eq ${contactId} and riivo_assessmentyearint eq ${assessmentYear} and statecode eq 0`;
+        const url = `${this.baseUrl}/api/data/v9.2/riivo_irp5s?$filter=${encodeURIComponent(filter)}&$orderby=createdon desc&$top=20`;
+        try {
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                    'Prefer': 'odata.include-annotations="*"',
+                },
+            });
+            return response.data?.value || [];
+        } catch (error: any) {
+            console.warn(`[Dynamics CRM] getIrp5RecordsForClient(${contactId}, ${assessmentYear}) failed:`, error?.response?.data?.error?.message || error.message);
+            return [];
+        }
+    }
+
+    /**
+     * Create (or update if a row with the same certificate number already
+     * exists for this client) a riivo_irp5s record from extracted IRP5
+     * fields. Banking fields are deliberately NOT touched — those come from
+     * the LoE flow and the IRP5 doesn't carry them.
+     *
+     * Dedupe is keyed on riivo_certificatenumber: a client re-sending the
+     * same IRP5 updates the existing row rather than creating a duplicate
+     * (the SARS cert number is unique per issuance).
+     */
+    async createIrp5Record(params: {
+        contactId: string;
+        filename: string;
+        sharepointUrl?: string;
+        fields: Record<string, any>;
+    }): Promise<{ success: boolean; recordId?: string; updated?: boolean; error?: string }> {
+        const payload: Record<string, any> = {
+            ...params.fields,
+            'riivo_filename': params.filename,
+            'riivo_Client@odata.bind': `/contacts(${params.contactId})`,
+        };
+
+        // Look for an existing row with the same certificate number for this
+        // client. Dedupe is per-client (not global) — different clients can
+        // legitimately have the same cert number across distinct CRMs/years.
+        const certNumber = params.fields['riivo_certificatenumber'];
+        if (certNumber) {
+            const token = await this.getToken();
+            const filter = `_riivo_client_value eq ${params.contactId} and riivo_certificatenumber eq '${String(certNumber).replace(/'/g, "''")}' and statecode eq 0`;
+            const url = `${this.baseUrl}/api/data/v9.2/riivo_irp5s?$filter=${encodeURIComponent(filter)}&$select=riivo_irp5id&$top=1`;
+            try {
+                const response = await axios.get(url, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'OData-MaxVersion': '4.0',
+                        'OData-Version': '4.0',
+                        'Accept': 'application/json',
+                    },
+                });
+                const existing = response.data?.value?.[0];
+                if (existing?.riivo_irp5id) {
+                    const recordUrl = `${this.baseUrl}/api/data/v9.2/riivo_irp5s(${existing.riivo_irp5id})`;
+                    await this.crmPatch('riivo_irp5s', recordUrl, payload, params.contactId);
+                    console.log(`[Dynamics CRM] Updated existing riivo_irp5s ${existing.riivo_irp5id} (cert ${certNumber}) for contact ${params.contactId}`);
+                    await supabaseService.logCrmWrite({
+                        crmEntity: 'riivo_irp5s',
+                        crmRecordId: existing.riivo_irp5id,
+                        action: 'update',
+                        payload: { certificate_number: certNumber, filename: params.filename },
+                        triggeredBy: params.contactId,
+                    });
+                    return { success: true, recordId: existing.riivo_irp5id, updated: true };
+                }
+            } catch (error: any) {
+                // Dedupe lookup failure is non-fatal — fall through and create.
+                console.warn(`[Dynamics CRM] IRP5 dedupe lookup failed (proceeding with create): ${error?.response?.data?.error?.message || error.message}`);
+            }
+        }
+
+        try {
+            const response = await this.crmPost('riivo_irp5s', payload, params.contactId);
+            const recordId = response.data?.riivo_irp5id;
+            console.log(`[Dynamics CRM] Created riivo_irp5s ${recordId} for contact ${params.contactId} (cert ${certNumber || 'unknown'})`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'riivo_irp5s',
+                crmRecordId: recordId,
+                action: 'create',
+                payload: { certificate_number: certNumber, filename: params.filename },
+                triggeredBy: params.contactId,
+            });
+            return { success: true, recordId, updated: false };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[Dynamics CRM] Failed to create riivo_irp5s for contact ${params.contactId}:`, errMsg);
+            return { success: false, error: errMsg };
+        }
+    }
+
+    /**
      * Resolve tax-year + optional case-link + optional preseason-link from a
      * contact's active preseason records and cases. Used by
      * createTaxSubmissionDocument; pulled out so the inference is easy to
@@ -1703,6 +1813,36 @@ export class DynamicsService {
         } catch (error: any) {
             console.warn(`[Dynamics CRM] updateRequest ${requestId} failed:`, error?.response?.data?.error?.message || error.message);
         }
+    }
+
+    /**
+     * Resolve any open riivo_requests tagged otp_signup / otp_help for the
+     * given lead. Called when the lead taps "Sorted, OTP done" so the records
+     * we created off their OTP asks don't linger after the gate is cleared.
+     * Best-effort.
+     */
+    async resolveOpenOtpRequestsForLead(leadId: string): Promise<void> {
+        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!leadId || !guidRegex.test(leadId)) {
+            console.warn(`[Dynamics CRM] resolveOpenOtpRequestsForLead: invalid lead id: ${leadId}`);
+            return;
+        }
+        const filter = `_riivo_lead_value eq ${leadId} and statecode eq 0 and (riivo_classificationtopic eq 'otp_signup' or riivo_classificationtopic eq 'otp_help')`;
+        const open = await this.getList('riivo_requests', filter, ['riivo_requestid', 'riivo_classificationtopic']);
+        if (open.length === 0) return;
+        const resolvedAt = new Date().toISOString();
+        await Promise.all(open.map(async (row: any) => {
+            const id = row.riivo_requestid;
+            if (!id) return;
+            await this.updateRequest(id, {
+                statecode: REQUEST_STATE.INACTIVE,
+                statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
+                riivo_clientfeedback: CLIENT_FEEDBACK.CONFIRMED,
+                riivo_resolutionmethod: RESOLUTION_METHOD.FEEDBACK_CONFIRMED,
+                riivo_resolvedon: resolvedAt,
+            });
+        }));
+        console.log(`[Dynamics CRM] Auto-resolved ${open.length} open OTP request(s) for lead ${leadId}`);
     }
 
     /**

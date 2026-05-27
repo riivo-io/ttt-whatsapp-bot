@@ -15,6 +15,7 @@ import {
     CASE_FEEDBACK_BUTTON_YES,
     CASE_FEEDBACK_BUTTON_NO,
 } from '../services/case.service';
+import { enqueueCaseAutoClose } from '../queue/caseAutoCloseQueue';
 import { messageContextStorage } from '../utils/messageContext';
 
 // Idle-window feedback prompt.
@@ -73,6 +74,7 @@ export async function processFeedbackPromptJob(payload: FeedbackPromptJobPayload
                 { id: CASE_FEEDBACK_BUTTON_NO, title: 'Still need help' },
             ]
         );
+        const promptSentAt = new Date().toISOString();
         await supabaseService.setSessionPendingCase(sessionId, caseId);
         if (crmRequestId) {
             await dynamicsService.updateRequest(crmRequestId, {
@@ -80,6 +82,21 @@ export async function processFeedbackPromptJob(payload: FeedbackPromptJobPayload
             });
         }
         console.log(`[FeedbackPrompt] fired caseId=${caseId} sessionId=${sessionId}`);
+
+        // Schedule the short-tail auto-close. If the client doesn't tap a
+        // button (or otherwise reply) within 10 min, the case closes as
+        // Resolved (Timeout). Failure to enqueue isn't fatal — the 12h
+        // sweep is still the safety net.
+        try {
+            await enqueueCaseAutoClose({
+                caseId,
+                sessionId,
+                crmRequestId,
+                promptSentAt,
+            });
+        } catch (e: any) {
+            console.warn(`[CaseAutoClose] enqueue_failed caseId=${caseId} sessionId=${sessionId} err=${e?.message || e}`);
+        }
     } catch (e: any) {
         console.warn(`[FeedbackPrompt] send_failed caseId=${caseId} sessionId=${sessionId} err=${e?.message || e}`);
         throw e;
