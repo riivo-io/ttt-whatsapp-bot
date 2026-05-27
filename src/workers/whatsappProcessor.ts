@@ -33,8 +33,10 @@ const SIGNUP_TEMPLATE_HEADER_URL = process.env.WHATSAPP_SIGNUP_TEMPLATE_HEADER_U
 
 const REFERRAL_TEMPLATE_NAME = process.env.WHATSAPP_REFERRAL_TEMPLATE_NAME || '';
 const REFERRAL_TEMPLATE_LANG = process.env.WHATSAPP_REFERRAL_TEMPLATE_LANG || 'en';
+// Filename in the blob container is `Refer&Earn2026 Banner.png` — space and
+// ampersand are URL-encoded so Meta's fetcher hits the right asset.
 const REFERRAL_TEMPLATE_HEADER_URL = process.env.WHATSAPP_REFERRAL_TEMPLATE_HEADER_URL
-    || 'https://tttassets.blob.core.windows.net/assets/referral.png';
+    || 'https://tttassets.blob.core.windows.net/assets/Refer%26Earn2026%20Banner.png';
 
 // Stable ids for the client first-message interactive menu. Kept namespaced
 // (`menu:client:*`) so future lead/staff menus can coexist without colliding.
