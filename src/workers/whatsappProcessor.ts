@@ -1,8 +1,9 @@
 import { claudeService } from '../services/claude.service';
 import { metaWhatsAppService } from '../services/meta.service';
-import { dynamicsService, REQUEST_STATUSCODE, LEAD_TYPE_TAX } from '../services/dynamics.service';
+import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
 import { stagePendingUpload } from '../services/pendingUpload.service';
+import { pendingIrp5Service } from '../services/pendingIrp5.service';
 import { caseService } from '../services/case.service';
 import { handleClientRelayResponse, RELAY_BUTTON_PAYLOAD } from '../controllers/emailRelay.controller';
 import { knowledgeBaseService, KbChunkHit } from '../services/knowledgeBase.service';
@@ -76,15 +77,6 @@ const OTP_BUTTON_PAYLOAD = {
 } as const;
 
 const TAXCREW_EMAIL = 'taxcrew@ttt-tax.co.za';
-
-// Proactive OTP escalation: fired when a Tax lead in State B (LoE done, OTP
-// outstanding) mentions OTP in natural language — i.e. when the CRM-initiated
-// OTP template hasn't been sent yet but the lead is already asking. The
-// sentinel below is a unique phrase we save to assistant history right after
-// escalating, so subsequent OTP-mentioning inbounds in the same session can
-// detect "already handled" without a CRM round-trip.
-const OTP_PROACTIVE_SENTINEL = 'taxcrew has been flagged about your SARS eFiling OTP';
-const OTP_KEYWORD_RE = /\b(otp|one[- ]?time[- ]?pin|sars[- ]?efiling)\b/i;
 
 // Conversation caps. Apply to clients, leads, and unknown users — staff
 // (entityType === 'user') are exempt because their tool-driven workflows
@@ -320,6 +312,13 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
             : '';
     const combinedNotes = [baseNotes, referralNote].filter(Boolean).join(' ') || undefined;
 
+    // WhatsApp signups always tag the lead with Lead Source = WhatsApp and,
+    // when no referral owner was resolved, the tax crew systemuser. Both are
+    // env-specific (option set is dev-only, owner GUID is prod-only) so
+    // createLead retries without them if Dataverse rejects either.
+    const WHATSAPP_LEAD_SOURCE = 463630005;
+    const TAX_CREW_OWNER_ID = '873db3ff-d563-f011-bec3-000d3ab7e7df';
+
     const created = await dynamicsService.createLead({
         firstName,
         lastName,
@@ -328,8 +327,9 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
         notes: combinedNotes,
         clientType: typeof clientType === 'number' && !Number.isNaN(clientType) ? clientType : undefined,
         leadType: typeof leadType === 'number' && !Number.isNaN(leadType) ? leadType : undefined,
+        leadSource: WHATSAPP_LEAD_SOURCE,
         referredByContactId,
-        ownerSystemUserId,
+        ownerSystemUserId: ownerSystemUserId || TAX_CREW_OWNER_ID,
     });
 
     if (!created) {
@@ -357,83 +357,14 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
 
     const loeLink = buildLoeMagicLink(created.new_leadid);
     if (loeLink) {
-        const welcome = `Thanks, ${firstName}! You're signed up with TTT Financial Group. 🎉\n\nNext step: sign your Letter of Engagement using your unique link (valid for 72 hours):\n\n${loeLink}\n\nOnce that's signed, let us know below.`;
-        await metaWhatsAppService.sendReplyButtons(from, welcome, [
-            { id: LOE_BUTTON_PAYLOAD.SIGNED, title: "I've signed it" },
-            { id: LOE_BUTTON_PAYLOAD.LATER, title: "I'll do it later" },
-        ]);
+        const welcome = `Thanks ${firstName}, you're signed up with TTT Financial Group. 🎉\n\nNext up is your Letter of Engagement (LoE). It's the legally binding contract between you and TTT that lets us act for you at SARS. It sets out the scope of work and the responsibilities on both sides. SARS won't let us file or correspond on your behalf without it, so this one is non-negotiable.\n\nSign yours here (link valid 72 hours):\n${loeLink}\n\nIt takes about 2 minutes. As soon as it's signed I'll message you with the next step.`;
+        await metaWhatsAppService.sendMessage(from, welcome);
     } else {
         await metaWhatsAppService.sendMessage(
             from,
             `Thanks, ${firstName}! You're all signed up with TTT Financial Group. A consultant will be in touch shortly. In the meantime, feel free to message any questions.`
         );
     }
-}
-
-function isOtpAsk(text: string): boolean {
-    return OTP_KEYWORD_RE.test(text || '');
-}
-
-function hasRecentOtpEscalation(history: { role: string; content: string }[]): boolean {
-    for (let i = history.length - 1; i >= 0 && i >= history.length - 20; i--) {
-        const m = history[i];
-        if (m.role === 'assistant' && m.content.includes(OTP_PROACTIVE_SENTINEL)) return true;
-    }
-    return false;
-}
-
-// Tax lead in State B (LoE done, OTP outstanding) asked about the SARS OTP
-// step in natural language. The CRM-initiated OTP template (with its Done/Help
-// buttons) may not have gone out yet, so taxcrew has no signal the lead is
-// waiting. Create a tracked riivo_request, email taxcrew, and surface the
-// Done/Help quick-reply buttons so the lead can self-serve from here. Dedupe
-// is via the sentinel saved to assistant history by the caller; failures are
-// best-effort.
-//
-// Request lands in AWAITING_FEEDBACK (not ESCALATED): Tina has done everything
-// she can on the bot side and the consultant outreach is the normal next step
-// of the signup flow during working hours, not an escalation.
-async function triggerProactiveOtpEscalation(from: string, leadId: string, leadName: string): Promise<void> {
-    const description = `Lead "${leadName}" asked about SARS OTP on WhatsApp — flagged for consultant follow-up.`;
-    const created = await dynamicsService.createRequest({
-        leadId,
-        contactType: 'lead',
-        phoneNumber: from,
-        description,
-    });
-    if (created?.riivo_requestid) {
-        await dynamicsService.updateRequest(created.riivo_requestid, {
-            statuscode: REQUEST_STATUSCODE.AWAITING_FEEDBACK,
-            riivo_classificationtopic: 'otp_signup',
-        });
-    }
-
-    const emailSubject = `Lead asking about SARS OTP — ${leadName}`;
-    const emailBody = [
-        `Lead "${leadName}" (${from}) asked about the SARS eFiling OTP step on WhatsApp.`,
-        '',
-        'Tina has acknowledged on the WhatsApp side and surfaced the Done / Need-help buttons. A consultant should reach out to walk them through the OTP step on https://secure.sarsefiling.co.za/app/profileTaxType/taxTypeActivation.',
-        '',
-        created?.riivo_requestid
-            ? `A tracked riivo_request has been created for follow-up: ${created.riivo_requestid}.`
-            : 'NOTE: we were unable to create a riivo_request for this lead — please pick this up from the email and follow up manually.',
-        '',
-        `Dynamics lead id: ${leadId}`,
-    ].join('\n');
-    await graphMailService.sendMail({
-        to: TAXCREW_EMAIL,
-        subject: emailSubject,
-        bodyText: emailBody,
-    });
-
-    await metaWhatsAppService.sendReplyButtons(
-        from,
-        "Quick heads-up — taxcrew has been flagged about your SARS eFiling OTP and a TTT consultant will be in touch on WhatsApp. If you've already sorted it on your end, or want to flag it as urgent, tap below.",
-        [
-            { id: OTP_BUTTON_PAYLOAD.DONE, title: "Sorted, OTP done" },
-            { id: OTP_BUTTON_PAYLOAD.HELP, title: "Need help" },
-        ],
-    );
 }
 
 // Tap on the OTP template's two quick-reply buttons. DONE flags the lead for
@@ -545,6 +476,11 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         return;
     }
 
+    // LEGACY: pre-post-LoE-activation flow (2026-05-28). The signup template
+    // no longer renders these two quick-reply buttons — the new pre-LoE copy
+    // is a single text message. These handlers stay in place for ~3 months
+    // to absorb taps from clients who still have the old buttons in their
+    // chat history. Safe to delete after 2026-08-28.
     if (interactiveId === LOE_BUTTON_PAYLOAD.SIGNED) {
         await metaWhatsAppService.sendMessage(
             from,
@@ -620,11 +556,12 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             }
 
             if (REFERRAL_TEMPLATE_NAME) {
+                const referrerName = referrerFirstName || 'A friend';
                 const result = await metaWhatsAppService.sendTemplate(from, {
                     name: REFERRAL_TEMPLATE_NAME,
                     languageCode: REFERRAL_TEMPLATE_LANG,
                     headerImageLink: REFERRAL_TEMPLATE_HEADER_URL,
-                    bodyNamedVariables: { '1': referrerFirstName || 'A friend' },
+                    bodyNamedVariables: { '1': referrerName, '2': referrerName },
                     flowButton: {
                         index: 0,
                         ...(code ? { flowActionData: { referral_code: code } } : {}),
@@ -663,6 +600,15 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     if (interactiveId === OTP_BUTTON_PAYLOAD.DONE || interactiveId === OTP_BUTTON_PAYLOAD.HELP) {
         await handleOtpTemplateResponse(from, interactiveId, crmEntity);
         return;
+    }
+
+    // Lazy deferred-write: if this sender now resolves to a Contact, drain any
+    // IRP5s the lead staged in Supabase before conversion (State B fast-track).
+    // Fire-and-forget — non-blocking on the inbound's response.
+    if (crmEntity.type === 'client') {
+        pendingIrp5Service
+            .drainForPhone(from, crmEntity.id)
+            .catch((e: any) => console.warn('[Processor] pending IRP5 drain failed:', e?.message || e));
     }
 
     let staffRoleId = initialStaffRoleId;
@@ -942,34 +888,6 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     await supabaseService.saveMessage(session.id, 'assistant', finalResponseText);
 
     await metaWhatsAppService.sendMessage(from, finalResponseText);
-
-    // Tax lead in State B (LoE done, OTP outstanding) is having an OTP-flavoured
-    // turn. The CRM-initiated OTP template might not have been sent yet, so
-    // taxcrew has no signal. Escalate proactively (email + the same Done/Help
-    // buttons the template uses) so the lead always has the self-serve path
-    // within reach. We check both the inbound AND Tina's reply for OTP / SARS
-    // eFiling keywords — paraphrased progress questions ("what's next?") miss on
-    // the inbound but always trip on the reply because State B guidance forces
-    // Claude to mention the OTP step. Dedupes via a sentinel phrase written to
-    // assistant history — one-shot per session unless the marker ages out of
-    // the lookback window.
-    if (
-        crmEntity.type === 'lead'
-        && leadOnboarding?.loeReceived === true
-        && leadOnboarding?.otpCompleted === false
-        && (leadOnboarding.leadType == null || leadOnboarding.leadType === LEAD_TYPE_TAX)
-        && (isOtpAsk(effectiveText) || isOtpAsk(finalResponseText))
-        && !hasRecentOtpEscalation(historyWithoutCurrent)
-    ) {
-        try {
-            await triggerProactiveOtpEscalation(from, crmEntity.id, (crmEntity.fullname || '').trim() || 'Lead');
-            const sentinelMessage = `Quick heads-up — ${OTP_PROACTIVE_SENTINEL} and a TTT consultant will be in touch on WhatsApp.`;
-            await supabaseService.saveMessage(session.id, 'assistant', sentinelMessage);
-            console.log(`[Processor] Proactive OTP escalation fired for ${from} (lead ${crmEntity.id})`);
-        } catch (e) {
-            console.warn('[Processor] Proactive OTP escalation failed:', (e as Error).message);
-        }
-    }
 
     // For leads with LoE still outstanding, follow the first-message AI reply
     // with a tiny buttoned prompt so the action is one tap away. Gated on

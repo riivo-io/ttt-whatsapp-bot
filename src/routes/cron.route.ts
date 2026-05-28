@@ -3,6 +3,10 @@ import { caseService } from '../services/case.service';
 import { graphMailService } from '../services/graphMail.service';
 import { sweepExpiredRelays } from '../controllers/emailRelay.controller';
 import { idempotencyService } from '../services/idempotency.service';
+import { activateLeadPostLoe } from '../services/loeActivation.service';
+import { dynamicsService } from '../services/dynamics.service';
+import { supabaseService } from '../services/supabase.service';
+import { pendingIrp5Service } from '../services/pendingIrp5.service';
 console.log('[boot] cron.route: imports done');
 
 // Subscriptions max out at ~70h. Renew anything within 24h of expiry.
@@ -101,6 +105,72 @@ router.get('/graph-renew-subscription', async (req: Request, res: Response) => {
  * cause a duplicate, so they're dead weight. Three columns per row + an
  * index on received_at means this is a sub-second delete.
  */
+/**
+ * Hourly safety-net cron. Two responsibilities, kept on one endpoint so the
+ * cron count stays low:
+ *
+ *   1. Find Tax leads with `riivo_loereceived = true` that have NOT yet had
+ *      the post-LoE activation flow run for them (no sentinel riivo_request
+ *      with classificationtopic='post_loe_activation'). Invoke the activation
+ *      handler for each — same code path as the /webhook/loe-signed instant
+ *      hook, so behavior matches exactly.
+ *   2. Drain any pending_irp5s rows whose lead_id now resolves to a Contact
+ *      in Dynamics (i.e. the lead has been converted to a Contact by Power
+ *      Automate since the last sweep).
+ */
+router.get('/loe-activation-sweep', async (req: Request, res: Response) => {
+    if (!isAuthorized(req)) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+
+    const summary: { activations: number; activationsFailed: number; irp5Drained: number } = {
+        activations: 0,
+        activationsFailed: 0,
+        irp5Drained: 0,
+    };
+
+    try {
+        // (1) Activation sweep — find leads that signed but were never activated.
+        const leads = await dynamicsService.findLeadsAwaitingPostLoeActivation();
+        console.log(`[Cron] loe-activation-sweep: ${leads.length} lead(s) awaiting activation`);
+        for (const { id } of leads) {
+            try {
+                const result = await activateLeadPostLoe(id);
+                if (result.outcome === 'activated') {
+                    summary.activations += 1;
+                } else if (result.outcome === 'dynamics_unavailable' || result.outcome === 'lead_not_found') {
+                    summary.activationsFailed += 1;
+                }
+            } catch (e: any) {
+                summary.activationsFailed += 1;
+                console.warn(`[Cron] activation failed for ${id}: ${e?.message || e}`);
+            }
+        }
+
+        // (2) Pending IRP5 drain — pull any rows whose lead now has a Contact.
+        // We collect distinct lead_ids from the open pending rows and look up
+        // each phone in Dynamics; if the phone now resolves to a Contact, drain.
+        const distinctLeadPhones = await supabaseService.findPendingIrp5LeadPhones();
+        for (const { leadId, phoneNumber } of distinctLeadPhones) {
+            try {
+                const resolved = await dynamicsService.getContactByPhone(phoneNumber);
+                if (resolved?.type === 'client' && resolved.id) {
+                    const drained = await pendingIrp5Service.drainForLead(leadId, resolved.id);
+                    summary.irp5Drained += drained;
+                }
+            } catch (e: any) {
+                console.warn(`[Cron] IRP5 drain check failed for lead ${leadId} / phone ${phoneNumber}: ${e?.message || e}`);
+            }
+        }
+
+        res.json({ ok: true, summary });
+    } catch (e: any) {
+        console.error('[Cron] loe-activation-sweep failed:', e?.message || e);
+        res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+    }
+});
+
 router.get('/cleanup-webhook-events', async (req: Request, res: Response) => {
     if (!isAuthorized(req)) {
         res.status(401).json({ error: 'unauthorized' });

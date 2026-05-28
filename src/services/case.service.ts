@@ -344,6 +344,46 @@ L1 topics — general knowledge the bot answers without CRM lookups:
     }
 
     /**
+     * Resolve any open case for the given lead as `resolved_by_bot`. Used by
+     * the post-LoE activation handler so the lead's existing WhatsApp case
+     * (if any) gets closed without firing the feedback prompt — the activation
+     * itself is the resolution, no buttons needed. Silently no-ops when no
+     * case is open.
+     */
+    async resolveByLeadId(leadId: string, opts?: { skipFeedback?: boolean; reason?: string }): Promise<number> {
+        const rows = await supabaseService.findOpenCasesForLead(leadId);
+        if (rows.length === 0) return 0;
+
+        const resolvedAt = new Date().toISOString();
+        const reason = opts?.reason || 'resolved_by_lead_event';
+
+        for (const row of rows) {
+            await supabaseService.updateCase(row.id, {
+                status: 'resolved_by_bot',
+                resolution_method: reason,
+                resolved_at: resolvedAt,
+            });
+            if (row.crm_case_id) {
+                await dynamicsService.updateRequest(row.crm_case_id, {
+                    statecode: REQUEST_STATE.INACTIVE,
+                    statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
+                    riivo_clientfeedback: CLIENT_FEEDBACK.NO_RESPONSE_TIMEOUT,
+                    riivo_resolvedon: resolvedAt,
+                    riivo_resolutionmethod: RESOLUTION_METHOD.AUTO_TOOL_CALL,
+                });
+            }
+            // skipFeedback is honored implicitly — we never enqueue a feedback
+            // prompt from this path. The flag is in the signature so the caller
+            // can be explicit about intent.
+        }
+
+        if (rows.length > 0) {
+            console.log(`[CaseService] Resolved ${rows.length} open case(s) for lead ${leadId} reason=${reason} skipFeedback=${opts?.skipFeedback === true}`);
+        }
+        return rows.length;
+    }
+
+    /**
      * Resolve the Dynamics riivo_request id for a Supabase case. Small helper
      * used by state-transition methods so they can PATCH Dynamics after the
      * Supabase write.

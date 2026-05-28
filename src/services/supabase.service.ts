@@ -90,6 +90,23 @@ export interface EmailRelayPendingRow {
     created_at: string;
 }
 
+export interface PendingIrp5Row {
+    id: string;
+    lead_id: string;
+    phone_number: string;
+    sharepoint_url: string;
+    file_name: string;
+    certificate_number: string | null;
+    assessment_year: number | null;
+    employer_name: string | null;
+    source_codes: string[];
+    extracted_fields: Record<string, any> | null;
+    received_at: string;
+    applied_to_contact_id: string | null;
+    applied_at: string | null;
+    apply_error: string | null;
+}
+
 export interface PendingLoeRow {
     id: string;
     session_id: string;
@@ -707,6 +724,128 @@ class SupabaseService {
     }
 
     // -------------------------------------------------------------------------
+    // Pending IRP5s — staging for IRP5s uploaded by State B leads pre-conversion
+    // -------------------------------------------------------------------------
+
+    async insertPendingIrp5(params: {
+        leadId: string;
+        phoneNumber: string;
+        sharepointUrl: string;
+        fileName: string;
+        certificateNumber: string | null;
+        assessmentYear: number | null;
+        employerName: string | null;
+        sourceCodes: string[];
+        extractedFields: Record<string, any> | null;
+    }): Promise<PendingIrp5Row | null> {
+        const { data, error } = await this.client
+            .from('pending_irp5s')
+            .insert({
+                lead_id: params.leadId,
+                phone_number: params.phoneNumber,
+                sharepoint_url: params.sharepointUrl,
+                file_name: params.fileName,
+                certificate_number: params.certificateNumber,
+                assessment_year: params.assessmentYear,
+                employer_name: params.employerName,
+                source_codes: params.sourceCodes,
+                extracted_fields: params.extractedFields,
+            })
+            .select('*')
+            .single();
+
+        if (error) {
+            console.error('[Supabase] Failed to insert pending_irp5:', error.message);
+            return null;
+        }
+        console.log(`[Supabase] Staged pending IRP5 ${data.id} for lead ${params.leadId} (phone ${params.phoneNumber})`);
+        return data as PendingIrp5Row;
+    }
+
+    async findPendingIrp5sForPhone(phoneNumber: string): Promise<PendingIrp5Row[]> {
+        const variants = this.phoneVariants(phoneNumber);
+        const { data, error } = await this.client
+            .from('pending_irp5s')
+            .select('*')
+            .in('phone_number', variants)
+            .is('applied_to_contact_id', null)
+            .order('received_at', { ascending: true });
+
+        if (error) {
+            console.warn('[Supabase] findPendingIrp5sForPhone error:', error.message);
+            return [];
+        }
+        return (data || []) as PendingIrp5Row[];
+    }
+
+    async findPendingIrp5sForLead(leadId: string): Promise<PendingIrp5Row[]> {
+        const { data, error } = await this.client
+            .from('pending_irp5s')
+            .select('*')
+            .eq('lead_id', leadId)
+            .is('applied_to_contact_id', null)
+            .order('received_at', { ascending: true });
+
+        if (error) {
+            console.warn('[Supabase] findPendingIrp5sForLead error:', error.message);
+            return [];
+        }
+        return (data || []) as PendingIrp5Row[];
+    }
+
+    async markPendingIrp5Applied(id: string, contactId: string): Promise<void> {
+        const { error } = await this.client
+            .from('pending_irp5s')
+            .update({
+                applied_to_contact_id: contactId,
+                applied_at: new Date().toISOString(),
+                apply_error: null,
+            })
+            .eq('id', id);
+
+        if (error) {
+            console.error(`[Supabase] Failed to mark pending IRP5 ${id} applied:`, error.message);
+        }
+    }
+
+    /**
+     * Distinct (lead_id, phone_number) pairs across all un-applied pending IRP5
+     * rows. Used by the hourly cron to know which leads to recheck for a
+     * pending → contact conversion.
+     */
+    async findPendingIrp5LeadPhones(): Promise<{ leadId: string; phoneNumber: string }[]> {
+        const { data, error } = await this.client
+            .from('pending_irp5s')
+            .select('lead_id, phone_number')
+            .is('applied_to_contact_id', null);
+
+        if (error) {
+            console.warn('[Supabase] findPendingIrp5LeadPhones error:', error.message);
+            return [];
+        }
+        const seen = new Set<string>();
+        const out: { leadId: string; phoneNumber: string }[] = [];
+        for (const row of (data || [])) {
+            const key = `${row.lead_id}|${row.phone_number}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ leadId: row.lead_id, phoneNumber: row.phone_number });
+        }
+        return out;
+    }
+
+    async markPendingIrp5Failed(id: string, applyError: string): Promise<void> {
+        const { error } = await this.client
+            .from('pending_irp5s')
+            .update({ apply_error: applyError })
+            .eq('id', id);
+
+        if (error) {
+            console.error(`[Supabase] Failed to mark pending IRP5 ${id} failed:`, error.message);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // WhatsApp case lifecycle
     // -------------------------------------------------------------------------
 
@@ -841,6 +980,26 @@ class SupabaseService {
             return null;
         }
         return (data as WhatsAppCaseRow) || null;
+    }
+
+    /**
+     * Every open (non-terminal, non-escalated) case for a given CRM contact
+     * or lead id. Used by the post-LoE activation handler so the lead's open
+     * WhatsApp case gets closed cleanly when the LoE arrives.
+     */
+    async findOpenCasesForLead(leadId: string): Promise<WhatsAppCaseRow[]> {
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .select('*')
+            .eq('contact_id', leadId)
+            .not('status', 'in', '("resolved_by_bot","resolved_by_bot_timeout","escalated")')
+            .order('created_at', { ascending: true });
+
+        if (error) {
+            console.warn('[Supabase] findOpenCasesForLead error:', error.message);
+            return [];
+        }
+        return (data || []) as WhatsAppCaseRow[];
     }
 
     /**

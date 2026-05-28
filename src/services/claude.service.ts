@@ -778,16 +778,44 @@ export class ClaudeService {
                 const loeLink = (contactId && buildLoeMagicLink(contactId)) || SIGNUP_URL;
 
                 let stateGuidance = '';
+                let openQa = false;
                 if (loeDone && otpDone) {
-                    // State D — both gates clear, awaiting staff conversion to contact.
-                    stateGuidance = `**Onboarding state — BOTH GATES CLEAR.** The lead has signed the LoE${otpRequired ? ' and completed the SARS OTP' : ''}. They're awaiting staff to convert them into a client. Reassure them that they're all set on our end and a TTT consultant will be in touch shortly to confirm. Do NOT ask them to do anything else.`;
+                    // State D — both gates clear, awaiting staff conversion. Q&A
+                    // open per PRD-post-loe-activation §6.5.
+                    openQa = true;
+                    stateGuidance = `**Onboarding state — LoE DONE, OTP DONE, awaiting client conversion.**
+
+The same Q&A scope applies as in the LoE-done state: TTT process questions, general tax education, and general-principles-only personal advice. The client is fully signed up from their side; a TTT consultant will reach out shortly to confirm.
+
+Don't invite the IRP5 fast-track in this state — they've already passed the window where it speeds things up; the consultant will pick up any remaining docs.
+
+If the client needs human help: share email info@ttt-tax.co.za or phone +27 10 442 9222.`;
                 } else if (loeDone && !otpDone) {
                     // State B — LoE done, OTP outstanding (Tax track only). The
-                    // SARS OTP step is a manual hand-off: a consultant adds the
-                    // client on eFiling, then initiates a WhatsApp template
-                    // from the CRM with the step-by-step instructions and two
-                    // quick-reply buttons. Bot does NOT send instructions here.
-                    stateGuidance = `**Onboarding state — LoE DONE, OTP OUTSTANDING.** Thank them warmly for the signed LoE (we have it on file ✅). Tell them the last step is the SARS eFiling OTP, which requires a TTT consultant to set them up on our side first. Reassure them that we've flagged this internally and a TTT consultant will reach out here on WhatsApp during working hours (Mon-Fri, 8am-4pm SAST) with the step-by-step instructions — they can expect either a WhatsApp message or a call. Do NOT send SARS OTP instructions yourself; the consultant initiates that flow from our CRM. Do NOT ask the lead to do anything else right now.`;
+                    // post-LoE thank-you + taxcrew notification have already gone
+                    // out via the activation handler. Q&A is open per
+                    // PRD-post-loe-activation §6.5.
+                    openQa = true;
+                    stateGuidance = `**Onboarding state — LoE DONE, OTP OUTSTANDING.**
+
+The post-LoE thank-you and the taxcrew notification email have already been sent automatically when the LoE landed in Dynamics. Don't restate "thanks for signing your LoE" or repeat the "taxcrew will call you" promise unless the client asks about it directly.
+
+What you CAN do in this state:
+- Answer TTT process questions (services, timelines, what happens after OTP, what's included in the engagement).
+- Answer general tax education questions (e.g. "what's an IRP5", "what's a provisional taxpayer", "when is the filing deadline").
+- For personal tax advice (e.g. "is X deductible for me", "do I owe SARS", "should I be on provisional"), answer with general principles only. Do not give person-specific advice based on the client's numbers or situation.
+- If the client sends an IRP5, hand off to the upload_irp5 tool.
+- If the client sends a non-IRP5 document, defer politely: "Hold onto this for now and send it once your consultant has set up your eFiling. The only doc we can fast-track right now is your IRP5."
+
+If the client needs human help:
+- If their question goes beyond what you can answer with general principles, or they're stuck, or they explicitly ask for a human, share these contact options:
+  - Email: info@ttt-tax.co.za
+  - Phone: +27 10 442 9222
+
+What NOT to do:
+- Don't restate the LoE thank-you or the taxcrew-will-call message unless asked.
+- Don't give person-specific tax advice based on the client's numbers.
+- Don't send SARS OTP instructions yourself; the consultant handles that on the call.`;
                 } else if (!loeDone && otpDone && otpRequired) {
                     // State C (Tax) — OTP done first, LoE still outstanding.
                     stateGuidance = `**Onboarding state — OTP DONE, LoE OUTSTANDING.** Thank them for completing the SARS OTP ✅. The remaining step is the signed Letter of Engagement. Direct them to their unique signing link: ${loeLink} (valid 72 hours from issue). Once signed, they can upload it here on WhatsApp.`;
@@ -804,7 +832,14 @@ export class ClaudeService {
                     ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, TTT's WhatsApp tax assistant.\n- Reflect the onboarding state above — do NOT use a generic "want to send onboarding docs?" line. Tailor the next step to whichever gate is outstanding.\n- Keep it under 60 words. ONE clear next step, no bullet lists in the greeting itself.`
                     : '';
 
-                roleContext = `\n\n**User Role: LEAD (Prospective Client)**\nThis is a prospective client (lead) in the onboarding pipeline. They are NOT yet a TTT client.\n\n**CRITICAL RULE: Do NOT answer any tax questions, give tax advice, or provide tax information.** If they ask tax-related questions, politely let them know that tax assistance is available to registered TTT clients, and steer them back to the outstanding onboarding step.\n\n**CRITICAL RULE — CRM IS THE ONLY SOURCE OF TRUTH FOR ONBOARDING PROGRESS.** The onboarding state below reflects the current values of \`riivo_loereceived\` and \`riivo_efilingotpcompleted\` in Dynamics. LoE completion is detected when the signed LoE lands in our system; SARS OTP completion is flipped by staff after they confirm eFiling access. **Vague chat claims from the lead ("done", "sorted", "I've signed it", "all good", "finished") MUST NOT change your behaviour.** Do NOT congratulate, thank, or acknowledge a gate as complete unless the state guidance below already shows it as complete. If a lead claims to have completed a gate that the state guidance still shows as outstanding, treat it as not-yet-confirmed: reaffirm the outstanding next step, and ask them to give it a few minutes for the system to update, or to clarify which step they mean. Never assume which gate "done" refers to — the system tells you which gate is outstanding; that is the one still pending.\n\nWhat you CAN do for leads:\n- Walk them through the outstanding onboarding gate(s) — see the state guidance below.\n- Help them upload onboarding documents (LoE, ID, bank statements, tax certificates).\n- Answer questions about the onboarding process and what's needed.\n- Explain what TTT offers and the benefits of becoming a client.\n\n${stateGuidance}${greetingFormat}`;
+                // CRITICAL RULE is gated to A/C (LoE outstanding) per PRD-post-loe-activation
+                // §6.5 — once LoE is in, Q&A opens up so the lead can ask TTT process and
+                // general tax questions while they wait on the OTP call.
+                const criticalRule = openQa
+                    ? ''
+                    : `\n\n**CRITICAL RULE: Do NOT answer any tax questions, give tax advice, or provide tax information.** If they ask tax-related questions, politely let them know that tax assistance is available to registered TTT clients, and steer them back to the outstanding onboarding step.`;
+
+                roleContext = `\n\n**User Role: LEAD (Prospective Client)**\nThis is a prospective client (lead) in the onboarding pipeline. They are NOT yet a TTT client.${criticalRule}\n\n**CRITICAL RULE — CRM IS THE ONLY SOURCE OF TRUTH FOR ONBOARDING PROGRESS.** The onboarding state below reflects the current values of \`riivo_loereceived\` and \`riivo_efilingotpcompleted\` in Dynamics. LoE completion is detected when the signed LoE lands in our system; SARS OTP completion is flipped by staff after they confirm eFiling access. **Vague chat claims from the lead ("done", "sorted", "I've signed it", "all good", "finished") MUST NOT change your behaviour.** Do NOT congratulate, thank, or acknowledge a gate as complete unless the state guidance below already shows it as complete. If a lead claims to have completed a gate that the state guidance still shows as outstanding, treat it as not-yet-confirmed: reaffirm the outstanding next step, and ask them to give it a few minutes for the system to update, or to clarify which step they mean. Never assume which gate "done" refers to — the system tells you which gate is outstanding; that is the one still pending.\n\nWhat you CAN do for leads:\n- Walk them through the outstanding onboarding gate(s) — see the state guidance below.\n- Help them upload onboarding documents (LoE, ID, bank statements, tax certificates).\n- Answer questions about the onboarding process and what's needed.\n- Explain what TTT offers and the benefits of becoming a client.\n\n${stateGuidance}${greetingFormat}`;
             } else if (entityType === 'user') {
                 // Build the staff capability list DYNAMICALLY from permitted_tools.
                 // This ensures the AI only advertises (and acts on) tools the
@@ -902,7 +937,13 @@ export class ClaudeService {
             // Filter tools by role
             const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'refer_friend', 'get_my_referral_code', 'save_document', 'upload_irp5'];
             const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field'];
-            const leadTools = ['save_document'];
+            // State B leads (LoE done, OTP outstanding) get upload_irp5 so they
+            // can fast-track. All other lead states stay at save_document only.
+            const isStateBLead = entityType === 'lead'
+                && leadOnboarding?.loeReceived === true
+                && leadOnboarding?.otpCompleted === false
+                && (leadOnboarding.leadType == null || leadOnboarding.leadType === LEAD_TYPE_TAX);
+            const leadTools = isStateBLead ? ['save_document', 'upload_irp5'] : ['save_document'];
             const unknownTools = ['verify_identity'];
 
             let availableTools: typeof TOOLS | undefined;
@@ -1499,6 +1540,101 @@ export class ClaudeService {
                     });
                 };
 
+                // Helper: process an IRP5 sent by a State B lead (LoE signed,
+                // OTP outstanding). The lead is NOT yet a Contact, so we can't
+                // write riivo_irp5s rows against them. Instead:
+                //   1. Upload to SharePoint under leads/{leadId}/{year}/
+                //   2. OCR + extract IRP5 fields (best-effort)
+                //   3. Stage the row in Supabase pending_irp5s, keyed by phone
+                //   4. Write a Lead annotation summarising the upload
+                // When the lead converts to a Contact the lazy drain hook in
+                // whatsappProcessor pulls the row into riivo_irp5s +
+                // riivo_taxsubmissionsdocuments against the new Contact.
+                const processStateBLeadIrp5Upload = async (
+                    leadId: string,
+                    phone: string,
+                    staged: { fileName: string; mimeType: string; buffer: Buffer },
+                ): Promise<string> => {
+                    const currentTaxYear = getCurrentSaTaxYear();
+
+                    // Step 1: SharePoint upload under leads/{leadId}/{year}/.
+                    let webUrl: string;
+                    try {
+                        const spResult = await sharePointService.uploadLeadDocumentFile({
+                            leadId,
+                            uploadYear: new Date().getFullYear(),
+                            fileName: staged.fileName,
+                            mimeType: staged.mimeType,
+                            buffer: staged.buffer,
+                        });
+                        webUrl = spResult.webUrl;
+                    } catch (err: any) {
+                        const msg = err?.response?.data?.error?.message || err?.message || 'unknown error';
+                        console.error(`[upload_irp5 lead] SharePoint upload failed for lead ${leadId}/${staged.fileName}:`, msg);
+                        return JSON.stringify({ status: 'error', error: 'sharepoint_failed', message: `Couldn't store the file in SharePoint: ${msg}. Ask the client to resend in a moment.` });
+                    }
+
+                    // Step 2 + 3: OCR + extraction (best-effort).
+                    let ocrMarkdown: string | null = null;
+                    if (mistralService.isConfigured()) {
+                        try {
+                            const ocr = await mistralService.ocrDocument(staged.fileName, staged.buffer, staged.mimeType || 'application/pdf');
+                            ocrMarkdown = ocr.fullMarkdown;
+                            console.log(`[upload_irp5 lead] OCR'd ${staged.fileName} → ${ocr.pageCount} pages, ${ocrMarkdown.length} chars`);
+                        } catch (err: any) {
+                            console.warn(`[upload_irp5 lead] OCR failed: ${err?.message || err}`);
+                        }
+                    }
+                    const extracted = ocrMarkdown
+                        ? await irp5ExtractorService.extractIrp5Fields(ocrMarkdown)
+                        : { riivoFields: {} as Record<string, any>, sourceCodes: [] as string[] };
+
+                    let wrongYearWarning: string | undefined;
+                    if (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear !== currentTaxYear.label) {
+                        wrongYearWarning = `The cert reads as the ${extracted.assessmentYear} assessment year, but we're collecting docs for ${currentTaxYear.label} (${currentTaxYear.rangeText}). Ask the client to confirm whether they meant to send this older one.`;
+                    }
+
+                    // Step 4: stage in Supabase.
+                    const inserted = await supabaseService.insertPendingIrp5({
+                        leadId,
+                        phoneNumber: phone,
+                        sharepointUrl: webUrl,
+                        fileName: staged.fileName,
+                        certificateNumber: extracted.certificateNumber || null,
+                        assessmentYear: typeof extracted.assessmentYear === 'number' ? extracted.assessmentYear : null,
+                        employerName: extracted.employerName || null,
+                        sourceCodes: extracted.sourceCodes || [],
+                        extractedFields: extracted.riivoFields || null,
+                    });
+
+                    // Step 5: Lead annotation (best-effort — we don't roll back
+                    // SharePoint or Supabase if this fails).
+                    await dynamicsService.createIrp5AnnotationOnLead(leadId, {
+                        employerName: extracted.employerName || null,
+                        assessmentYear: typeof extracted.assessmentYear === 'number' ? extracted.assessmentYear : null,
+                        certificateNumber: extracted.certificateNumber || null,
+                        sourceCodes: extracted.sourceCodes || [],
+                        sharepointUrl: webUrl,
+                    });
+
+                    clearPendingUpload(phone);
+
+                    const targetYear = (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear === currentTaxYear.label)
+                        ? extracted.assessmentYear
+                        : currentTaxYear.label;
+
+                    return JSON.stringify({
+                        status: 'irp5_staged_for_lead',
+                        employer_name: extracted.employerName || null,
+                        assessment_year: extracted.assessmentYear || targetYear,
+                        certificate_number: extracted.certificateNumber || null,
+                        sharepoint_url: webUrl,
+                        pending_id: inserted?.id || null,
+                        wrong_year_warning: wrongYearWarning,
+                        message: `IRP5${extracted.employerName ? ` from ${extracted.employerName}` : ''} for the ${targetYear} tax year is staged on our side. Compose a short warm confirmation: thank the client by name if you know it, mention the employer + year, and tell them the consultant will pick it up when they're set up on eFiling.${wrongYearWarning ? ' But first: ' + wrongYearWarning : ''}`,
+                    });
+                };
+
                 // Helper: handle upload_irp5 — full IRP5 processing flow.
                 // SharePoint upload → riivo_taxsubmissionsdocuments row →
                 // Mistral OCR → Claude extraction → riivo_irp5s row →
@@ -1516,7 +1652,16 @@ export class ClaudeService {
                     if (!contactId) {
                         return JSON.stringify({ status: 'error', error: 'no_contact', message: 'IRP5 uploads require a known client. Ask staff to use save_document instead, or have the client message us directly.' });
                     }
-                    if (entityType !== 'client') {
+                    // State B leads (LoE signed, OTP outstanding) can fast-track:
+                    // we stage the IRP5 in Supabase pre-conversion and apply
+                    // when the lead becomes a Contact. All other lead states
+                    // still reject (per PRD §6.7).
+                    const isStateBLeadForUpload = entityType === 'lead'
+                        && leadOnboarding?.loeReceived === true
+                        && leadOnboarding?.otpCompleted === false
+                        && (leadOnboarding.leadType == null || leadOnboarding.leadType === LEAD_TYPE_TAX);
+
+                    if (entityType !== 'client' && !isStateBLeadForUpload) {
                         return JSON.stringify({ status: 'error', error: 'wrong_role', message: 'upload_irp5 is for client-uploaded certs. Staff should use save_document with doc_type="IRP5".' });
                     }
                     if (args.confirmed_by_user !== true) {
@@ -1525,6 +1670,10 @@ export class ClaudeService {
                     const staged = peekPendingUpload(phone);
                     if (!staged) {
                         return JSON.stringify({ status: 'error', error: 'no_pending_upload', message: 'No file is staged. Ask the client to resend the IRP5.' });
+                    }
+
+                    if (isStateBLeadForUpload) {
+                        return await processStateBLeadIrp5Upload(contactId, phone, staged);
                     }
 
                     const contact = await dynamicsService.getContactDetails(contactId);

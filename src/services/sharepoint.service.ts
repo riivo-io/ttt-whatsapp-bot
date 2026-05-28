@@ -284,6 +284,42 @@ class SharePointService {
             finalName: response.data.name,
         };
     }
+
+    /**
+     * Upload a file into the per-lead/per-upload-year folder structure used
+     * for pre-conversion uploads (State B leads sending their IRP5 before
+     * they're a Contact). Once the lead converts and the lazy drain hook
+     * fires, the file's webUrl is reused on the Contact-side rows; the
+     * physical file stays where it was first uploaded.
+     */
+    async uploadLeadDocumentFile(params: {
+        leadId: string;
+        uploadYear: number;
+        fileName: string;
+        mimeType: string;
+        buffer: Buffer;
+    }): Promise<{ webUrl: string; itemId: string; finalName: string }> {
+        const driveId = await this.resolveDocsDriveId();
+        const safeFileName = this.sanitiseSharePointFileName(params.fileName);
+        const path = `leads/${params.leadId}/${params.uploadYear}/${safeFileName}`;
+        const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+
+        const url = `${GRAPH_BASE}/drives/${driveId}/root:/${encodedPath}:/content?@microsoft.graph.conflictBehavior=rename`;
+        const headers = await this.authedHeaders({ 'Content-Type': params.mimeType });
+
+        const response = await axios.put<GraphDriveItem>(url, params.buffer, {
+            headers,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+        });
+
+        console.log(`[SharePoint] Uploaded lead doc "${response.data.name}" → ${response.data.webUrl}`);
+        return {
+            webUrl: response.data.webUrl,
+            itemId: response.data.id,
+            finalName: response.data.name,
+        };
+    }
 }
 
 console.log('[boot] sharepoint.service: instantiating singleton');

@@ -50,26 +50,32 @@ function firstName(fullname: string | null | undefined, fallbackEmail?: string):
 }
 
 /**
- * Notify the original forwarder that we couldn't relay because we couldn't
- * find a WhatsApp number for the client in Dynamics. Threads under the
- * original forward via Graph's reply endpoint.
+ * Notify the original forwarder that we couldn't relay. Two variants:
+ *   - `not_in_crm`: no contact/lead/user found at all in Dynamics
+ *   - `no_phone`: found the record, but the mobile number is blank
+ * Threads under the original forward via Graph's reply endpoint.
  */
 async function emailForwarderNoMatch(
     forwarderEmail: string,
     forwarderName: string | null,
     originalSenderEmail: string,
     subject: string | null,
-    replyToMessageId: string
+    replyToMessageId: string,
+    reason: 'not_in_crm' | 'no_phone'
 ): Promise<void> {
     const greetingName = firstName(forwarderName, forwarderEmail);
+    const explanation = reason === 'no_phone'
+        ? `I found ${originalSenderEmail} in Dynamics, but there's no mobile number on their record so I can't reach them on WhatsApp. ` +
+          `If you can add their mobile number to Dynamics (or reply with it here) I'll take it from there.`
+        : `I tried to reach ${originalSenderEmail} over WhatsApp on your behalf, but I couldn't find a matching contact or lead in Dynamics. ` +
+          `If they should be in the CRM, please add them; otherwise reply with their mobile number and I'll take it from there.`;
     await graphMailService.sendMail({
         to: forwarderEmail,
         subject: `Re: ${subject || 'Forwarded message'}`,
         replyToMessageId,
         bodyText:
             `Hi ${greetingName},\n\n` +
-            `I tried to reach ${originalSenderEmail} over WhatsApp on your behalf, but I couldn't find a WhatsApp number on record for them in Dynamics. ` +
-            `If you'd like me to message them, please reply with their mobile number and I'll take it from there.\n\n` +
+            `${explanation}\n\n` +
             `Tina\n` +
             `TTT Financial Group`,
     });
@@ -168,7 +174,11 @@ export async function processInboundEmail(graphMessageId: string): Promise<void>
 
     // No CRM match, or no phone number on file
     if (!entity || !entity.mobilephone) {
-        console.log(`[EmailRelay] No WhatsApp number for ${parsed.originalSenderEmail} (entity=${entity ? entity.type : 'none'}) — emailing forwarder`);
+        const reason: 'not_in_crm' | 'no_phone' = !entity ? 'not_in_crm' : 'no_phone';
+        console.log(
+            `[EmailRelay] Cannot relay ${parsed.originalSenderEmail} — ${reason} ` +
+            `(entity=${entity ? `${entity.type}/${entity.id}` : 'none'}) — emailing forwarder`
+        );
 
         // Persist a no_match row for audit and de-dup against Graph redelivery.
         await supabaseService.createEmailRelayPending({
@@ -185,7 +195,7 @@ export async function processInboundEmail(graphMessageId: string): Promise<void>
             expiresAt: new Date(Date.now() + CONSENT_WINDOW_MS),
         });
 
-        await emailForwarderNoMatch(parsed.forwarderEmail, parsed.forwarderName, parsed.originalSenderEmail, parsed.subject, graphMessageId);
+        await emailForwarderNoMatch(parsed.forwarderEmail, parsed.forwarderName, parsed.originalSenderEmail, parsed.subject, graphMessageId, reason);
         return;
     }
 

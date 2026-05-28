@@ -6,6 +6,7 @@ import { handleIncomingMessage, verifyWebhook } from './controllers/webhook.cont
 import pdfRoute from './routes/pdf.route';
 import cronRoute from './routes/cron.route';
 import emailRoute from './routes/email.route';
+import loeSignedRoute from './routes/loeSigned.route';
 console.log('[boot] server.ts: all imports resolved');
 
 dotenv.config();
@@ -15,6 +16,12 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
+
+// Routes that need access to the raw request body for HMAC verification must
+// mount BEFORE the global express.json() parser, otherwise the body stream is
+// consumed before the route's own raw-body middleware sees it.
+app.use('/webhook/loe-signed', loeSignedRoute);
+
 app.use(express.json());
 
 app.get('/health', (req, res) => {

@@ -568,6 +568,9 @@ export class DynamicsService {
         const normalized = email.trim().toLowerCase();
         if (!normalized) return null;
 
+        // Dataverse rejects tolower() in $filter ("function isn't supported"),
+        // but `eq` on string columns is already case-insensitive — so a plain
+        // equality match handles "Foo@bar.com" vs. "foo@bar.com" correctly.
         const odataEmail = normalized.replace(/'/g, "''");
         const [contact, lead, user] = await Promise.all([
             this.searchEntity(
@@ -1002,6 +1005,7 @@ export class DynamicsService {
         // are marked Business Required at the table level.
         clientType?: number;        // riivo_clienttype Choice (0=Individual,1=Business,2=Private Company,3=Closed Corp,4=Business Trust,5=Sole Prop)
         leadType?: number;          // riivo_leadtype Choice (100000000=Tax,100000001=Accounting,463630001=Long Term Insurance,463630002=Short Term Insurance)
+        leadSource?: number;        // riivo_leadsource Choice (e.g. 463630005=WhatsApp — new option, may not exist in every env yet)
         industryId?: string;        // riivo_industries GUID for riivo_Industry_lookup
         ownerSystemUserId?: string; // systemuser GUID for ownerid
     }): Promise<any | null> {
@@ -1015,25 +1019,62 @@ export class DynamicsService {
         if (params.notes) payload['riivo_notes'] = params.notes;
         if (typeof params.clientType === 'number') payload['riivo_clienttype'] = params.clientType;
         if (typeof params.leadType === 'number') payload['riivo_leadtype'] = params.leadType;
+        if (typeof params.leadSource === 'number') payload['riivo_leadsource'] = params.leadSource;
         if (params.industryId) payload['riivo_Industry_lookup@odata.bind'] = `/riivo_industries(${params.industryId})`;
         if (params.ownerSystemUserId) payload['ownerid@odata.bind'] = `/systemusers(${params.ownerSystemUserId})`;
 
-        try {
-            const triggeredBy = params.referredByContactId || params.phone || 'unknown';
-            const response = await this.crmPost('new_leads', payload, triggeredBy);
-            console.log(`[Dynamics CRM] Created lead: ${params.firstName} ${params.lastName}`);
-            await supabaseService.logCrmWrite({
-                crmEntity: 'new_leads',
-                crmRecordId: response.data?.new_leadid,
-                action: 'create',
-                payload,
-                triggeredBy: params.referredByContactId || params.phone || 'unknown',
-            });
-            return response.data;
-        } catch (error: any) {
-            console.error('[Dynamics CRM] Failed to create lead:', error?.response?.data?.error?.message || error.message);
+        const triggeredBy = params.referredByContactId || params.phone || 'unknown';
+
+        // riivo_leadsource is currently a dev-only option set, and the default
+        // owner GUID is a prod-only systemuser. Either can make Dataverse reject
+        // the whole POST in the wrong environment, so on failure we strip the
+        // offending field and retry rather than losing the lead entirely.
+        const attempt = async (currentPayload: any): Promise<any> => {
+            return this.crmPost('new_leads', currentPayload, triggeredBy);
+        };
+
+        const tryStripField = (currentPayload: any, errMsg: string): any | null => {
+            const lower = errMsg.toLowerCase();
+            if ('riivo_leadsource' in currentPayload && lower.includes('riivo_leadsource')) {
+                const next = { ...currentPayload };
+                delete next['riivo_leadsource'];
+                console.warn('[Dynamics CRM] riivo_leadsource rejected — retrying lead without it');
+                return next;
+            }
+            if ('ownerid@odata.bind' in currentPayload && (lower.includes('ownerid') || lower.includes('systemuser') || lower.includes('does not exist'))) {
+                const next = { ...currentPayload };
+                delete next['ownerid@odata.bind'];
+                console.warn('[Dynamics CRM] ownerid rejected — retrying lead without it');
+                return next;
+            }
             return null;
+        };
+
+        let currentPayload = payload;
+        for (let i = 0; i < 3; i++) {
+            try {
+                const response = await attempt(currentPayload);
+                console.log(`[Dynamics CRM] Created lead: ${params.firstName} ${params.lastName}`);
+                await supabaseService.logCrmWrite({
+                    crmEntity: 'new_leads',
+                    crmRecordId: response.data?.new_leadid,
+                    action: 'create',
+                    payload: currentPayload,
+                    triggeredBy,
+                });
+                return response.data;
+            } catch (error: any) {
+                const errMsg = error?.response?.data?.error?.message || error.message || '';
+                const stripped = tryStripField(currentPayload, errMsg);
+                if (!stripped) {
+                    console.error('[Dynamics CRM] Failed to create lead:', errMsg);
+                    return null;
+                }
+                currentPayload = stripped;
+            }
         }
+        console.error('[Dynamics CRM] Failed to create lead after fallback retries');
+        return null;
     }
 
     /**
@@ -1312,6 +1353,202 @@ export class DynamicsService {
      * field values (not raw OCR output) so any corrections are honoured.
      * Flips riivo_LoEReceived = true in the same PATCH.
      */
+    /**
+     * Read a Lead by its id. Returns the fields needed by the post-LoE
+     * activation flow: name, phone, the two onboarding gate flags, and lead
+     * type so non-Tax leads can be skipped.
+     */
+    async getLeadById(leadId: string): Promise<{
+        id: string;
+        firstname: string;
+        lastname: string;
+        fullname: string;
+        mobilephone: string | null;
+        loeReceived: boolean;
+        otpCompleted: boolean;
+        leadType: number | null;
+    } | null> {
+        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!leadId || !guidRegex.test(leadId)) {
+            console.warn(`[Dynamics CRM] getLeadById: invalid lead id: ${leadId}`);
+            return null;
+        }
+        const lead = await this.searchEntity(
+            'new_leads',
+            `new_leadid eq ${leadId}`,
+            ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype'],
+        );
+        if (!lead) return null;
+        const firstname = (lead.ttt_firstname || '').trim();
+        const lastname = (lead.ttt_lastname || '').trim();
+        return {
+            id: lead.new_leadid,
+            firstname,
+            lastname,
+            fullname: `${firstname} ${lastname}`.trim(),
+            mobilephone: lead.ttt_mobilephone || null,
+            loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
+            otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
+            leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
+        };
+    }
+
+    /**
+     * Find Tax leads with `riivo_loereceived = true` that have NOT yet been
+     * processed by the post-LoE activation flow. "Processed" is tracked by a
+     * sentinel riivo_request row with classificationtopic = 'post_loe_activation'.
+     * Used by the hourly safety-net cron.
+     */
+    async findLeadsAwaitingPostLoeActivation(): Promise<{ id: string }[]> {
+        const token = await this.getToken();
+        try {
+            const leadFilter = `${LEAD_LOE_RECEIVED_FIELD} eq true and statecode eq 0 and riivo_leadtype eq ${LEAD_TYPE_TAX}`;
+            const url = `${this.baseUrl}/api/data/v9.2/new_leads?$filter=${encodeURIComponent(leadFilter)}&$select=new_leadid&$top=200`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                },
+            });
+            const leads: { new_leadid: string }[] = response.data?.value || [];
+            if (leads.length === 0) return [];
+
+            // For each lead, check whether the sentinel already exists. We
+            // could do this with a single Web API query but the cardinality
+            // of leads-with-LoE-true and-no-sentinel is small enough that
+            // a per-lead lookup is fine, and a $expand isn't safe because
+            // we don't have a guaranteed nav from new_lead → riivo_requests.
+            const out: { id: string }[] = [];
+            for (const l of leads) {
+                const sentinelFilter = `_riivo_lead_value eq ${l.new_leadid} and riivo_classificationtopic eq 'post_loe_activation'`;
+                const sentinelUrl = `${this.baseUrl}/api/data/v9.2/riivo_requests?$filter=${encodeURIComponent(sentinelFilter)}&$select=riivo_requestid&$top=1`;
+                try {
+                    const sentinelRes = await axios.get(sentinelUrl, {
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'OData-MaxVersion': '4.0',
+                            'OData-Version': '4.0',
+                            'Accept': 'application/json',
+                        },
+                    });
+                    if (!sentinelRes.data?.value?.length) {
+                        out.push({ id: l.new_leadid });
+                    }
+                } catch (e: any) {
+                    console.warn(`[Dynamics CRM] sentinel lookup failed for lead ${l.new_leadid}:`, e?.response?.data?.error?.message || e.message);
+                }
+            }
+            return out;
+        } catch (error: any) {
+            console.error('[Dynamics CRM] findLeadsAwaitingPostLoeActivation failed:', error?.response?.data?.error?.message || error.message);
+            return [];
+        }
+    }
+
+    /**
+     * Look up the post-LoE activation sentinel for a lead. Returns the
+     * request id if found, null otherwise. Used by the activation handler
+     * for the idempotency check.
+     */
+    async findPostLoeActivationSentinel(leadId: string): Promise<string | null> {
+        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!leadId || !guidRegex.test(leadId)) return null;
+        const filter = `_riivo_lead_value eq ${leadId} and riivo_classificationtopic eq 'post_loe_activation'`;
+        const row = await this.searchEntity('riivo_requests', filter, ['riivo_requestid']);
+        return row?.riivo_requestid || null;
+    }
+
+    /**
+     * Write the post-LoE activation sentinel — an inactive riivo_request row
+     * tagged with classificationtopic = 'post_loe_activation'. Future activations
+     * are short-circuited by findPostLoeActivationSentinel.
+     */
+    async createPostLoeActivationSentinel(leadId: string, phoneNumber: string): Promise<string | null> {
+        const payload: any = {
+            riivo_clientmobilenumber: phoneNumber,
+            riivo_channel: 1,
+            riivo_category: 0,
+            riivo_priority: 1,
+            riivo_description: 'Post-LoE activation processed (sentinel).',
+            riivo_classificationtopic: 'post_loe_activation',
+            statecode: REQUEST_STATE.INACTIVE,
+            statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
+            'riivo_Lead@odata.bind': `/new_leads(${leadId})`,
+        };
+        try {
+            const response = await this.crmPost('riivo_requests', payload, leadId);
+            return response.data?.riivo_requestid || null;
+        } catch (error: any) {
+            console.error(`[Dynamics CRM] createPostLoeActivationSentinel failed for lead ${leadId}:`, error?.response?.data?.error?.message || error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Attach a Lead annotation summarising an IRP5 the lead sent on WhatsApp
+     * before their conversion to a Contact. The PDF itself lives in SharePoint;
+     * this annotation gives consultants a timeline-visible record so they can
+     * see the upload happened pre-conversion.
+     */
+    async createIrp5AnnotationOnLead(leadId: string, payload: {
+        employerName: string | null;
+        assessmentYear: number | null;
+        certificateNumber: string | null;
+        sourceCodes: string[];
+        sharepointUrl: string;
+    }): Promise<{ success: boolean; annotationId?: string; error?: string }> {
+        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!guidRegex.test(leadId)) {
+            return { success: false, error: 'invalid_lead_id' };
+        }
+        const year = payload.assessmentYear ?? '(unknown)';
+        const noteText = [
+            'IRP5 received from client via WhatsApp.',
+            '',
+            `Employer: ${payload.employerName || '(unknown)'}`,
+            `Tax year: ${year}`,
+            `Certificate number: ${payload.certificateNumber || '(unknown)'}`,
+            `Source codes detected: ${payload.sourceCodes.join(', ') || '(none)'}`,
+            '',
+            `PDF: ${payload.sharepointUrl}`,
+            '',
+            'This IRP5 is staged in Supabase (pending_irp5s) and will apply automatically to the client\'s Contact record once they convert.',
+        ].join('\n');
+
+        const annPayload: any = {
+            subject: `IRP5 received via WhatsApp (${year})`,
+            notetext: noteText,
+            'objectid_new_lead@odata.bind': `/new_leads(${leadId})`,
+            objecttypecode: 'new_lead',
+        };
+
+        try {
+            const response = await this.crmPost('annotations', annPayload, leadId);
+            const annotationId = response.data?.annotationid;
+            console.log(`[Dynamics CRM] Created IRP5 annotation ${annotationId} on lead ${leadId}`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'annotations',
+                crmRecordId: annotationId,
+                action: 'create',
+                payload: {
+                    subject: annPayload.subject,
+                    objecttypecode: annPayload.objecttypecode,
+                    lead_id: leadId,
+                    certificate_number: payload.certificateNumber,
+                    employer_name: payload.employerName,
+                },
+                triggeredBy: leadId,
+            });
+            return { success: true, annotationId };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[Dynamics CRM] Failed to create IRP5 annotation on lead ${leadId}:`, errMsg);
+            return { success: false, error: errMsg };
+        }
+    }
+
     async writeLoeFieldsToLead(
         leadId: string,
         fields: {
