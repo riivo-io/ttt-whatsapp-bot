@@ -312,12 +312,15 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
             : '';
     const combinedNotes = [baseNotes, referralNote].filter(Boolean).join(' ') || undefined;
 
-    // WhatsApp signups always tag the lead with Lead Source = WhatsApp and,
-    // when no referral owner was resolved, the tax crew systemuser. Both are
-    // env-specific (option set is dev-only, owner GUID is prod-only) so
-    // createLead retries without them if Dataverse rejects either.
+    // WhatsApp signups tag the lead with Lead Source = WhatsApp. Ownership
+    // defaults to the tax crew team (so the lead lands in their shared queue);
+    // a resolved referrer's owner takes precedence. Both team and systemuser
+    // GUIDs are prod-only, so createLead retries with the service principal
+    // systemuser as a cross-environment fallback, and finally strips ownerid
+    // entirely if Dataverse still rejects.
     const WHATSAPP_LEAD_SOURCE = 463630005;
-    const TAX_CREW_OWNER_ID = '873db3ff-d563-f011-bec3-000d3ab7e7df';
+    const TAX_CREW_TEAM_ID = 'eb735c44-7b5a-f111-bec7-000d3ada6ac0';
+    const TAX_CREW_FALLBACK_OWNER_ID = '873db3ff-d563-f011-bec3-000d3ab7e7df';
 
     const created = await dynamicsService.createLead({
         firstName,
@@ -329,7 +332,9 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
         leadType: typeof leadType === 'number' && !Number.isNaN(leadType) ? leadType : undefined,
         leadSource: WHATSAPP_LEAD_SOURCE,
         referredByContactId,
-        ownerSystemUserId: ownerSystemUserId || TAX_CREW_OWNER_ID,
+        ownerSystemUserId,
+        ownerTeamId: ownerSystemUserId ? undefined : TAX_CREW_TEAM_ID,
+        ownerFallbackSystemUserId: TAX_CREW_FALLBACK_OWNER_ID,
     });
 
     if (!created) {

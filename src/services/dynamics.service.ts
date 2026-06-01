@@ -1008,6 +1008,8 @@ export class DynamicsService {
         leadSource?: number;        // riivo_leadsource Choice (e.g. 463630005=WhatsApp — new option, may not exist in every env yet)
         industryId?: string;        // riivo_industries GUID for riivo_Industry_lookup
         ownerSystemUserId?: string; // systemuser GUID for ownerid
+        ownerTeamId?: string;       // team GUID for ownerid — takes precedence over ownerSystemUserId when set
+        ownerFallbackSystemUserId?: string; // systemuser GUID to retry with if the primary owner is rejected (e.g. team doesn't exist in env)
     }): Promise<any | null> {
         const payload: any = {
             'ttt_firstname': params.firstName,
@@ -1021,7 +1023,11 @@ export class DynamicsService {
         if (typeof params.leadType === 'number') payload['riivo_leadtype'] = params.leadType;
         if (typeof params.leadSource === 'number') payload['riivo_leadsource'] = params.leadSource;
         if (params.industryId) payload['riivo_Industry_lookup@odata.bind'] = `/riivo_industries(${params.industryId})`;
-        if (params.ownerSystemUserId) payload['ownerid@odata.bind'] = `/systemusers(${params.ownerSystemUserId})`;
+        if (params.ownerTeamId) {
+            payload['ownerid@odata.bind'] = `/teams(${params.ownerTeamId})`;
+        } else if (params.ownerSystemUserId) {
+            payload['ownerid@odata.bind'] = `/systemusers(${params.ownerSystemUserId})`;
+        }
 
         const triggeredBy = params.referredByContactId || params.phone || 'unknown';
 
@@ -1033,6 +1039,7 @@ export class DynamicsService {
             return this.crmPost('new_leads', currentPayload, triggeredBy);
         };
 
+        let ownerFallbackTried = false;
         const tryStripField = (currentPayload: any, errMsg: string): any | null => {
             const lower = errMsg.toLowerCase();
             if ('riivo_leadsource' in currentPayload && lower.includes('riivo_leadsource')) {
@@ -1041,7 +1048,14 @@ export class DynamicsService {
                 console.warn('[Dynamics CRM] riivo_leadsource rejected — retrying lead without it');
                 return next;
             }
-            if ('ownerid@odata.bind' in currentPayload && (lower.includes('ownerid') || lower.includes('systemuser') || lower.includes('does not exist'))) {
+            if ('ownerid@odata.bind' in currentPayload && (lower.includes('ownerid') || lower.includes('systemuser') || lower.includes('team') || lower.includes('does not exist'))) {
+                if (!ownerFallbackTried && params.ownerFallbackSystemUserId) {
+                    ownerFallbackTried = true;
+                    const next = { ...currentPayload };
+                    next['ownerid@odata.bind'] = `/systemusers(${params.ownerFallbackSystemUserId})`;
+                    console.warn(`[Dynamics CRM] ownerid rejected — retrying with fallback systemuser ${params.ownerFallbackSystemUserId}`);
+                    return next;
+                }
                 const next = { ...currentPayload };
                 delete next['ownerid@odata.bind'];
                 console.warn('[Dynamics CRM] ownerid rejected — retrying lead without it');
@@ -1051,7 +1065,7 @@ export class DynamicsService {
         };
 
         let currentPayload = payload;
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 4; i++) {
             try {
                 const response = await attempt(currentPayload);
                 console.log(`[Dynamics CRM] Created lead: ${params.firstName} ${params.lastName}`);
