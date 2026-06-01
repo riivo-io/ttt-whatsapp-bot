@@ -8,6 +8,7 @@ console.log('[boot] claude.service: before pdf');
 import { pdfService, InvoiceData, mapInvoiceToInvoiceData } from './pdf.service';
 console.log('[boot] claude.service: before meta');
 import { metaWhatsAppService } from './meta.service';
+import { graphMailService } from './graphMail.service';
 console.log('[boot] claude.service: imports done');
 import { mistralService } from './mistral.service';
 import { loeExtractorService } from './loe-extractor.service';
@@ -34,8 +35,8 @@ dotenv.config();
  * Maps internal tool names to the permission keys stored in role_tools.tool_name.
  * A staff user can invoke an internal tool only if its permission is in the
  * session's permitted_tools array. Tools not listed here are NOT staff-gated
- * (e.g. client-only tools like refer_friend, or unknown-user tools like
- * verify_identity) and are filtered by role-type instead.
+ * (e.g. client-only tools like get_my_referral_code, or unknown-user tools
+ * like verify_identity) and are filtered by role-type instead.
  */
 // Canonical TTT signup / onboarding link. Single source of truth — do not
 // inline `app.ttt-tax.co.za/signup` anywhere else, that string is stale.
@@ -103,6 +104,16 @@ You provide accurate, helpful advice about South African tax matters and have ac
 - If the user wants to speak to a consultant, talk to a human, needs personal assistance, or wants someone to call them back, use the request_consultant_callback tool.
 - After submitting the request, relay the confirmation message from the tool response.
 
+**NEVER PROMISE WHAT YOU CAN'T DO — escalate instead**:
+- Stay strictly within what your available tools and your own knowledge actually let you do. NEVER invent a capability, offer to "log", "capture", "create", "submit", "send", "set up", "arrange", "book", or "schedule" anything on the user's behalf unless a tool you can see right now does exactly that. If no tool does it, you can't do it — say so.
+- Examples of forbidden offers (this list is not exhaustive — the principle is what matters):
+    * "Want me to log your friend / capture their details / create a referral lead for them?" — NO. You cannot create leads on a client's behalf. Hand them their own referral link via get_my_referral_code and let them forward it.
+    * "I'll send the link to your friend for you" — NO. The client forwards the link themselves.
+    * "Let me update your address / banking details / industry" — NO, unless an explicit tool for that exists in this conversation.
+    * "I'll book a meeting / schedule a call for you" — NO, unless an explicit tool for that exists. Use request_consultant_callback if they want a human to call them.
+- If the user asks for something you genuinely cannot do or you're not confident in your answer (a tax question outside what you're sure of, an account question your tools don't expose, a scenario you've never seen), call escalate_to_taxcrew with their question and a short reason. Then tell them you've flagged it to the taxcrew so they don't repeat themselves.
+- escalate_to_taxcrew vs request_consultant_callback: use request_consultant_callback ONLY when the user has explicitly asked to speak to a person. Use escalate_to_taxcrew when YOU are the one who realised you can't answer — the user didn't ask for a human, you decided you need one. Never use either as a courtesy offer at the end of a reply.
+
 **WhatsApp Opt-Out**:
 - If the user explicitly wants to stop receiving WhatsApp messages, unsubscribe, or opt out, use the opt_out_whatsapp tool.
 - Confirm their opt-out was successful and let them know they can message again anytime to opt back in.
@@ -122,6 +133,7 @@ You provide accurate, helpful advice about South African tax matters and have ac
 - No cap on total rewards. Every qualifying friend earns a separate reward.
 - If the client wants their personal code or sharing link, call get_my_referral_code. NEVER invent a code and NEVER quote one from memory.
 - Never offer to send the link to the friend on the client's behalf. The client forwards it themselves.
+- NEVER offer to "log a friend", "log their details", "capture their details", "create a lead for them", or anything that implies you can put the friend into TTT's system from this chat. You cannot. The ONLY referral action you can take is calling get_my_referral_code to hand the client their own link. If the client offers their friend's details, politely decline and explain the friend signs up themselves via the link.
 
 **CRM Data**:
 - If the tool returns no data, inform the user politely that you couldn't find any records.
@@ -223,6 +235,18 @@ const TOOLS: Anthropic.Tool[] = [
                 reason: { type: "string", description: "Optional reason why they want to speak to a consultant" },
             },
             required: [],
+        },
+    },
+    {
+        name: "escalate_to_taxcrew",
+        description: "Forward an unanswered question to the TTT taxcrew inbox when you genuinely cannot answer it from your own knowledge or your available tools. Use this when the user asks something outside what you can verify (e.g. an account state your tools don't expose, a tax question you're not confident about, a request to do something no tool supports). Do NOT use this as a generic offer of 'human help' — that is what request_consultant_callback is for. After calling this, tell the user you've flagged it to the taxcrew so they don't repeat themselves.",
+        input_schema: {
+            type: "object",
+            properties: {
+                question: { type: "string", description: "The user's question or request, in their own words. Quote the most recent message; don't paraphrase." },
+                reason: { type: "string", description: "Why you can't answer from your tools or knowledge — short. E.g. 'no tool exposes provisional tax penalty status', 'unsure whether VAT applies to this scenario', 'client asking us to act on third party's behalf'." },
+            },
+            required: ["question", "reason"],
         },
     },
     {
@@ -378,7 +402,7 @@ const TOOLS: Anthropic.Tool[] = [
     },
     {
         name: "refer_friend",
-        description: "Client wants to refer a friend or family member. Creates a lead linked to the referring client. Ask for the friend's name, phone number, email address, and which service they need.",
+        description: "STAFF ONLY. Use when a TTT staff member (on a phone call with a client, or following up after one) wants to log a referral from an existing client on the client's behalf. Creates a new lead linked to the referring client. Ask the staff member for the friend's name, phone number, email address, and which service they need. This tool is NOT exposed to clients — clients can only get their own referral link via get_my_referral_code and must forward it themselves.",
         input_schema: {
             type: "object",
             properties: {
@@ -935,16 +959,16 @@ What NOT to do:
             ];
 
             // Filter tools by role
-            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'refer_friend', 'get_my_referral_code', 'save_document', 'upload_irp5'];
-            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field'];
+            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'get_my_referral_code', 'save_document', 'upload_irp5', 'escalate_to_taxcrew'];
+            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field', 'refer_friend'];
             // State B leads (LoE done, OTP outstanding) get upload_irp5 so they
             // can fast-track. All other lead states stay at save_document only.
             const isStateBLead = entityType === 'lead'
                 && leadOnboarding?.loeReceived === true
                 && leadOnboarding?.otpCompleted === false
                 && (leadOnboarding.leadType == null || leadOnboarding.leadType === LEAD_TYPE_TAX);
-            const leadTools = isStateBLead ? ['save_document', 'upload_irp5'] : ['save_document'];
-            const unknownTools = ['verify_identity'];
+            const leadTools = isStateBLead ? ['save_document', 'upload_irp5', 'escalate_to_taxcrew'] : ['save_document', 'escalate_to_taxcrew'];
+            const unknownTools = ['verify_identity', 'escalate_to_taxcrew'];
 
             let availableTools: typeof TOOLS | undefined;
             if (contactId && entityType === 'client') {
@@ -2042,6 +2066,52 @@ What NOT to do:
                                 functionResponse = JSON.stringify({
                                     status: "error",
                                     message: "I couldn't submit your request. Please try again or call our office directly."
+                                });
+                            }
+                        } else if (functionName === 'escalate_to_taxcrew') {
+                            const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                            const question = (args.question || '').toString().trim();
+                            const reason = (args.reason || '').toString().trim();
+                            const senderLabel = userFullName?.trim() || 'Unknown sender';
+                            const phoneLine = phoneNumber || 'no phone on record';
+                            const roleLabel = entityType === 'client'
+                                ? 'TTT client'
+                                : entityType === 'lead'
+                                    ? 'lead (mid-onboarding)'
+                                    : 'unknown sender';
+                            const subject = `Tina escalation — ${senderLabel}`;
+                            const body = [
+                                `${senderLabel} (${phoneLine}, ${roleLabel}) asked Tina something she couldn't answer.`,
+                                '',
+                                `Their question:`,
+                                question || '(not captured)',
+                                '',
+                                `Why Tina escalated:`,
+                                reason || '(not captured)',
+                                '',
+                                `Tina has already told them the taxcrew will follow up, so please reach out on ${phoneLine} or by email when you can.`,
+                                '',
+                                '— Tina',
+                            ].join('\n');
+                            let emailSent = false;
+                            try {
+                                emailSent = await graphMailService.sendMail({
+                                    to: 'taxcrew@ttt-tax.co.za',
+                                    subject,
+                                    bodyText: body,
+                                });
+                            } catch (e: any) {
+                                console.error(`[escalate_to_taxcrew] sendMail threw: ${e?.message || e}`);
+                            }
+                            if (emailSent) {
+                                functionResponse = JSON.stringify({
+                                    status: "success",
+                                    message: "Escalation emailed to taxcrew@ttt-tax.co.za. Tell the user briefly that you've flagged the question to the taxcrew and they'll be in touch on this number. Do NOT promise a specific turnaround time."
+                                });
+                            } else {
+                                functionResponse = JSON.stringify({
+                                    status: "error",
+                                    message: "Could not email the taxcrew. Tell the user to email taxcrew@ttt-tax.co.za directly with their question and the team will pick it up. Apologise briefly."
                                 });
                             }
                         } else if (functionName === 'get_required_documents') {
