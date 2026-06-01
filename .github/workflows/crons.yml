@@ -45,7 +45,7 @@ jobs:
     steps:
       - name: GET /api/cron/case-timeout
         run: |
-          curl -fsS --max-time 60 \
+          curl -fsS --max-time 300 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "$BOT_BASE_URL/api/cron/case-timeout"
 
@@ -58,7 +58,7 @@ jobs:
     steps:
       - name: GET /api/cron/graph-renew-subscription
         run: |
-          curl -fsS --max-time 60 \
+          curl -fsS --max-time 300 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "$BOT_BASE_URL/api/cron/graph-renew-subscription"
 
@@ -71,7 +71,7 @@ jobs:
     steps:
       - name: GET /api/cron/cleanup-webhook-events
         run: |
-          curl -fsS --max-time 60 \
+          curl -fsS --max-time 300 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "$BOT_BASE_URL/api/cron/cleanup-webhook-events"
 
@@ -84,6 +84,6 @@ jobs:
     steps:
       - name: GET /api/cron/loe-activation-sweep
         run: |
-          curl -fsS --max-time 60 \
+          curl -fsS --max-time 300 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "$BOT_BASE_URL/api/cron/loe-activation-sweep"

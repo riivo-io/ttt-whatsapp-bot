@@ -3,6 +3,7 @@ import { metaWhatsAppService } from './meta.service';
 import { graphMailService } from './graphMail.service';
 import { caseService } from './case.service';
 import { supabaseService } from './supabase.service';
+import { idempotencyService } from './idempotency.service';
 console.log('[boot] loeActivation.service: imports done');
 
 const TAXCREW_EMAIL = 'taxcrew@ttt-tax.co.za';
@@ -65,113 +66,119 @@ function buildTaxcrewEmail(leadName: string, phone: string | null, leadId: strin
 }
 
 /**
- * Run the post-LoE activation flow for a single lead. Idempotent — a sentinel
- * riivo_request row blocks duplicate activations. Called both by the LoE-signed
- * webhook (instant) and the hourly safety-net cron sweep.
+ * Run the post-LoE activation flow for a single lead. Called both by the
+ * LoE-signed webhook (instant) and the hourly safety-net cron sweep.
  *
- * Failure semantics: if either the WhatsApp send or taxcrew email fails the
- * sentinel is NOT written so the next sweep retries. Both are best-effort
- * within a single call.
+ * Concurrency: a Supabase-backed in-flight mutex (loe_activation_inflight)
+ * guarantees that only one invocation executes the side effects at a time
+ * for a given lead. Postgres unique-key insert is atomic, which Dynamics
+ * check-then-write is not. Without this, a webhook retry or a sweep/webhook
+ * race double-sent the "Got your LoE" WhatsApp.
+ *
+ * Failure semantics: the Dynamics sentinel is only written after WhatsApp +
+ * email both succeed, so partial failures get retried by the hourly sweep.
+ * The in-flight mutex is released in a finally block on every exit path.
  */
 export async function activateLeadPostLoe(leadId: string): Promise<ActivationResult> {
-    // Step 1: fetch lead.
-    const lead = await dynamicsService.getLeadById(leadId);
-    if (!lead) {
-        console.warn(`[Activation] lead_not_found leadId=${leadId}`);
-        return { outcome: 'lead_not_found', leadId };
+    const claimed = await idempotencyService.claimLoeActivation(leadId);
+    if (!claimed) {
+        console.log(`[Activation] in_flight_skip leadId=${leadId}`);
+        return { outcome: 'already_activated', leadId };
     }
 
-    // Step 2: idempotency check.
     try {
-        const existing = await dynamicsService.findPostLoeActivationSentinel(leadId);
-        if (existing) {
-            console.log(`[Activation] already_activated leadId=${leadId} sentinel=${existing}`);
-            return { outcome: 'already_activated', leadId, sentinelId: existing };
+        const lead = await dynamicsService.getLeadById(leadId);
+        if (!lead) {
+            console.warn(`[Activation] lead_not_found leadId=${leadId}`);
+            return { outcome: 'lead_not_found', leadId };
         }
-    } catch (e: any) {
-        console.warn(`[Activation] sentinel lookup failed leadId=${leadId}: ${e?.message || e}`);
-    }
 
-    // Step 3: lead-type guard.
-    if (lead.leadType !== null && lead.leadType !== LEAD_TYPE_TAX) {
-        console.log(`[Activation] Skipping non-Tax lead ${leadId} (leadType=${lead.leadType})`);
-        return { outcome: 'non_tax_lead', leadId };
-    }
-
-    const phone = lead.mobilephone;
-    const firstName = lead.firstname || '';
-
-    // Step 4 (phone guard): if no phone, skip WhatsApp but still email taxcrew.
-    let whatsappSent = false;
-    if (phone) {
-        const thankYouBody = buildThankYouMessage(firstName);
-        let wamid: string | null = null;
         try {
-            wamid = await metaWhatsAppService.sendMessage(phone, thankYouBody);
-            whatsappSent = true;
-            console.log(`[Activation] WhatsApp thank-you sent leadId=${leadId} phone=${phone}`);
+            const existing = await dynamicsService.findPostLoeActivationSentinel(leadId);
+            if (existing) {
+                console.log(`[Activation] already_activated leadId=${leadId} sentinel=${existing}`);
+                return { outcome: 'already_activated', leadId, sentinelId: existing };
+            }
         } catch (e: any) {
-            console.error(`[Activation] WhatsApp send failed leadId=${leadId} phone=${phone}: ${e?.message || e}`);
-            return { outcome: 'dynamics_unavailable', leadId, whatsappSent: false, error: e?.message || 'whatsapp_send_failed' };
+            console.warn(`[Activation] sentinel lookup failed leadId=${leadId}: ${e?.message || e}`);
         }
 
-        // Seed the thank-you into session history so the lead's next inbound
-        // lands with Tina knowing what was just said. Same pattern external
-        // senders use via /webhook/outbound-notify, but here we're the sender
-        // so we call the helpers directly. Best-effort — failure here doesn't
-        // unwind the activation (WhatsApp already delivered).
+        if (lead.leadType !== null && lead.leadType !== LEAD_TYPE_TAX) {
+            console.log(`[Activation] Skipping non-Tax lead ${leadId} (leadType=${lead.leadType})`);
+            return { outcome: 'non_tax_lead', leadId };
+        }
+
+        const phone = lead.mobilephone;
+        const firstName = lead.firstname || '';
+
+        let whatsappSent = false;
+        if (phone) {
+            const thankYouBody = buildThankYouMessage(firstName);
+            let wamid: string | null = null;
+            try {
+                wamid = await metaWhatsAppService.sendMessage(phone, thankYouBody);
+                whatsappSent = true;
+                console.log(`[Activation] WhatsApp thank-you sent leadId=${leadId} phone=${phone}`);
+            } catch (e: any) {
+                console.error(`[Activation] WhatsApp send failed leadId=${leadId} phone=${phone}: ${e?.message || e}`);
+                return { outcome: 'dynamics_unavailable', leadId, whatsappSent: false, error: e?.message || 'whatsapp_send_failed' };
+            }
+
+            // Seed the thank-you into session history so the lead's next inbound
+            // lands with Tina knowing what was just said. Best-effort — failure
+            // here doesn't unwind the activation (WhatsApp already delivered).
+            try {
+                const session = await supabaseService.getOrCreateSession(phone, leadId, 'lead');
+                await supabaseService.insertAssistantMessage(session.id, thankYouBody, {
+                    externalId: wamid || undefined,
+                });
+            } catch (e: any) {
+                console.warn(`[Activation] failed to seed thank-you history leadId=${leadId}: ${e?.message || e}`);
+            }
+        } else {
+            console.error(`[Activation] no_phone leadId=${leadId} — skipping WhatsApp but continuing with taxcrew email`);
+        }
+
+        const { subject, body } = buildTaxcrewEmail(lead.fullname || 'Lead', phone, leadId);
+        let emailSent = false;
         try {
-            const session = await supabaseService.getOrCreateSession(phone, leadId, 'lead');
-            await supabaseService.insertAssistantMessage(session.id, thankYouBody, {
-                externalId: wamid || undefined,
+            emailSent = await graphMailService.sendMail({ to: TAXCREW_EMAIL, subject, bodyText: body });
+            if (!emailSent) {
+                console.error(`[Activation] taxcrew email returned false leadId=${leadId}`);
+                return { outcome: 'dynamics_unavailable', leadId, whatsappSent, emailSent, error: 'taxcrew_email_failed' };
+            }
+            console.log(`[Activation] taxcrew email sent leadId=${leadId}`);
+        } catch (e: any) {
+            console.error(`[Activation] taxcrew email threw leadId=${leadId}: ${e?.message || e}`);
+            return { outcome: 'dynamics_unavailable', leadId, whatsappSent, emailSent: false, error: e?.message || 'taxcrew_email_threw' };
+        }
+
+        let sentinelId: string | null = null;
+        try {
+            sentinelId = await dynamicsService.createPostLoeActivationSentinel(leadId, phone || '');
+        } catch (e: any) {
+            console.warn(`[Activation] sentinel create threw leadId=${leadId}: ${e?.message || e}`);
+        }
+
+        let caseResolvedCount = 0;
+        try {
+            caseResolvedCount = await caseService.resolveByLeadId(leadId, {
+                skipFeedback: true,
+                reason: 'post_loe_activation',
             });
         } catch (e: any) {
-            console.warn(`[Activation] failed to seed thank-you history leadId=${leadId}: ${e?.message || e}`);
+            console.warn(`[Activation] resolveByLeadId failed leadId=${leadId}: ${e?.message || e}`);
         }
-    } else {
-        console.error(`[Activation] no_phone leadId=${leadId} — skipping WhatsApp but continuing with taxcrew email`);
-    }
 
-    // Step 5: taxcrew email.
-    const { subject, body } = buildTaxcrewEmail(lead.fullname || 'Lead', phone, leadId);
-    let emailSent = false;
-    try {
-        emailSent = await graphMailService.sendMail({ to: TAXCREW_EMAIL, subject, bodyText: body });
-        if (!emailSent) {
-            console.error(`[Activation] taxcrew email returned false leadId=${leadId}`);
-            return { outcome: 'dynamics_unavailable', leadId, whatsappSent, emailSent, error: 'taxcrew_email_failed' };
-        }
-        console.log(`[Activation] taxcrew email sent leadId=${leadId}`);
-    } catch (e: any) {
-        console.error(`[Activation] taxcrew email threw leadId=${leadId}: ${e?.message || e}`);
-        return { outcome: 'dynamics_unavailable', leadId, whatsappSent, emailSent: false, error: e?.message || 'taxcrew_email_threw' };
+        return {
+            outcome: 'activated',
+            leadId,
+            sentinelId,
+            whatsappSent,
+            emailSent,
+            caseResolvedCount,
+        };
+    } finally {
+        await idempotencyService.releaseLoeActivation(leadId);
     }
-
-    // Step 6: write sentinel only after WhatsApp + email both succeeded.
-    let sentinelId: string | null = null;
-    try {
-        sentinelId = await dynamicsService.createPostLoeActivationSentinel(leadId, phone || '');
-    } catch (e: any) {
-        console.warn(`[Activation] sentinel create threw leadId=${leadId}: ${e?.message || e}`);
-    }
-
-    // Step 7: resolve any open WhatsApp case for the lead. Non-fatal.
-    let caseResolvedCount = 0;
-    try {
-        caseResolvedCount = await caseService.resolveByLeadId(leadId, {
-            skipFeedback: true,
-            reason: 'post_loe_activation',
-        });
-    } catch (e: any) {
-        console.warn(`[Activation] resolveByLeadId failed leadId=${leadId}: ${e?.message || e}`);
-    }
-
-    return {
-        outcome: 'activated',
-        leadId,
-        sentinelId,
-        whatsappSent,
-        emailSent,
-        caseResolvedCount,
-    };
 }

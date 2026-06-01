@@ -58,6 +58,57 @@ class IdempotencyService {
     }
 
     /**
+     * Acquire an in-flight mutex for the post-LoE activation flow for a given
+     * lead. Returns true if the caller holds the claim and should proceed;
+     * false if another invocation already holds it and the caller should bail.
+     *
+     * Backs the race fix in activateLeadPostLoe(): the Dynamics sentinel
+     * check-then-write is not atomic, so two concurrent invocations both
+     * passed the check and both ran the side effects (double "Got your LoE"
+     * WhatsApp). A Postgres unique-key insert on `loe_activation_inflight` IS
+     * atomic — exactly one concurrent caller gets the row.
+     */
+    async claimLoeActivation(leadId: string): Promise<boolean> {
+        const { data, error } = await this.client
+            .from('loe_activation_inflight')
+            .upsert(
+                { lead_id: leadId },
+                { onConflict: 'lead_id', ignoreDuplicates: true }
+            )
+            .select('lead_id');
+
+        if (error) {
+            // Fail open: better to risk a rare duplicate than to block the
+            // activation entirely when Supabase is down. Same posture as
+            // claim() above.
+            console.warn('[Idempotency] claimLoeActivation failed, falling open:', error.message);
+            return true;
+        }
+
+        return Array.isArray(data) && data.length > 0;
+    }
+
+    /**
+     * Release the in-flight mutex for a lead. Called in the activation
+     * function's finally block — both success and failure release the lock
+     * because the Dynamics sentinel is the long-term completion record. On
+     * failure, releasing lets the hourly sweep retry; on success, the
+     * Dynamics sentinel check at the top of the activation function
+     * short-circuits any subsequent invocation.
+     */
+    async releaseLoeActivation(leadId: string): Promise<void> {
+        const { error } = await this.client
+            .from('loe_activation_inflight')
+            .delete()
+            .eq('lead_id', leadId);
+        if (error) {
+            // Non-fatal: a stale row will block re-entry until manually
+            // cleared, but the immediate activation has already happened.
+            console.warn(`[Idempotency] releaseLoeActivation failed for ${leadId}:`, error.message);
+        }
+    }
+
+    /**
      * Delete webhook idempotency rows older than 7 days. Meta's at-least-once
      * retry window is 7 days, so anything older is dead weight that can't
      * cause a duplicate. Returns the number of rows deleted.
