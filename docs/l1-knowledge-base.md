@@ -158,12 +158,12 @@ Never output the Dynamics case GUID to the client (existing prompt rule).
 
 - Only the **referrer** earns. The friend gets nothing.
 - Tiered cash reward (paid to referrer's bank account on file, not as invoice credit):
-  - Below R1,500 ex VAT first invoice → no reward.
-  - R1,500 to R4,999.99 ex VAT → R500.
-  - R5,000+ ex VAT → R1,000.
+  - Below R1,725 incl VAT first invoice → no reward.
+  - R1,725 to R4,999.99 incl VAT → R500.
+  - R5,000+ incl VAT → R1,000.
 - Trigger: referee pays their first TTT tax invoice **in full**. Not at signup, not at part-pay.
 - Friend must be **net-new** to TTT. Existing TTT clients converting to tax don't qualify.
-- Campaign window: signup by 20 October 2026; first invoice paid by 28 February 2027.
+- Campaign window: signup by 30 September 2026; first invoice paid by 31 December 2026.
 - Campaign starts 1 June 2026 — code exists before that, no reward payable.
 - For the personal code/link: Tina calls `get_my_referral_code` every time. Never invents a code, never quotes from memory.
 - Tina does not send the link on the client's behalf — the client forwards it themselves.

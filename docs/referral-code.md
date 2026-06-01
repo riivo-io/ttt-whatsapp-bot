@@ -1,6 +1,6 @@
 # Referral Code — Feature Spec
 
-_Status: **implemented.** Tier-aware shape live as of [Issues 11/12/13/14/15]. Last updated: 2026-05-19._
+_Status: **implemented.** Tier-aware shape live as of [Issues 11/12/13/14/15]. Last updated: 2026-05-28 (tier amounts restated incl VAT; signup cutoff moved to 30 Sep 2026; payout deadline moved to 31 Dec 2026)._
 
 Source PRD: [PRD-referral-tier-update.md](./PRD-referral-tier-update.md). Marketing brainstorm: [referral-marketing.md](./referral-marketing.md).
 
@@ -16,11 +16,11 @@ When a client asks Tina for their referral code, she needs to (1) read it from D
 | Who gets the reward | Referrer only. The friend (referee) gets nothing — no discount, no credit. |
 | Trigger event | The referee pays their first TTT tax invoice **in full**. Part-payment does not trigger. |
 | Reward form | Cash, paid directly into the referrer's bank account on file. Not an invoice credit. |
-| Tier rules (ex VAT) | <R1,500: no reward. R1,500 to R4,999.99: R500. R5,000 or more: R1,000. |
-| Tier classification | Based on the referee's first paid invoice ex-VAT total. One reward per friend (first invoice only). |
+| Tier rules (incl VAT) | <R1,725: no reward. R1,725 to R4,999.99: R500. R5,000 or more: R1,000. |
+| Tier classification | Based on the referee's first paid invoice incl-VAT total. One reward per friend (first invoice only). |
 | Campaign start | 1 June 2026. Before this date the code exists but no reward is payable. |
-| Signup cutoff | 20 October 2026. Friend must have signed up via the magic link on or before this date. |
-| Payout deadline | 28 February 2027. Friend's first invoice must be paid in full on or before this date. |
+| Signup cutoff | 30 September 2026. Friend must have signed up via the magic link on or before this date. |
+| Payout deadline | 31 December 2026. Friend's first invoice must be paid in full on or before this date. |
 | Qualifying friend | Net-new TTT contact. Existing TTT clients (any service line) signing up via the link earn no reward. |
 | Scope | Tax service line only. Accounting and advisory don't qualify. |
 | Cap | None on total earnings. Every qualifying friend earns a separate reward. |
@@ -35,10 +35,10 @@ When a client asks Tina for their referral code, she needs to (1) read it from D
 3. The client forwards the link themselves (WhatsApp, email, wherever). Tina does not send it on their behalf.
 4. The friend clicks the link. Tax service is auto-selected; the onboarding form pre-fills the referral code; friend completes sign-up.
 5. Onboarding form creates the lead in Dynamics with the referrer attributed (see §2.1 below).
-6. When the friend pays their first TTT tax invoice in full, the Dynamics workflow classifies the tier from the invoice ex-VAT total and flags the payout amount for finance:
-    - <R1,500 ex VAT: no reward (exit).
-    - R1,500 to R4,999.99 ex VAT: R500 cash to the referrer.
-    - R5,000 or more ex VAT: R1,000 cash to the referrer.
+6. When the friend pays their first TTT tax invoice in full, the Dynamics workflow classifies the tier from the invoice incl-VAT total and flags the payout amount for finance:
+    - <R1,725 incl VAT: no reward (exit).
+    - R1,725 to R4,999.99 incl VAT: R500 cash to the referrer.
+    - R5,000 or more incl VAT: R1,000 cash to the referrer.
 7. Finance is alerted via existing Power Automate flow with referrer banking details, payout amount, and friend name. Reward is paid into the referrer's bank account.
 
 The reward is a cash payment, not an invoice credit. Clients should not expect to see a line item on their next invoice.
@@ -59,8 +59,8 @@ Scope locked: tax onboarding form only. Insurance/advisory and the accounting fo
 
 This part of the contract is owned by TTT operations, not by this repo. Triggers when an invoice flips to "Paid" on a contact whose `riivo_referrer` is populated. The workflow:
 
-1. Confirms 6 pre-conditions: first paid invoice in tax line, `riivo_referrer` populated, contact is net-new, `riivo_validreferral` true, contact created between 1 Jun 2026 and 20 Oct 2026, invoice paid on or before 28 Feb 2027.
-2. Reads the invoice ex-VAT total and classifies the tier (R0 / R500 / R1,000).
+1. Confirms 6 pre-conditions: first paid invoice in tax line, `riivo_referrer` populated, contact is net-new, `riivo_validreferral` true, contact created between 1 Jun 2026 and 30 Sep 2026, invoice paid on or before 31 Dec 2026.
+2. Reads the invoice incl-VAT total and classifies the tier (R0 / R500 / R1,000).
 3. Writes the payout amount to the contact (or lead) record and sets a "payout pending" flag.
 4. Alerts finance via the existing Power Automate flow.
 5. Idempotency flag (`riivo_referralpayoutprocessed` or equivalent) short-circuits re-processing.
@@ -102,7 +102,7 @@ The `response_instructions` field is window-specific (four variants, see §4) an
 
 `current_window` is classified server-side from today's date (PRD §5.3) and selects one of four templates. The reply pattern is roughly the same shape across windows; the differences are in what the client can act on.
 
-### Active window (1 Jun 2026 to 20 Oct 2026)
+### Active window (1 Jun 2026 to 30 Sep 2026)
 
 > Here's your personal TTT referral link 🎉
 >
@@ -112,12 +112,12 @@ The `response_instructions` field is window-specific (four variants, see §4) an
 >
 > 1. Forward this link to a friend or family member. WhatsApp, email, wherever suits you. They need to be new to TTT for the reward to apply.
 > 2. They click the link and sign up. Your code is already attached, so they don't have to type anything.
-> 3. When they pay their first TTT tax invoice in full, we pay you cash into the bank account we have on file. If their first invoice is R5,000 or more (before VAT), you get R1,000. If it's between R1,500 and R5,000 (before VAT), you get R500. Below R1,500, no reward.
+> 3. When they pay their first TTT tax invoice in full, we pay you cash into the bank account we have on file. If their first invoice is R5,000 or more (incl VAT), you get R1,000. If it's between R1,725 and R5,000 (incl VAT), you get R500. Below R1,725, no reward.
 >
 > A few things worth knowing:
 > - The reward is for *you* (the referrer), not them. They don't get a discount.
 > - It's *cash into your bank account*, not a discount on your next invoice.
-> - The campaign runs until *20 October 2026*. Your friend just has to sign up by then. Their first invoice has to be settled by 28 February 2027 for the reward to land.
+> - The campaign runs until *30 September 2026*. Your friend just has to sign up by then. Their first invoice has to be settled by 31 December 2026 for the reward to land.
 > - No cap. Every new friend who signs up and pays their first invoice earns you another reward.
 >
 > (If you'd rather just give them the code: `{CODE}`. They can type it in during onboarding instead.)
@@ -132,19 +132,19 @@ The `response_instructions` field is window-specific (four variants, see §4) an
 >
 > 1. Forward this link to a friend or family member who's new to TTT.
 > 2. They click and sign up, code attached.
-> 3. When they pay their first TTT tax invoice in full, you get cash into your bank account. R1,000 if it's R5,000 or more ex VAT, R500 if it's R1,500 to R5,000, nothing below R1,500.
+> 3. When they pay their first TTT tax invoice in full, you get cash into your bank account. R1,000 if it's R5,000 or more incl VAT, R500 if it's R1,725 to R5,000, nothing below R1,725.
 >
-> Sign-ups have to happen by 20 October 2026 and first invoices have to be paid by 28 February 2027. The link's yours to keep, but no reward is payable until 1 June.
+> Sign-ups have to happen by 30 September 2026 and first invoices have to be paid by 31 December 2026. The link's yours to keep, but no reward is payable until 1 June.
 
-### Signup-closed, rewards-pending window (21 Oct 2026 to 28 Feb 2027)
+### Signup-closed, rewards-pending window (1 Oct 2026 to 31 Dec 2026)
 
-> The referral signup window closed on *20 October 2026*, so new referrals from this point on don't qualify for a reward.
+> The referral signup window closed on *30 September 2026*, so new referrals from this point on don't qualify for a reward.
 >
-> If your friend already signed up before 20 October, you're still in. The reward kicks in when they pay their first TTT tax invoice in full, and that needs to happen on or before *28 February 2027*.
+> If your friend already signed up before 30 September, you're still in. The reward kicks in when they pay their first TTT tax invoice in full, and that needs to happen on or before *31 December 2026*.
 >
 > Here's your link for reference (don't share it expecting a reward now): **https://ttt-tax.co.za/client-onboarding?ref={CODE}&service=tax**
 
-### Fully-closed window (1 Mar 2027 onwards)
+### Fully-closed window (1 Jan 2027 onwards)
 
 > The campaign's done — no rewards are payable for any new or existing referrals.
 >
@@ -160,7 +160,7 @@ These constraints live verbatim in [src/services/referral-window.ts](../src/serv
 4. Always state who gets the reward (referrer only). The friend gets nothing.
 5. Always describe the reward as cash into the referrer's bank account. Never "discount", "credit", or "off your invoice".
 6. Always state the tier rules in plain English so the client knows what to expect.
-7. Always cite both deadlines: signup by 20 Oct 2026, first invoice paid in full by 28 Feb 2027.
+7. Always cite both deadlines: signup by 30 Sep 2026, first invoice paid in full by 31 Dec 2026.
 8. Never promise a payout date. It depends on when the friend pays.
 9. Never say the friend also gets a reward.
 10. The friend must be net-new to TTT. Existing TTT clients signing up don't qualify.
@@ -184,10 +184,10 @@ Follow [bot-personality.md](./bot-personality.md). Warm, light, specific. The �
 | Client asks Tina to send the link to their friend | Politely decline. "The link's yours to share, so forward it from your own WhatsApp or email. That way your friend knows it came from you." |
 | Client asks "when will I get paid?" | "As soon as your friend pays their first TTT invoice in full, it goes straight into your bank account on file. I can't give you a specific date; your consultant can check progress." |
 | Client asks if the reward will appear on their invoice | Correct the misunderstanding explicitly. "It's a cash payment into your bank account, not a discount on your invoice." |
-| Friend's first invoice is below R1,500 ex VAT | No reward. The bot's copy already states this in the tier rules; the Dynamics workflow exits at tier classification. |
+| Friend's first invoice is below R1,725 incl VAT | No reward. The bot's copy already states this in the tier rules; the Dynamics workflow exits at tier classification. |
 | Friend is an existing TTT client signing up via the link | Out of scope per the net-new rule. Dynamics workflow exits at pre-condition 3 (not net-new). No bot-side check needed: copy says "your friend has to be new to TTT" and that's the extent. |
-| Friend signs up after 20 Oct 2026 | No reward, even if first invoice is paid in time. `current_window` flips to `signup_closed_rewards_pending` and the copy explains this. Dynamics workflow exits at pre-condition 5. |
-| Friend pays first invoice after 28 Feb 2027 | No reward. Dynamics workflow exits at pre-condition 6. |
+| Friend signs up after 30 Sep 2026 | No reward, even if first invoice is paid in time. `current_window` flips to `signup_closed_rewards_pending` and the copy explains this. Dynamics workflow exits at pre-condition 5. |
+| Friend pays first invoice after 31 Dec 2026 | No reward. Dynamics workflow exits at pre-condition 6. |
 | Friend later refunded or credited | Out of scope for v1. Finance team handles clawback manually if needed. Workflow does not roll back. |
 | Client's banking details aren't on file | Workflow flags the record for finance follow-up. No auto-payout. Bot does not check this up front. |
 
@@ -204,4 +204,4 @@ Follow [bot-personality.md](./bot-personality.md). Warm, light, specific. The �
 - [ ] Dynamics-side workflow (TTT operations). Contract in PRD §5.5. Owner: TTT ops. Target before 1 Jun 2026 launch.
 - [ ] Numeric targets for success metrics (PRD §2). Owner: TTT.
 - [ ] Real-estate-agent classification source documented in Dynamics. Owner: TTT ops.
-- [ ] Post-campaign readout on 15 March 2027.
+- [ ] Post-campaign readout on 15 January 2027.

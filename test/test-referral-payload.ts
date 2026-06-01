@@ -65,23 +65,23 @@ assert(fullyClosed.response_instructions === RESPONSE_INSTRUCTIONS.fully_closed,
 // ---------------------------------------------------------------------------
 console.log('\nbuildReferralCodePayload — boundary dates');
 assert(buildReferralCodePayload({ code: CODE, currentDate: '2026-06-01' }).current_window === 'active', '2026-06-01 (campaign start) → active');
-assert(buildReferralCodePayload({ code: CODE, currentDate: '2026-10-20' }).current_window === 'active', '2026-10-20 (signup cutoff) → active');
-assert(buildReferralCodePayload({ code: CODE, currentDate: '2026-10-21' }).current_window === 'signup_closed_rewards_pending', '2026-10-21 → signup_closed_rewards_pending');
-assert(buildReferralCodePayload({ code: CODE, currentDate: '2027-02-28' }).current_window === 'signup_closed_rewards_pending', '2027-02-28 (payout deadline) → signup_closed_rewards_pending');
-assert(buildReferralCodePayload({ code: CODE, currentDate: '2027-03-01' }).current_window === 'fully_closed', '2027-03-01 → fully_closed');
+assert(buildReferralCodePayload({ code: CODE, currentDate: '2026-09-30' }).current_window === 'active', '2026-09-30 (signup cutoff) → active');
+assert(buildReferralCodePayload({ code: CODE, currentDate: '2026-10-01' }).current_window === 'signup_closed_rewards_pending', '2026-10-01 → signup_closed_rewards_pending');
+assert(buildReferralCodePayload({ code: CODE, currentDate: '2026-12-31' }).current_window === 'signup_closed_rewards_pending', '2026-12-31 (payout deadline) → signup_closed_rewards_pending');
+assert(buildReferralCodePayload({ code: CODE, currentDate: '2027-01-01' }).current_window === 'fully_closed', '2027-01-01 → fully_closed');
 
 // ---------------------------------------------------------------------------
 // Issue 12 acceptance: tier_rules shape (PRD §5.2)
 // ---------------------------------------------------------------------------
 console.log('\ntier_rules shape (Issue 12 / PRD §5.2)');
-assert(active.tier_rules.below_floor.min_ex_vat === null, 'below_floor.min_ex_vat = null');
-assert(active.tier_rules.below_floor.max_ex_vat === 1499.99, 'below_floor.max_ex_vat = 1499.99');
+assert(active.tier_rules.below_floor.min_incl_vat === null, 'below_floor.min_incl_vat = null');
+assert(active.tier_rules.below_floor.max_incl_vat === 1724.99, 'below_floor.max_incl_vat = 1724.99');
 assert(active.tier_rules.below_floor.reward_zar === 0, 'below_floor.reward_zar = 0');
-assert(active.tier_rules.tier_1.min_ex_vat === 1500, 'tier_1.min_ex_vat = 1500');
-assert(active.tier_rules.tier_1.max_ex_vat === 4999.99, 'tier_1.max_ex_vat = 4999.99');
+assert(active.tier_rules.tier_1.min_incl_vat === 1725, 'tier_1.min_incl_vat = 1725');
+assert(active.tier_rules.tier_1.max_incl_vat === 4999.99, 'tier_1.max_incl_vat = 4999.99');
 assert(active.tier_rules.tier_1.reward_zar === 500, 'tier_1.reward_zar = 500');
-assert(active.tier_rules.tier_2.min_ex_vat === 5000, 'tier_2.min_ex_vat = 5000');
-assert(active.tier_rules.tier_2.max_ex_vat === null, 'tier_2.max_ex_vat = null');
+assert(active.tier_rules.tier_2.min_incl_vat === 5000, 'tier_2.min_incl_vat = 5000');
+assert(active.tier_rules.tier_2.max_incl_vat === null, 'tier_2.max_incl_vat = null');
 assert(active.tier_rules.tier_2.reward_zar === 1000, 'tier_2.reward_zar = 1000');
 assert(active.tier_rules === TIER_RULES, 'tier_rules is the shared constant (no per-call allocation)');
 
@@ -105,8 +105,8 @@ assert(
 // ---------------------------------------------------------------------------
 console.log('\ntop-level dates (PRD §5.2)');
 assert(active.campaign_start === CAMPAIGN_START_DATE, 'campaign_start = 2026-06-01');
-assert(active.signup_cutoff === SIGNUP_CUTOFF_DATE, 'signup_cutoff = 2026-10-20');
-assert(active.payout_deadline === PAYOUT_DEADLINE_DATE, 'payout_deadline = 2027-02-28');
+assert(active.signup_cutoff === SIGNUP_CUTOFF_DATE, 'signup_cutoff = 2026-09-30');
+assert(active.payout_deadline === PAYOUT_DEADLINE_DATE, 'payout_deadline = 2026-12-31');
 assert(active.current_date === '2026-07-15', 'current_date echoed back as YYYY-MM-DD');
 assert(active.code === CODE, 'code echoed back');
 
@@ -117,10 +117,10 @@ console.log('\nresponse_instructions content invariants (§5.4)');
 assert(RESPONSE_INSTRUCTIONS.active.includes('CRITICAL'), 'active instructions contain CRITICAL clause');
 assert(/NEVER offer to send the link/i.test(RESPONSE_INSTRUCTIONS.active), 'active instructions forbid sending on client\'s behalf');
 assert(RESPONSE_INSTRUCTIONS.active.includes('cash payment'), 'active instructions say cash payment');
-assert(RESPONSE_INSTRUCTIONS.active.includes('28 February 2027'), 'active instructions cite payout deadline');
-assert(RESPONSE_INSTRUCTIONS.active.includes('20 October 2026'), 'active instructions cite signup deadline');
+assert(RESPONSE_INSTRUCTIONS.active.includes('31 December 2026'), 'active instructions cite payout deadline');
+assert(RESPONSE_INSTRUCTIONS.active.includes('30 September 2026'), 'active instructions cite signup deadline');
 assert(RESPONSE_INSTRUCTIONS.pre_launch.includes('1 June 2026'), 'pre_launch instructions cite start date');
-assert(RESPONSE_INSTRUCTIONS.signup_closed_rewards_pending.includes('20 October 2026'), 'signup_closed instructions cite cutoff');
+assert(RESPONSE_INSTRUCTIONS.signup_closed_rewards_pending.includes('30 September 2026'), 'signup_closed instructions cite cutoff');
 assert(RESPONSE_INSTRUCTIONS.fully_closed.includes('we\'ll let you know if we run it again'), 'fully_closed instructions include sign-off line');
 
 console.log(`\n${passed} passed, ${failed} failed`);

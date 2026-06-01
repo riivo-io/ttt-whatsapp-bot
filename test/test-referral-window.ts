@@ -31,10 +31,10 @@ assertEqual(getReferralWindow('2027-03-15'), 'fully_closed', '2027-03-15 → ful
 console.log('\ngetReferralWindow — boundary dates');
 assertEqual(getReferralWindow('2026-05-31'), 'pre_launch', '2026-05-31 (last pre_launch day) → pre_launch');
 assertEqual(getReferralWindow('2026-06-01'), 'active', '2026-06-01 (campaign start, inclusive) → active');
-assertEqual(getReferralWindow('2026-10-20'), 'active', '2026-10-20 (signup cutoff, inclusive) → active');
-assertEqual(getReferralWindow('2026-10-21'), 'signup_closed_rewards_pending', '2026-10-21 (day after cutoff) → signup_closed_rewards_pending');
-assertEqual(getReferralWindow('2027-02-28'), 'signup_closed_rewards_pending', '2027-02-28 (payout deadline, inclusive) → signup_closed_rewards_pending');
-assertEqual(getReferralWindow('2027-03-01'), 'fully_closed', '2027-03-01 (day after deadline) → fully_closed');
+assertEqual(getReferralWindow('2026-09-30'), 'active', '2026-09-30 (signup cutoff, inclusive) → active');
+assertEqual(getReferralWindow('2026-10-01'), 'signup_closed_rewards_pending', '2026-10-01 (day after cutoff) → signup_closed_rewards_pending');
+assertEqual(getReferralWindow('2026-12-31'), 'signup_closed_rewards_pending', '2026-12-31 (payout deadline, inclusive) → signup_closed_rewards_pending');
+assertEqual(getReferralWindow('2027-01-01'), 'fully_closed', '2027-01-01 (day after deadline) → fully_closed');
 
 console.log('\ngetReferralWindow — Date objects accepted');
 assertEqual(getReferralWindow(new Date('2026-07-15')), 'active', 'Date(2026-07-15) → active');

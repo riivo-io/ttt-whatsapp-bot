@@ -10,11 +10,11 @@ Companion to [referral-code.md](./referral-code.md), which covers the mechanics.
 
 For anyone reading cold:
 
-- **Window:** 1 June 2026 to 20 October 2026 (cutoff semantics TBD, see [referral-code.md](./referral-code.md))
-- **Tiers (referee's first invoice, ex VAT):**
-  - R1,500 to R4,999.99 → R500 cash to referrer
+- **Window:** 1 June 2026 to 30 September 2026 (cutoff semantics TBD, see [referral-code.md](./referral-code.md))
+- **Tiers (referee's first invoice, incl VAT):**
+  - R1,725 to R4,999.99 → R500 cash to referrer
   - R5,000 or more → R1,000 cash to referrer
-  - Below R1,500 → no payout
+  - Below R1,725 → no payout
 - **Scope:** tax services only (accounting and advisory not yet wired up)
 - **Mechanism:** existing TTT clients share a magic link from Tina. Friend signs up via the link, pays first tax invoice, referrer gets paid into the bank account TTT has on file.
 - **No cap** on how many friends a single client can refer.
@@ -30,7 +30,7 @@ Tina is already the delivery mechanism for the magic link. She's also the most u
 ### 2a. Proactive moments (with care)
 After a clearly positive interaction, Tina can mention the programme once. Good moments:
 
-- **Refund just landed.** Client is happy. "Glad that came through. If you've got friends still wrestling with their returns, you've got a referral link that earns you R500 to R1,000 per friend until October. Want me to send it?"
+- **Refund just landed.** Client is happy. "Glad that came through. If you've got friends still wrestling with their returns, you've got a referral link that earns you R500 to R1,000 per friend until end of September. Want me to send it?"
 - **Case resolved.** Same pattern.
 - **End of a complex consultation.** "While I've got you, here's something worth knowing..."
 
@@ -45,7 +45,7 @@ Anti-patterns:
 The interactive first-message menus (see [interactive-first-message-menus.md](./interactive-first-message-menus.md)) could carry a "Get my referral link" option during the campaign window. Removes the discoverability problem.
 
 ### 2c. Campaign-end urgency push
-Two to three weeks before 20 October, Tina could proactively message clients with the tier breakdown and a "campaign ends soon" framing. This is the highest-conversion moment for most referral programmes. Needs an opt-out path.
+Two to three weeks before 30 September, Tina could proactively message clients with the tier breakdown and a "campaign ends soon" framing. This is the highest-conversion moment for most referral programmes. Needs an opt-out path.
 
 ---
 
@@ -54,17 +54,17 @@ Two to three weeks before 20 October, Tina could proactively message clients wit
 The bot only reaches clients who message in. Most clients won't. So:
 
 ### 3a. Invoice footer
-Every TTT tax invoice should carry one line: "Refer a friend, earn R500 to R1,000 until 20 October 2026. Ask your consultant or message Tina." Invoices are read. Newsletters aren't.
+Every TTT tax invoice should carry one line: "Refer a friend, earn R500 to R1,000 until 30 September 2026. Ask your consultant or message Tina." Invoices are read. Newsletters aren't.
 
 ### 3b. Consultant email signatures
 TTT consultants email clients constantly. A signature line for the campaign window only:
 
-> "Until 20 October: refer a friend, earn R500 to R1,000 per referral. Message Tina on WhatsApp for your link."
+> "Until 30 September: refer a friend, earn R500 to R1,000 per referral. Message Tina on WhatsApp for your link."
 
 Costs nothing. Hits every client touchpoint.
 
 ### 3c. Outbound template message
-Meta-approved WhatsApp template message (see [meta-templates.md](./meta-templates.md)) sent once at campaign launch and once again ~2 weeks before close. Two touches over 4.5 months is restrained enough to not feel spammy.
+Meta-approved WhatsApp template message (see [meta-templates.md](./meta-templates.md)) sent once at campaign launch and once again ~2 weeks before close. Two touches over 4 months is restrained enough to not feel spammy.
 
 ### 3d. Social proof
 A monthly "we paid out R[X] this month to clients who referred friends" post on LinkedIn. Doesn't require naming names. Makes the programme feel real and active rather than theoretical.
@@ -91,9 +91,9 @@ Don't bury the R1,500 floor in fine print. Clients who refer a friend who gets a
 The campaign runs through two distinct seasons:
 
 - **June to August:** post-tax-season cleanup. Clients who just had a stressful return are primed to recommend a calm, competent firm.
-- **September to October:** provisional tax season. Existing clients are talking to their friends about tax anyway. Topical.
+- **September:** provisional tax season opens. Existing clients are talking to their friends about tax anyway. Topical.
 
-A coordinated launch push in early June and a closing push in early October will outperform anything in the quiet middle.
+A coordinated launch push in early June and a closing push in early September will outperform anything in the quiet middle.
 
 ### 5a. Tie to news moments
 Whenever SARS announces something (filing season opens, e-filing changes, audit shifts), TTT can piggyback with "if your friends are confused, refer them and earn R500 to R1,000." News moments are when people share tax-related content anyway.
@@ -138,8 +138,8 @@ The bot side can count tool calls and link generations cleanly. Lead conversion 
 
 These shape what marketing copy can promise:
 
-1. Is the 20 October cutoff a **signup** date or a **first-invoice-paid** date? (Affects every piece of outbound copy.)
-2. Is there a payment-side deadline if signup is the gate? (Currently proposed: 28 February 2027.)
+1. Is the 30 September cutoff a **signup** date or a **first-invoice-paid** date? (Affects every piece of outbound copy.)
+2. Is there a payment-side deadline if signup is the gate? (Currently proposed: 31 December 2026.)
 3. Will the programme broaden to **accounting and advisory** during this campaign window? The R1,000 tier is much more meaningful for those services.
 4. Is there a marketing budget for paid amplification (invoice footers, email signature rollout, outbound template), or is this all organic?
 5. Who owns the campaign post-launch — consultants for one-on-one nudges, marketing for broadcast?
@@ -152,6 +152,6 @@ If TTT only does three things:
 
 1. **Add a line to every tax invoice** for the campaign window. Cheapest, highest reach.
 2. **Consultant email signature update** for the campaign window. Free, hits every client touchpoint.
-3. **One Tina-led WhatsApp template push** at launch (early June) and one at close (early October). Two messages over 4.5 months.
+3. **One Tina-led WhatsApp template push** at launch (early June) and one at close (early September). Two messages over 4 months.
 
 Everything else is upside.
