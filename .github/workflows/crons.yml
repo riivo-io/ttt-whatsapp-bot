@@ -1,0 +1,89 @@
+name: Bot cron triggers
+
+# Fires the HTTP cron endpoints in src/routes/cron.route.ts.
+# These used to be triggered by vercel.json crons; since the bot moved to
+# Azure App Service, vercel.json is dead weight and GitHub Actions takes
+# over the scheduling.
+#
+# Auth: each endpoint checks Authorization: Bearer ${CRON_SECRET}. The
+# CRON_SECRET repo secret must match the bot's CRON_SECRET env var on Azure.
+#
+# Heads-up: GitHub disables scheduled workflows after 60 days of repo
+# inactivity (email warning sent first). And scheduled workflows only fire
+# from the default branch — this file must be on main to start firing.
+
+on:
+  schedule:
+    - cron: '0 2 * * *'    # case-timeout            (daily 02:00 UTC)
+    - cron: '0 */6 * * *'  # graph-renew-subscription (every 6h)
+    - cron: '0 3 * * *'    # cleanup-webhook-events   (daily 03:00 UTC)
+    - cron: '0 * * * *'    # loe-activation-sweep     (hourly)
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Cron to fire manually'
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - case-timeout
+          - graph-renew-subscription
+          - cleanup-webhook-events
+          - loe-activation-sweep
+
+env:
+  BOT_BASE_URL: https://ttt-prod-bot-fpbwezdygqbdh8a7.southafricanorth-01.azurewebsites.net
+
+jobs:
+  case-timeout:
+    if: >-
+      github.event.schedule == '0 2 * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+        (inputs.target == 'case-timeout' || inputs.target == 'all'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /api/cron/case-timeout
+        run: |
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$BOT_BASE_URL/api/cron/case-timeout"
+
+  graph-renew-subscription:
+    if: >-
+      github.event.schedule == '0 */6 * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+        (inputs.target == 'graph-renew-subscription' || inputs.target == 'all'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /api/cron/graph-renew-subscription
+        run: |
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$BOT_BASE_URL/api/cron/graph-renew-subscription"
+
+  cleanup-webhook-events:
+    if: >-
+      github.event.schedule == '0 3 * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+        (inputs.target == 'cleanup-webhook-events' || inputs.target == 'all'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /api/cron/cleanup-webhook-events
+        run: |
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$BOT_BASE_URL/api/cron/cleanup-webhook-events"
+
+  loe-activation-sweep:
+    if: >-
+      github.event.schedule == '0 * * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+        (inputs.target == 'loe-activation-sweep' || inputs.target == 'all'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /api/cron/loe-activation-sweep
+        run: |
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$BOT_BASE_URL/api/cron/loe-activation-sweep"
