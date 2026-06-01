@@ -7,6 +7,8 @@ import pdfRoute from './routes/pdf.route';
 import cronRoute from './routes/cron.route';
 import emailRoute from './routes/email.route';
 import loeSignedRoute from './routes/loeSigned.route';
+import outboundNotifyRoute from './routes/outboundNotify.route';
+import adminRoute from './routes/admin.route';
 console.log('[boot] server.ts: all imports resolved');
 
 dotenv.config();
@@ -21,6 +23,7 @@ app.use(cors());
 // mount BEFORE the global express.json() parser, otherwise the body stream is
 // consumed before the route's own raw-body middleware sees it.
 app.use('/webhook/loe-signed', loeSignedRoute);
+app.use('/webhook/outbound-notify', outboundNotifyRoute);
 
 app.use(express.json());
 
@@ -33,6 +36,7 @@ app.post('/webhook', handleIncomingMessage);
 
 app.use('/api/pdf', pdfRoute);
 app.use('/api/cron', cronRoute);
+app.use('/admin', adminRoute);
 app.use('/webhook/email', emailRoute);
 
 const server = app.listen(PORT, () => {

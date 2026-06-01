@@ -2,6 +2,7 @@ import { dynamicsService, LEAD_TYPE_TAX } from './dynamics.service';
 import { metaWhatsAppService } from './meta.service';
 import { graphMailService } from './graphMail.service';
 import { caseService } from './case.service';
+import { supabaseService } from './supabase.service';
 console.log('[boot] loeActivation.service: imports done');
 
 const TAXCREW_EMAIL = 'taxcrew@ttt-tax.co.za';
@@ -103,13 +104,29 @@ export async function activateLeadPostLoe(leadId: string): Promise<ActivationRes
     // Step 4 (phone guard): if no phone, skip WhatsApp but still email taxcrew.
     let whatsappSent = false;
     if (phone) {
+        const thankYouBody = buildThankYouMessage(firstName);
+        let wamid: string | null = null;
         try {
-            await metaWhatsAppService.sendMessage(phone, buildThankYouMessage(firstName));
+            wamid = await metaWhatsAppService.sendMessage(phone, thankYouBody);
             whatsappSent = true;
             console.log(`[Activation] WhatsApp thank-you sent leadId=${leadId} phone=${phone}`);
         } catch (e: any) {
             console.error(`[Activation] WhatsApp send failed leadId=${leadId} phone=${phone}: ${e?.message || e}`);
             return { outcome: 'dynamics_unavailable', leadId, whatsappSent: false, error: e?.message || 'whatsapp_send_failed' };
+        }
+
+        // Seed the thank-you into session history so the lead's next inbound
+        // lands with Tina knowing what was just said. Same pattern external
+        // senders use via /webhook/outbound-notify, but here we're the sender
+        // so we call the helpers directly. Best-effort — failure here doesn't
+        // unwind the activation (WhatsApp already delivered).
+        try {
+            const session = await supabaseService.getOrCreateSession(phone, leadId, 'lead');
+            await supabaseService.insertAssistantMessage(session.id, thankYouBody, {
+                externalId: wamid || undefined,
+            });
+        } catch (e: any) {
+            console.warn(`[Activation] failed to seed thank-you history leadId=${leadId}: ${e?.message || e}`);
         }
     } else {
         console.error(`[Activation] no_phone leadId=${leadId} — skipping WhatsApp but continuing with taxcrew email`);

@@ -287,6 +287,44 @@ class SupabaseService {
     }
 
     /**
+     * Insert an assistant-role message with optional idempotency via external_id.
+     * Used by /webhook/outbound-notify and the LoE thank-you retrofit to seed
+     * history for sends that happen outside the inbound flow. When externalId
+     * is provided and collides with an existing row, the insert is a no-op and
+     * we return { inserted: false } so the caller can surface "duplicate" to
+     * the sender.
+     */
+    async insertAssistantMessage(
+        sessionId: string,
+        content: string,
+        opts?: { externalId?: string; createdAt?: string }
+    ): Promise<{ inserted: boolean }> {
+        const row: Record<string, any> = {
+            session_id: sessionId,
+            role: 'assistant',
+            content,
+        };
+        if (opts?.externalId) row.external_id = opts.externalId;
+        if (opts?.createdAt) row.timestamp = opts.createdAt;
+
+        const { data, error } = await this.client
+            .from('messages')
+            .insert(row)
+            .select('id');
+
+        if (error) {
+            // 23505 = unique violation on external_id — silent dedup.
+            if ((error as any).code === '23505') {
+                console.log(`[Supabase] insertAssistantMessage duplicate external_id=${opts?.externalId} session=${sessionId}`);
+                return { inserted: false };
+            }
+            console.error('[Supabase] Failed to insert assistant message:', error.message);
+            return { inserted: false };
+        }
+        return { inserted: (data?.length || 0) > 0 };
+    }
+
+    /**
      * Get conversation history for a session, ordered oldest-first for Claude context.
      */
     async getHistory(sessionId: string): Promise<{ role: 'user' | 'assistant'; content: string }[]> {

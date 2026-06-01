@@ -47,10 +47,10 @@ export class MetaWhatsAppService {
         return getActivePhoneNumberId() || this.phoneNumberId;
     }
 
-    async sendMessage(to: string, message: string): Promise<void> {
+    async sendMessage(to: string, message: string): Promise<string | null> {
         if (!this.token || !this.phoneNumberId) {
             console.error('Cannot send message: Meta configuration missing');
-            return;
+            return null;
         }
 
         const cleaned = sanitizeForWhatsApp(message);
@@ -68,14 +68,16 @@ export class MetaWhatsAppService {
                 }
             };
 
-            await axios.post(url, payload, {
+            const res = await axios.post(url, payload, {
                 headers: {
                     'Authorization': `Bearer ${this.token}`,
                     'Content-Type': 'application/json'
                 }
             });
 
-            console.log(`[Meta WhatsApp] Sent message to ${to}`);
+            const messageId: string | null = res.data?.messages?.[0]?.id || null;
+            console.log(`[Meta WhatsApp] Sent message to ${to}${messageId ? ` (${messageId})` : ''}`);
+            return messageId;
         } catch (error: any) {
             console.error('[Meta WhatsApp] Failed to send message:', error?.response?.data || error.message);
             throw error;

@@ -1,31 +1,12 @@
 import { Router, Request, Response } from 'express';
 import express from 'express';
-import crypto from 'crypto';
 import { activateLeadPostLoe } from '../services/loeActivation.service';
+import { verifyHmacSha256 } from '../utils/hmac';
 console.log('[boot] loeSigned.route: imports done');
 
 const router = Router();
 
 const SIGNATURE_HEADER = 'x-loe-signature';
-
-/**
- * Constant-time HMAC-SHA256 verification of the request body against the
- * `X-LoE-Signature` header. Returns true if the signature matches the secret.
- * Both values are hex-encoded.
- */
-function verifySignature(rawBody: Buffer, headerSig: string | undefined, secret: string): boolean {
-    if (!headerSig) return false;
-    const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-    const a = Buffer.from(expected, 'utf8');
-    let b: Buffer;
-    try {
-        b = Buffer.from(headerSig, 'utf8');
-    } catch {
-        return false;
-    }
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-}
 
 /**
  * POST /webhook/loe-signed
@@ -51,7 +32,7 @@ router.post(
         const rawBody: Buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
         const headerSig = req.header(SIGNATURE_HEADER) || req.header('X-LoE-Signature');
 
-        if (!verifySignature(rawBody, headerSig, secret)) {
+        if (!verifyHmacSha256(rawBody, headerSig, secret)) {
             console.warn('[LoESigned] bad_signature received');
             res.status(401).json({ error: 'bad_signature' });
             return;
