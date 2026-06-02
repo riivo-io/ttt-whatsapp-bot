@@ -182,6 +182,58 @@ router.get('/loe-activation-sweep', async (req: Request, res: Response) => {
     }
 });
 
+/**
+ * One-shot recovery endpoint. Writes a post-LoE activation sentinel for every
+ * lead currently in the `loereceived=true, no sentinel` set, WITHOUT firing
+ * the WhatsApp or taxcrew email side effects.
+ *
+ * Needed because createPostLoeActivationSentinel was previously rolling back
+ * on the create (Dynamics rejects create-as-Inactive+RESOLVED_BY_BOT), so
+ * leads that received the WhatsApp + taxcrew email overnight have no
+ * sentinel and would be re-blasted by the next sweep. Run this once after
+ * deploying the sentinel fix and before re-enabling the cron schedule.
+ *
+ * Auth: same CRON_SECRET bearer token as the other cron endpoints.
+ */
+router.get('/loe-sentinel-backfill', async (req: Request, res: Response) => {
+    if (!isAuthorized(req)) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+
+    const summary: { written: number; failed: number; total: number } = {
+        written: 0,
+        failed: 0,
+        total: 0,
+    };
+
+    try {
+        const leads = await dynamicsService.findLeadsAwaitingPostLoeActivation();
+        summary.total = leads.length;
+        console.log(`[Cron] loe-sentinel-backfill: ${leads.length} lead(s) to backfill`);
+        for (const { id } of leads) {
+            try {
+                const lead = await dynamicsService.getLeadById(id);
+                const phone = lead?.mobilephone || '';
+                const sentinelId = await dynamicsService.createPostLoeActivationSentinel(id, phone);
+                if (sentinelId) {
+                    summary.written += 1;
+                } else {
+                    summary.failed += 1;
+                    console.warn(`[Cron] loe-sentinel-backfill: createPostLoeActivationSentinel returned null for lead ${id}`);
+                }
+            } catch (e: any) {
+                summary.failed += 1;
+                console.warn(`[Cron] loe-sentinel-backfill failed for ${id}: ${e?.message || e}`);
+            }
+        }
+        res.json({ ok: true, summary });
+    } catch (e: any) {
+        console.error('[Cron] loe-sentinel-backfill failed:', e?.message || e);
+        res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+    }
+});
+
 router.get('/cleanup-webhook-events', async (req: Request, res: Response) => {
     if (!isAuthorized(req)) {
         res.status(401).json({ error: 'unauthorized' });

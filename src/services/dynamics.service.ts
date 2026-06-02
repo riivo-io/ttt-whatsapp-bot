@@ -1475,9 +1475,18 @@ export class DynamicsService {
     }
 
     /**
-     * Write the post-LoE activation sentinel — an inactive riivo_request row
-     * tagged with classificationtopic = 'post_loe_activation'. Future activations
-     * are short-circuited by findPostLoeActivationSentinel.
+     * Write the post-LoE activation sentinel — a riivo_request row tagged with
+     * classificationtopic = 'post_loe_activation'. Future activations are
+     * short-circuited by findPostLoeActivationSentinel.
+     *
+     * Dynamics does NOT allow create-as-inactive directly: the create silently
+     * keeps state=Active, and any statuscode that's only valid in Inactive
+     * (e.g. RESOLVED_BY_BOT=2) then rolls the transaction back with
+     * "N is not a valid status code for state code riivo_RequestState.Active".
+     * The canonical pattern (see resolveOpenOtpRequestsForLead) is
+     * create-active-then-patch-inactive. The sentinel only needs to be
+     * findable, so even if the PATCH fails the row exists and idempotency
+     * holds.
      */
     async createPostLoeActivationSentinel(leadId: string, phoneNumber: string): Promise<string | null> {
         const payload: any = {
@@ -1487,17 +1496,25 @@ export class DynamicsService {
             riivo_priority: 1,
             riivo_description: 'Post-LoE activation processed (sentinel).',
             riivo_classificationtopic: 'post_loe_activation',
-            statecode: REQUEST_STATE.INACTIVE,
-            statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
+            statecode: REQUEST_STATE.ACTIVE,
+            statuscode: REQUEST_STATUSCODE.NEW,
             'riivo_Lead@odata.bind': `/new_leads(${leadId})`,
         };
+        let requestId: string | null = null;
         try {
             const response = await this.crmPost('riivo_requests', payload, leadId);
-            return response.data?.riivo_requestid || null;
+            requestId = response.data?.riivo_requestid || null;
         } catch (error: any) {
             console.error(`[Dynamics CRM] createPostLoeActivationSentinel failed for lead ${leadId}:`, error?.response?.data?.error?.message || error.message);
             return null;
         }
+        if (requestId) {
+            await this.updateRequest(requestId, {
+                statecode: REQUEST_STATE.INACTIVE,
+                statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
+            });
+        }
+        return requestId;
     }
 
     /**
