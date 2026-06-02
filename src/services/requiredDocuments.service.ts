@@ -45,7 +45,8 @@ type DocSpec = { label: string; notes?: string };
  * Docs every client needs regardless of source code or industry.
  */
 const BASELINE_DOCS: DocSpec[] = [
-    { label: 'ID Document', notes: 'only if not already on file' },
+    { label: 'IRP5' },
+    { label: 'Bank statements', notes: 'covering the full tax year' },
     { label: 'IT3(b) — interest earned', notes: 'from each bank / savings account' },
     { label: 'Medical aid tax certificate', notes: 'only if you are on a medical scheme' },
     { label: 'Retirement Annuity (RA) tax certificate', notes: 'only if you contribute to an RA' },
