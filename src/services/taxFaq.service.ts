@@ -23,6 +23,7 @@
 import { dynamicsService } from './dynamics.service';
 import { graphMailService } from './graphMail.service';
 import { computeRequiredDocuments } from './requiredDocuments.service';
+import { getPersonalizedForms, formatTrailingLine } from './taxForms.service';
 import { summariseAuditDuration } from '../utils/workingDays';
 
 const FAQ_FEATURE_FLAGS = {
@@ -391,6 +392,12 @@ export async function handleGetRequiredDocuments(params: {
         }
         lines.push('');
         lines.push("Reply with the file directly — I'll route it to your consultant.");
+    }
+
+    const relevantForms = getPersonalizedForms(sourceCodes);
+    if (relevantForms.length > 0) {
+        lines.push('');
+        lines.push(formatTrailingLine(relevantForms, sourceCodes));
     }
 
     return JSON.stringify({

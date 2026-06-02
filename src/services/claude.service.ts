@@ -17,6 +17,15 @@ import { supabaseService } from './supabase.service';
 import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from './pendingUpload.service';
 import { sharePointService } from './sharepoint.service';
 import { computeRequiredDocuments, formatRequiredDocumentsMessage, computeMissingDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
+import {
+    TAX_FORMS,
+    getAllForms,
+    getFormByKey,
+    getPersonalizedForms,
+    formatCatalogMessage,
+    formatSendCaption,
+    resolveLatestFormFile,
+} from './taxForms.service';
 import { computeCostUsd, totalTokens } from './claudePricing.service';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
 import { RateLimitError, callAnthropicMessages, type RateLimitHeaders } from '../utils/anthropicRateLimit';
@@ -258,6 +267,32 @@ const TOOLS: Anthropic.Tool[] = [
                 tax_year: { type: "number", description: "Optional 4-digit tax year (e.g. 2026) if the client specifies one. Omit to use the most recent preseason record." },
             },
             required: [],
+        },
+    },
+    {
+        name: "list_tax_forms",
+        description: "List the blank tax forms the client can fill in. Use mode=\"personalized\" by default (filters to forms relevant to the client's SARS source codes). Use mode=\"all\" when the client explicitly asks for the full catalog or sends the canonical text \"What tax forms do you have for me?\". Returns a WhatsApp-formatted message body the assistant should relay verbatim.",
+        input_schema: {
+            type: "object",
+            properties: {
+                mode: { type: "string", enum: ["personalized", "all"], description: "Which slice of the catalog to return. Defaults to personalized." },
+            },
+            required: [],
+        },
+    },
+    {
+        name: "send_tax_form",
+        description: "Deliver a blank tax form PDF to the requesting client via WhatsApp. Use this after the client has chosen which form they want. Always sends the latest year available in SharePoint.",
+        input_schema: {
+            type: "object",
+            properties: {
+                form_key: {
+                    type: "string",
+                    enum: ["vehicle_detail", "vehicle_detail_multijob", "commission_expenses"],
+                    description: "The form to send. Must match one of the keys returned by list_tax_forms.",
+                },
+            },
+            required: ["form_key"],
         },
     },
     {
@@ -789,7 +824,7 @@ export class ClaudeService {
                         }
                     }
                 }
-                roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. Address them as a valued client, by first name.\n\n**Document uploads — IMPORTANT**: Clients CAN upload tax documents (IRP5, IT3(a), IT3(b), payslips, medical certificates, till slips / receipts, logbooks, ID documents, bank statements, tax certificates, etc.) directly on WhatsApp. If the client asks whether they can send a document, or says they want to upload something, say yes and invite them to send the file. NEVER tell them they cannot upload documents here — they can. Once they send the file, you will be prompted to ask the document type and call save_document (or upload_irp5 for IRP5 / IT3(a) certs).\n\n**IRP5 routing**: When the client confirms a staged upload is an IRP5 (or IT3(a)), call upload_irp5 with confirmed_by_user=true. That tool stores the cert, parses it, and tells you which doc to ask for NEXT — ask for ONE doc at a time, not the whole outstanding list. For every other doc type, use save_document.\n\n**What docs do I need?**: If the client asks what documents they need to upload, send, submit or provide — or anything about what their tax return requires — call get_required_documents. The tool returns a pre-formatted list tailored to the client's income sources and industry; relay the message verbatim. Do NOT guess or list docs yourself, and do NOT mention SARS source codes to the client.${irp5Hint}${isFirstMessage ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Under 45 words total.\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, their TTT tax sidekick.\n- Mention 4 quick things you can help with using emoji signposts: 📄 invoices, 📂 tax return updates, 📎 document uploads, 📞 consultant callbacks.\n- End with ONE open question, not a menu.\n- Do NOT list every capability. Do NOT use bullet points in the greeting.\n- Example: "Hey Luc! 👋 Tina here, your TTT tax sidekick 🇿🇦\\n\\nI can help with 📄 invoices, 📂 tax return updates, 📎 uploading tax docs, and 📞 consultant callbacks. What do you need today?"` : ''}`;
+                roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. Address them as a valued client, by first name.\n\n**Document uploads — IMPORTANT**: Clients CAN upload tax documents (IRP5, IT3(a), IT3(b), payslips, medical certificates, till slips / receipts, logbooks, ID documents, bank statements, tax certificates, etc.) directly on WhatsApp. If the client asks whether they can send a document, or says they want to upload something, say yes and invite them to send the file. NEVER tell them they cannot upload documents here — they can. Once they send the file, you will be prompted to ask the document type and call save_document (or upload_irp5 for IRP5 / IT3(a) certs).\n\n**IRP5 routing**: When the client confirms a staged upload is an IRP5 (or IT3(a)), call upload_irp5 with confirmed_by_user=true. That tool stores the cert, parses it, and tells you which doc to ask for NEXT — ask for ONE doc at a time, not the whole outstanding list. For every other doc type, use save_document.\n\n**What docs do I need?**: If the client asks what documents they need to upload, send, submit or provide — or anything about what their tax return requires — call get_required_documents. The tool returns a pre-formatted list tailored to the client's income sources and industry; relay the message verbatim. Do NOT guess or list docs yourself, and do NOT mention SARS source codes to the client.\n\n**Tax forms (fillable templates):**\n- If the client asks about forms they need to fill in (vehicle log, commission expenses, etc.), call list_tax_forms. Default mode to "personalized". Use mode="all" only when the client asks for the full list or sends the canonical text "What tax forms do you have for me?".\n- When the client picks a specific form ("send me the vehicle one", "yes please"), call send_tax_form with the matching form_key. If ambiguous (multiple recommended forms surfaced and the client said "yes"), ask which one.\n- Relay the catalog message from list_tax_forms verbatim. Don't rephrase or summarize it.\n- After a form is sent, the client may upload the filled PDF back. Treat this as a normal doc upload; the system tags returned forms automatically.${irp5Hint}${isFirstMessage ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Under 45 words total.\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, their TTT tax sidekick.\n- Mention 4 quick things you can help with using emoji signposts: 📄 invoices, 📂 tax return updates, 📎 document uploads, 📞 consultant callbacks.\n- End with ONE open question, not a menu.\n- Do NOT list every capability. Do NOT use bullet points in the greeting.\n- Example: "Hey Luc! 👋 Tina here, your TTT tax sidekick 🇿🇦\\n\\nI can help with 📄 invoices, 📂 tax return updates, 📎 uploading tax docs, and 📞 consultant callbacks. What do you need today?"` : ''}`;
             } else if (entityType === 'lead') {
                 // Tax leads have two onboarding gates: signed LoE + SARS eFiling OTP.
                 // Non-tax tracks (Accounting / Insurance / FP) only gate on LoE.
@@ -959,7 +994,7 @@ What NOT to do:
             ];
 
             // Filter tools by role
-            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'get_my_referral_code', 'save_document', 'upload_irp5', 'escalate_to_taxcrew'];
+            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'list_tax_forms', 'send_tax_form', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'get_my_referral_code', 'save_document', 'upload_irp5', 'escalate_to_taxcrew'];
             const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field', 'refer_friend'];
             // State B leads (LoE done, OTP outstanding) get upload_irp5 so they
             // can fast-track. All other lead states stay at save_document only.
@@ -1349,6 +1384,131 @@ What NOT to do:
                         message: sendResult.dryRun
                             ? `TEST MODE — no real WhatsApp message was sent. Confirm to the staff that:\n- Invoice ${invoiceNum} has been "sent" to ${clientFullname || 'the client'}.\n- It would have been delivered to: ${clientPhone}\n- PDF preview link: ${pdfPreviewUrl}\n- The caption that would accompany the PDF reads: "${caption}"\nMention all four lines (client name + phone + preview link + caption) verbatim so the staff can verify targeting, content, and message wording.`
                             : `Invoice ${invoiceNum} has been sent to ${clientFullname || 'the client'} via WhatsApp.`,
+                    });
+                };
+
+                // Helper: handle list_tax_forms — returns the WhatsApp-formatted
+                // catalog body Claude should relay verbatim. Resolves source
+                // codes from the contact's tax profile (same lookup as
+                // get_required_documents).
+                const handleListTaxForms = async (
+                    toolCall: any,
+                    clientContactId: string | undefined,
+                ): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    const mode: 'personalized' | 'all' = args.mode === 'all' ? 'all' : 'personalized';
+
+                    if (mode === 'all') {
+                        const allForms = getAllForms();
+                        const message = formatCatalogMessage(allForms, 'all', []);
+                        console.log(`[TaxForms] list_all count=${allForms.length}`);
+                        return JSON.stringify({ status: 'ok', mode, message });
+                    }
+
+                    if (!clientContactId) {
+                        return JSON.stringify({
+                            status: 'no_codes',
+                            mode,
+                            message: 'I don\'t have your IRP5 details on file yet, so I can\'t recommend a specific form. We have three forms in total - say "show me all forms" if you want to see the full list.',
+                        });
+                    }
+
+                    const profile = await dynamicsService.getContactTaxProfile(clientContactId);
+                    const sourceCodes = profile?.sourceCodes || [];
+                    if (sourceCodes.length === 0) {
+                        console.log(`[TaxForms] list_empty_no_codes clientId=${clientContactId}`);
+                        return JSON.stringify({
+                            status: 'no_codes',
+                            mode,
+                            message: 'I don\'t have your IRP5 details on file yet, so I can\'t recommend a specific form. We have three forms in total - say "show me all forms" if you want to see the full list.',
+                        });
+                    }
+
+                    const personalized = getPersonalizedForms(sourceCodes);
+                    if (personalized.length === 0) {
+                        console.log(`[TaxForms] list_empty_no_matches clientId=${clientContactId} codes=${JSON.stringify(sourceCodes)}`);
+                        return JSON.stringify({
+                            status: 'no_matches',
+                            mode,
+                            message: 'Based on your profile, you don\'t need any of our blank forms - your IRP5 details cover your situation. If you\'ve got a new income source we don\'t know about, say "show me all forms" and I\'ll list everything.',
+                        });
+                    }
+
+                    const omittedForms = TAX_FORMS.filter(f => !personalized.some(p => p.key === f.key));
+                    const message = formatCatalogMessage(personalized, 'personalized', omittedForms);
+                    console.log(`[TaxForms] list_personalized clientId=${clientContactId} matched_count=${personalized.length}`);
+                    return JSON.stringify({ status: 'ok', mode, message });
+                };
+
+                // Helper: handle send_tax_form — resolve the latest PDF in
+                // SharePoint and deliver it as a WhatsApp document with caption.
+                // Posts a Dynamics annotation on success.
+                const handleSendTaxForm = async (
+                    toolCall: any,
+                    clientContactId: string | undefined,
+                    phone: string | undefined,
+                ): Promise<string> => {
+                    const args = JSON.parse(toolCall.function.arguments || '{}');
+                    const formKey = (args.form_key || '').toString();
+                    const form = getFormByKey(formKey);
+                    if (!form) {
+                        console.warn(`[TaxForms] invalid_key key=${formKey}`);
+                        return JSON.stringify({
+                            status: 'invalid_key',
+                            message: `Unknown form_key "${formKey}". Call list_tax_forms first to see the available keys.`,
+                        });
+                    }
+                    if (!phone) {
+                        return JSON.stringify({ status: 'error', message: 'No phone number on session — cannot deliver the form.' });
+                    }
+                    if (!process.env.GRAPH_CLIENT_ID) {
+                        console.warn('[TaxForms] sharepoint_unconfigured');
+                        return JSON.stringify({ status: 'sharepoint_unconfigured', message: 'Form delivery isn\'t available in this environment.' });
+                    }
+
+                    let file;
+                    try {
+                        file = await resolveLatestFormFile(form);
+                    } catch (e: any) {
+                        console.error(`[TaxForms] resolve_failed key=${form.key} err=${e?.message || e}`);
+                        return JSON.stringify({
+                            status: 'resolve_failed',
+                            message: `I couldn't find the ${form.label} in our forms folder right now. I've flagged it - please ask your consultant directly, or try again later.`,
+                        });
+                    }
+                    if (!file) {
+                        return JSON.stringify({
+                            status: 'resolve_failed',
+                            message: `I couldn't find the ${form.label} in our forms folder right now. I've flagged it - please ask your consultant directly, or try again later.`,
+                        });
+                    }
+
+                    const caption = formatSendCaption(form.label, file.year);
+                    const sendResult = await metaWhatsAppService.sendDocument(phone, file.buffer, file.filename, caption);
+                    if (!sendResult.delivered && !sendResult.dryRun) {
+                        console.error(`[TaxForms] send_failed key=${form.key} error=${sendResult.error || 'unknown'}`);
+                        return JSON.stringify({
+                            status: 'send_failed',
+                            message: 'I hit a snag sending the form. Please try again in a moment.',
+                        });
+                    }
+
+                    if (clientContactId) {
+                        try {
+                            await dynamicsService.logTaxFormSentToContact(clientContactId, form.label, file.year, file.filename, clientContactId);
+                        } catch (e: any) {
+                            console.warn(`[TaxForms] timeline_send_failed key=${form.key} err=${e?.message || e}`);
+                        }
+                    }
+
+                    console.log(`[TaxForms] sent key=${form.key} clientId=${clientContactId || 'unknown'} year=${file.year}`);
+                    return JSON.stringify({
+                        status: 'sent',
+                        form_key: form.key,
+                        form_label: form.label,
+                        year: file.year,
+                        dry_run: Boolean(sendResult.dryRun),
+                        message: `Sent the ${form.label} for the ${file.year} tax year.`,
                     });
                 };
 
@@ -2146,6 +2306,10 @@ What NOT to do:
                                 contactId,
                                 taxYear: typeof args.tax_year === 'number' ? args.tax_year : undefined,
                             });
+                        } else if (functionName === 'list_tax_forms') {
+                            functionResponse = await handleListTaxForms(toolCall, contactId);
+                        } else if (functionName === 'send_tax_form') {
+                            functionResponse = await handleSendTaxForm(toolCall, contactId, phoneNumber);
                         } else if (functionName === 'get_my_consultant') {
                             const ownerId = await dynamicsService.getContactOwnerId(contactId);
                             if (!ownerId) {
@@ -2814,6 +2978,10 @@ What NOT to do:
                                     contactId,
                                     taxYear: typeof args.tax_year === 'number' ? args.tax_year : undefined,
                                 });
+                            } else if (functionName === 'list_tax_forms') {
+                                functionResponse = await handleListTaxForms(toolCall, contactId);
+                            } else if (functionName === 'send_tax_form') {
+                                functionResponse = await handleSendTaxForm(toolCall, contactId, phoneNumber);
                             } else {
                                 functionResponse = `Tool ${functionName} executed.`;
                             }

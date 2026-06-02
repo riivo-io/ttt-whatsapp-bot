@@ -45,6 +45,7 @@ class SharePointService {
     private readonly hostname: string;
     private readonly sitePath: string;
     private readonly kbFolder: string;
+    private readonly formsFolder: string;
     private readonly docsSitePath: string;
     private readonly docsLibraryName: string;
 
@@ -59,6 +60,7 @@ class SharePointService {
         this.hostname = process.env.SHAREPOINT_HOSTNAME || '';
         this.sitePath = process.env.SHAREPOINT_SITE_PATH || '';
         this.kbFolder = process.env.SHAREPOINT_KB_FOLDER || '';
+        this.formsFolder = process.env.SHAREPOINT_FORMS_FOLDER || 'Vehicle Tax Calculator/TTT Forms';
         this.docsSitePath = process.env.SHAREPOINT_DOCS_SITE_PATH || '';
         // Name of the SharePoint document library client docs live in. Matches
         // Power Automate's target: a top-level library called "Contact" (not
@@ -155,6 +157,32 @@ class SharePointService {
         }
 
         console.log(`[SharePoint] Listed ${files.length} file(s) under "${this.kbFolder}"`);
+        return files;
+    }
+
+    /**
+     * List files in the configured forms folder (non-recursive). Mirrors
+     * listKbFiles but scoped to a single folder under the KB site so the
+     * fillable-template catalog can resolve filenames to driveItem IDs.
+     */
+    async listFormFiles(): Promise<Array<{ id: string; name: string }>> {
+        const siteId = await this.resolveSiteId();
+        const headers = await this.authedHeaders();
+
+        const encodedPath = this.formsFolder.split('/').map(encodeURIComponent).join('/');
+        let nextUrl: string | null = `${GRAPH_BASE}/sites/${siteId}/drive/root:/${encodedPath}:/children`;
+
+        const files: Array<{ id: string; name: string }> = [];
+        while (nextUrl) {
+            const currentUrl: string = nextUrl;
+            const response = await axios.get<GraphChildrenResponse>(currentUrl, { headers });
+            for (const item of response.data.value) {
+                if (item.file) files.push({ id: item.id, name: item.name });
+            }
+            nextUrl = response.data['@odata.nextLink'] || null;
+        }
+
+        console.log(`[SharePoint] Listed ${files.length} form file(s) under "${this.formsFolder}"`);
         return files;
     }
 

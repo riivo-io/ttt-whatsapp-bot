@@ -1682,6 +1682,74 @@ export class DynamicsService {
      * the audit record that the send happened. Audit fields are added
      * automatically by crmPost via addAuditFields.
      */
+    /**
+     * Timeline entry for a tax form PDF sent to (or received from) a client.
+     * Mirrors logInvoiceSentToContact — annotation entity, contact-bound,
+     * no file body (the binary lives in SharePoint / Meta media).
+     */
+    async logTaxFormSentToContact(
+        contactId: string,
+        formLabel: string,
+        year: number,
+        filename: string,
+        triggeredBy: string
+    ): Promise<{ success: boolean; annotationId?: string; error?: string }> {
+        const payload: any = {
+            subject: `Tina sent ${formLabel} (${year}) to client`,
+            notetext: filename,
+            'objectid_contact@odata.bind': `/contacts(${contactId})`,
+            objecttypecode: 'contact',
+        };
+        try {
+            const response = await this.crmPost('annotations', payload, triggeredBy);
+            const annotationId = response.data?.annotationid;
+            console.log(`[Dynamics CRM] Logged tax-form send "${formLabel}" (${year}) on contact ${contactId} (annotation ${annotationId})`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'annotations',
+                crmRecordId: annotationId,
+                action: 'create',
+                payload: { subject: payload.subject, objecttypecode: payload.objecttypecode, contact_id: contactId, form_label: formLabel, year },
+                triggeredBy,
+            });
+            return { success: true, annotationId };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error('[Dynamics CRM] Failed to log tax-form send note:', errMsg);
+            return { success: false, error: errMsg };
+        }
+    }
+
+    async logTaxFormReceivedFromContact(
+        contactId: string,
+        formLabel: string,
+        filename: string,
+        triggeredBy: string
+    ): Promise<{ success: boolean; annotationId?: string; error?: string }> {
+        const payload: any = {
+            subject: `Tina received completed ${formLabel} from client`,
+            notetext: filename,
+            'objectid_contact@odata.bind': `/contacts(${contactId})`,
+            objecttypecode: 'contact',
+        };
+        try {
+            const response = await this.crmPost('annotations', payload, triggeredBy);
+            const annotationId = response.data?.annotationid;
+            console.log(`[Dynamics CRM] Logged tax-form return "${formLabel}" on contact ${contactId} (annotation ${annotationId})`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'annotations',
+                crmRecordId: annotationId,
+                action: 'create',
+                payload: { subject: payload.subject, objecttypecode: payload.objecttypecode, contact_id: contactId, form_label: formLabel },
+                triggeredBy,
+            });
+            return { success: true, annotationId };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error('[Dynamics CRM] Failed to log tax-form return note:', errMsg);
+            return { success: false, error: errMsg };
+        }
+    }
+
     async logInvoiceSentToContact(
         contactId: string,
         invoiceNumber: string,
