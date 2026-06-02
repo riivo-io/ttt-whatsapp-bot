@@ -68,6 +68,53 @@ const NOISE_WORDS = new Set([
 
 const EMOJI_ONLY_RE = /^[\p{Emoji}\p{Emoji_Presentation}\p{Extended_Pictographic}\s]+$/u;
 
+const CLASSIFIER_SYSTEM_PROMPT = `Classify the following client WhatsApp query.
+
+Default to "L1" (bot can handle). Only classify as "escalation" for queries
+that clearly require a human consultant — personal financial advice with
+real risk of getting it wrong, complaints, payment disputes, requests to
+change sensitive account details, or explicit asks to talk to a person.
+
+L1 topics — tool-backed lookups the bot answers directly from CRM data:
+- invoice_query: outstanding balance, invoice list, invoice details, "do I have any invoices"
+- case_status: "what's happening with my tax return / claim / case"
+- tax_number_lookup: the client asking for their own tax number
+- account_details: profile info, email, phone on file
+- refund_status: "what's my refund?", "how much will I get back?", refund amount or refund-issued questions
+- submission_status: "have you submitted me?", "did you file my return?"
+- required_documents: "what docs do you need?", "what's outstanding?", what to send
+- received_documents: "have you received my docs?", "what have you got from me?"
+- audit_status: "am I on audit?", verification, SARS reviewing the case
+
+L1 topics — general knowledge the bot answers without CRM lookups:
+- tax_season_dates: dates, deadlines, filing windows
+- home_office_requirements: documents / rules for home office tax deduction
+- document_guidance: which forms / documents to send in
+- basic_tax_structuring: simple tax-planning questions, not personal advice
+- referral_enquiries: how the referral programme works
+- general_tax_question: any other South African tax question answerable from general knowledge`;
+
+const CLASSIFIER_TOOL: Anthropic.Tool = {
+    name: 'record_classification',
+    description: 'Record the classification of the client query. Always call this once per query.',
+    input_schema: {
+        type: 'object',
+        properties: {
+            level: {
+                type: 'string',
+                enum: ['L1', 'escalation'],
+                description: "'L1' if the bot can handle this; 'escalation' if it needs a human.",
+            },
+            topic: {
+                type: 'string',
+                enum: [...(L1_TOPICS as readonly string[]), 'none'],
+                description: "For L1 queries, one of the L1 topics. Use 'none' for escalation.",
+            },
+        },
+        required: ['level', 'topic'],
+    },
+};
+
 class CaseService {
     private anthropic: Anthropic | null = null;
 
@@ -146,60 +193,13 @@ class CaseService {
      * call's `input` field is the structured response we want.
      */
     async classifyCase(caseId: string, queryText: string): Promise<{ level: CaseLevel; topic: string | null }> {
-        const systemPrompt = `Classify the following client WhatsApp query.
-
-Default to "L1" (bot can handle). Only classify as "escalation" for queries
-that clearly require a human consultant — personal financial advice with
-real risk of getting it wrong, complaints, payment disputes, requests to
-change sensitive account details, or explicit asks to talk to a person.
-
-L1 topics — tool-backed lookups the bot answers directly from CRM data:
-- invoice_query: outstanding balance, invoice list, invoice details, "do I have any invoices"
-- case_status: "what's happening with my tax return / claim / case"
-- tax_number_lookup: the client asking for their own tax number
-- account_details: profile info, email, phone on file
-- refund_status: "what's my refund?", "how much will I get back?", refund amount or refund-issued questions
-- submission_status: "have you submitted me?", "did you file my return?"
-- required_documents: "what docs do you need?", "what's outstanding?", what to send
-- received_documents: "have you received my docs?", "what have you got from me?"
-- audit_status: "am I on audit?", verification, SARS reviewing the case
-
-L1 topics — general knowledge the bot answers without CRM lookups:
-- tax_season_dates: dates, deadlines, filing windows
-- home_office_requirements: documents / rules for home office tax deduction
-- document_guidance: which forms / documents to send in
-- basic_tax_structuring: simple tax-planning questions, not personal advice
-- referral_enquiries: how the referral programme works
-- general_tax_question: any other South African tax question answerable from general knowledge`;
-
-        const recordTool: Anthropic.Tool = {
-            name: 'record_classification',
-            description: 'Record the classification of the client query. Always call this once per query.',
-            input_schema: {
-                type: 'object',
-                properties: {
-                    level: {
-                        type: 'string',
-                        enum: ['L1', 'escalation'],
-                        description: "'L1' if the bot can handle this; 'escalation' if it needs a human.",
-                    },
-                    topic: {
-                        type: 'string',
-                        enum: [...(L1_TOPICS as readonly string[]), 'none'],
-                        description: "For L1 queries, one of the L1 topics. Use 'none' for escalation.",
-                    },
-                },
-                required: ['level', 'topic'],
-            },
-        };
-
         try {
             const res = await this.getAnthropic().messages.create({
                 model: CLASSIFIER_MODEL,
                 max_tokens: 200,
-                system: systemPrompt,
+                system: CLASSIFIER_SYSTEM_PROMPT,
                 messages: [{ role: 'user', content: `Query: """${queryText}"""` }],
-                tools: [recordTool],
+                tools: [CLASSIFIER_TOOL],
                 tool_choice: { type: 'tool', name: 'record_classification' },
             });
             const toolUse = res.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
@@ -310,6 +310,85 @@ L1 topics — general knowledge the bot answers without CRM lookups:
                 riivo_escalatedon: new Date().toISOString(),
             });
         }
+    }
+
+    /**
+     * Re-classify a case that's currently escalated, using the full session
+     * conversation as context. First-turn classifications can over-flag vague
+     * openers like "To do my tax" as escalation; once the client clarifies,
+     * the case is often clearly L1. Only flips escalation → L1 (never the
+     * other way). On a flip, the Dynamics escalation footprint is cleared
+     * via `recoverFromEscalation`.
+     */
+    async reclassifyCase(
+        caseId: string,
+        history: { role: 'user' | 'assistant'; content: string }[],
+        latestText: string,
+        crmRequestId?: string | null,
+    ): Promise<{ level: CaseLevel; topic: string | null; recovered: boolean }> {
+        const transcript = [
+            ...history.map(m => `[${m.role === 'user' ? 'Client' : 'Bot'}] ${m.content}`),
+            `[Client] ${latestText}`,
+        ].join('\n');
+
+        try {
+            const res = await this.getAnthropic().messages.create({
+                model: CLASSIFIER_MODEL,
+                max_tokens: 200,
+                system: CLASSIFIER_SYSTEM_PROMPT,
+                messages: [{
+                    role: 'user',
+                    content: `Conversation so far:\n${transcript}\n\nClassify the client's intent across this conversation. The first turn may have been ambiguous — judge from the full exchange.`,
+                }],
+                tools: [CLASSIFIER_TOOL],
+                tool_choice: { type: 'tool', name: 'record_classification' },
+            });
+            const toolUse = res.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+            const parsed: any = toolUse?.input ?? {};
+
+            const level: CaseLevel = parsed.level === 'L1' ? 'L1' : 'escalation';
+            const topic = (L1_TOPICS as readonly string[]).includes(parsed.topic) ? parsed.topic : null;
+
+            if (level === 'L1') {
+                await this.recoverFromEscalation(caseId, topic, crmRequestId);
+                return { level, topic, recovered: true };
+            }
+            return { level, topic: null, recovered: false };
+        } catch (e: any) {
+            const status = e?.status ?? e?.response?.status;
+            if (status === 429) {
+                const retryAfterHeader = e?.headers?.['retry-after'] ?? e?.response?.headers?.['retry-after'];
+                const retryAfterSec = retryAfterHeader ? Number(retryAfterHeader) : 60;
+                const retryAfterMs = Math.max(1, Math.floor((Number.isFinite(retryAfterSec) ? retryAfterSec : 60) * 1000));
+                throw new RateLimitError(retryAfterMs, 1, e);
+            }
+            console.warn(`[CaseService] reclassifyCase failed for ${caseId}:`, e?.message || e);
+            return { level: 'escalation', topic: null, recovered: false };
+        }
+    }
+
+    /**
+     * Move a case from escalation back to L1. Clears Dynamics escalation
+     * fields (escalatedon/reason) so reporting sees a clean L1 case rather
+     * than "escalated then recovered" — the misclassification isn't preserved.
+     */
+    async recoverFromEscalation(caseId: string, topic: string | null, crmRequestId?: string | null): Promise<void> {
+        await supabaseService.updateCase(caseId, {
+            level: 'L1',
+            level_topic: topic,
+            status: 'classified',
+        });
+        const crmId = crmRequestId ?? await this.resolveCrmId(caseId);
+        if (crmId) {
+            await dynamicsService.updateRequest(crmId, {
+                statuscode: REQUEST_STATUSCODE.CLASSIFIED,
+                riivo_classificationlevel: CLASSIFICATION_LEVEL.L1,
+                riivo_classificationtopic: topic,
+                riivo_escalatedon: null,
+                riivo_escalationreason: null,
+            });
+        }
+        console.log(`[CaseService] case ${caseId} recovered from escalation → L1 topic=${topic ?? 'none'}`);
     }
 
     /**

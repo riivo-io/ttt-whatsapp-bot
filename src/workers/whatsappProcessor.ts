@@ -2,9 +2,17 @@ import { claudeService } from '../services/claude.service';
 import { metaWhatsAppService } from '../services/meta.service';
 import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
-import { stagePendingUpload } from '../services/pendingUpload.service';
+import { stagePendingUpload, peekPendingUpload, clearPendingUpload } from '../services/pendingUpload.service';
 import { pendingIrp5Service } from '../services/pendingIrp5.service';
 import { caseService } from '../services/case.service';
+import { sharePointService } from '../services/sharepoint.service';
+import {
+    matchFormByFilename,
+    resolveLatestFormFile,
+    kebabLabel,
+    getRecentTaxFormSendForClient,
+} from '../services/taxForms.service';
+import { getCurrentSaTaxYear } from '../services/requiredDocuments.service';
 import { handleClientRelayResponse, RELAY_BUTTON_PAYLOAD } from '../controllers/emailRelay.controller';
 import { knowledgeBaseService, KbChunkHit } from '../services/knowledgeBase.service';
 import { graphMailService } from '../services/graphMail.service';
@@ -45,6 +53,7 @@ const CLIENT_MENU_IDS = {
     INVOICES: 'menu:client:invoices',
     CASES: 'menu:client:cases',
     UPLOAD: 'menu:client:upload',
+    FORMS: 'menu:client:forms',
     REFERRAL: 'menu:client:referral',
     OTHER: 'menu:client:other',
 } as const;
@@ -56,6 +65,7 @@ const CLIENT_MENU_CANONICAL_TEXT: Record<string, string> = {
     [CLIENT_MENU_IDS.INVOICES]: 'Please show me my invoices and outstanding balance.',
     [CLIENT_MENU_IDS.CASES]: 'What is the status on my open tax returns?',
     [CLIENT_MENU_IDS.UPLOAD]: 'What tax documents do I need to upload?',
+    [CLIENT_MENU_IDS.FORMS]: 'What tax forms do you have for me?',
     [CLIENT_MENU_IDS.REFERRAL]: 'Please share my referral code and sharing link.',
 };
 
@@ -202,6 +212,7 @@ async function sendClientWelcomeMenu(to: string, firstName: string): Promise<str
                     { id: CLIENT_MENU_IDS.INVOICES, title: '📄 Invoices & balances', description: "View, download, or check what's due" },
                     { id: CLIENT_MENU_IDS.CASES, title: '📂 Tax return updates', description: 'Status on your open tax returns' },
                     { id: CLIENT_MENU_IDS.UPLOAD, title: '📎 Upload tax docs', description: 'IRP5, IT3, payslips and more' },
+                    { id: CLIENT_MENU_IDS.FORMS, title: '📋 Tax forms to fill in', description: 'Blank templates for travel, commission, etc.' },
                 ],
             },
             {
@@ -214,6 +225,89 @@ async function sendClientWelcomeMenu(to: string, firstName: string): Promise<str
         ],
     );
     return body;
+}
+
+/**
+ * Fast-path tagged upload for a client's filled-in tax form. Triggered when
+ * the inbound filename matches a known TAX_FORMS prefix (or when the 48h
+ * context-window helper resolves a recent send). Bypasses the normal
+ * Claude→save_document flow:
+ *   1. Rename to a stable form: `{ClientFullName}_{label-kebab}_{year}.pdf`.
+ *   2. Upload to Contact/{FullName}_{GUID}/{tax_year}/.
+ *   3. Post Dynamics timeline entry.
+ *   4. Send a brief ack to the client and clear the staged upload.
+ */
+async function handleTaxFormReturn(
+    crmEntity: { id: string; fullname: string; type: string },
+    phoneNumber: string,
+    sessionId: string,
+    incomingText: string,
+    crmRequestId: string | null,
+    formMatch: { key: string; label: string; filenamePrefix: string },
+    source: 'filename' | 'context',
+): Promise<void> {
+    const staged = peekPendingUpload(phoneNumber);
+    if (!staged) {
+        console.warn(`[TaxForms] return_skip_no_staged phone=${phoneNumber}`);
+        return;
+    }
+    const spec = matchFormByFilename(formMatch.filenamePrefix) || null;
+    const formSpec = spec || (formMatch as any);
+
+    let resolved;
+    try {
+        resolved = await resolveLatestFormFile(formSpec);
+    } catch (e: any) {
+        console.warn(`[TaxForms] return_resolve_year_failed key=${formMatch.key} err=${e?.message || e}`);
+    }
+    const year = resolved?.year ?? getCurrentSaTaxYear().label;
+
+    const renamed = `${crmEntity.fullname}_${kebabLabel(formMatch.label)}_${year}.pdf`;
+
+    try {
+        await sharePointService.uploadDocumentFile({
+            contactFullName: crmEntity.fullname,
+            contactId: crmEntity.id,
+            uploadYear: year,
+            fileName: renamed,
+            mimeType: staged.mimeType,
+            buffer: staged.buffer,
+        });
+    } catch (e: any) {
+        const msg = e?.response?.data?.error?.message || e?.message || 'unknown';
+        console.error(`[TaxForms] return_sharepoint_failed key=${formMatch.key} err=${msg}`);
+        clearPendingUpload(phoneNumber);
+        const errReply = "I got the file but hit a snag filing it. Your consultant will pick it up — please try again later if you don't hear back.";
+        await metaWhatsAppService.sendMessage(phoneNumber, errReply);
+        await supabaseService.saveMessage(sessionId, 'user', incomingText);
+        await supabaseService.saveMessage(sessionId, 'assistant', errReply);
+        return;
+    }
+
+    try {
+        await dynamicsService.logTaxFormReceivedFromContact(crmEntity.id, formMatch.label, renamed, crmEntity.id);
+    } catch (e: any) {
+        console.warn(`[TaxForms] return_timeline_failed key=${formMatch.key} err=${e?.message || e}`);
+    }
+
+    clearPendingUpload(phoneNumber);
+
+    if (source === 'context') {
+        console.log(`[TaxForms] return_tagged_via_context key=${formMatch.key} clientId=${crmEntity.id}`);
+    } else {
+        console.log(`[TaxForms] return_tagged key=${formMatch.key} clientId=${crmEntity.id}`);
+    }
+
+    const ack = `Got your ${formMatch.label} — filed under your ${year} return. Thanks!`;
+    await supabaseService.saveMessage(sessionId, 'user', incomingText);
+    await supabaseService.saveMessage(sessionId, 'assistant', ack);
+    await metaWhatsAppService.sendMessage(phoneNumber, ack);
+    try {
+        await dynamicsService.logMessage(crmEntity as any, incomingText || '(document)', 'Incoming', phoneNumber, crmRequestId);
+        await dynamicsService.logMessage(crmEntity as any, ack, 'Outgoing', phoneNumber, crmRequestId);
+    } catch (e) {
+        console.warn('[Processor] Tax-form return log failed:', (e as Error).message);
+    }
 }
 
 async function resolveSender(phoneNumber: string): Promise<ResolvedEntity> {
@@ -649,6 +743,43 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         }
     }
 
+    // Return-flow tagging for filled-in tax form templates. A client uploading
+    // a PDF whose filename matches one of the catalog prefixes (or, as a 48h
+    // context fallback, whose recent history shows we sent them a form)
+    // bypasses the normal save_document path: rename → SharePoint → timeline
+    // entry → ack. See PRD-tax-forms.md §3.7.
+    if (crmEntity.type === 'client' && document) {
+        const filenameMatch = matchFormByFilename(document.filename);
+        if (filenameMatch) {
+            await handleTaxFormReturn(
+                { id: crmEntity.id, fullname: crmEntity.fullname || '', type: crmEntity.type },
+                from,
+                session.id,
+                effectiveText,
+                null,
+                filenameMatch,
+                'filename',
+            );
+            return;
+        }
+        const isKnownNonFormDoc = /irp5|it3|payslip|medical|bank statement|ra |retirement annuity|tax certificate/i.test(document.filename);
+        if (!isKnownNonFormDoc) {
+            const contextMatch = await getRecentTaxFormSendForClient(crmEntity.id, 48);
+            if (contextMatch) {
+                await handleTaxFormReturn(
+                    { id: crmEntity.id, fullname: crmEntity.fullname || '', type: crmEntity.type },
+                    from,
+                    session.id,
+                    effectiveText,
+                    null,
+                    contextMatch,
+                    'context',
+                );
+                return;
+            }
+        }
+    }
+
     // Client-only: "Something else" tap → short ack and return. No case, no AI.
     // The next inbound flows through the normal AI path with full freedom.
     if (crmEntity.type === 'client' && interactiveId === CLIENT_MENU_IDS.OTHER) {
@@ -757,6 +888,11 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     let crmRequestId: string | null = null;
     let newCaseId: string | null = null;
     let respondingCaseId: string | null = null;
+    // Set when the latest case is escalated and we'll attempt to re-classify it
+    // as L1 based on the fuller conversation context. If recovery succeeds, the
+    // post-response block flips respondingCaseId to this id so the normal L1
+    // feedback flow takes over.
+    let reclassifyCaseId: string | null = null;
     if (crmEntity.type === 'client' || crmEntity.type === 'lead') {
         const latestCase = await supabaseService.findOpenCaseForSession(session.id);
         const qualifies = caseService.qualifyMessage(effectiveText);
@@ -784,10 +920,13 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         } else if (latestCase) {
             // Continuation — reuse the existing case + Dynamics request.
             crmRequestId = latestCase.crm_case_id;
-            // Only schedule a feedback prompt for the follow-up if the case has
-            // actually been answered. Status='open' means the bot is still
-            // drafting concurrently; the in-flight turn will record the answer.
-            if (latestCase.status !== 'escalated') {
+            if (latestCase.status === 'escalated' && qualifies) {
+                // Vague openers ("To do my tax") sometimes get flagged escalation
+                // on the first turn; once the client clarifies, the case is
+                // clearly L1. Attempt recovery — if successful, the post-response
+                // block sets respondingCaseId so the L1 feedback flow runs.
+                reclassifyCaseId = latestCase.id;
+            } else if (latestCase.status !== 'escalated') {
                 respondingCaseId = latestCase.id;
             }
         } else if (qualifies) {
@@ -901,6 +1040,21 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             });
     }
 
+    // Recovery path: case is currently escalated but this turn may have
+    // clarified the intent. Re-classify with the full conversation as context,
+    // in parallel with the AI reply. If it flips to L1, recoverFromEscalation
+    // clears the Dynamics escalation footprint inside the service call.
+    let reclassifyPromise: Promise<{ recovered: boolean }> = Promise.resolve({ recovered: false });
+    if (reclassifyCaseId) {
+        reclassifyPromise = caseService
+            .reclassifyCase(reclassifyCaseId, historyWithoutCurrent, effectiveText, crmRequestId)
+            .then(r => ({ recovered: r.recovered }))
+            .catch(e => {
+                console.warn('[Processor] reclassifyCase failed:', e.message);
+                return { recovered: false };
+            });
+    }
+
     const leadOnboarding = crmEntity.type === 'lead'
         ? {
             loeReceived: crmEntity.loeReceived === true,
@@ -917,7 +1071,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         console.log(`[Processor] KB hits for ${from}: ${summary}`);
     }
 
-    const [responseText, classifyOutcome] = await Promise.all([
+    const [responseText, classifyOutcome, reclassifyOutcome] = await Promise.all([
         claudeService.generateResponse(
             effectiveText,
             crmEntity.id,
@@ -931,7 +1085,15 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             retrievedContext,
         ),
         classifyPromise,
+        reclassifyPromise,
     ]);
+
+    // Escalation recovery: if the re-classifier flipped the case back to L1,
+    // join the normal L1 post-response flow (recordBotResponse + feedback prompt)
+    // by promoting the recovered case to respondingCaseId.
+    if (reclassifyCaseId && reclassifyOutcome.recovered) {
+        respondingCaseId = reclassifyCaseId;
+    }
 
     const finalResponseText = outboundPrefix ? outboundPrefix + responseText : responseText;
     await supabaseService.saveMessage(session.id, 'assistant', finalResponseText);
