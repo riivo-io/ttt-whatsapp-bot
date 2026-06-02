@@ -124,6 +124,17 @@ router.get('/loe-activation-sweep', async (req: Request, res: Response) => {
         return;
     }
 
+    // KILL SWITCH — set LOE_SWEEP_DISABLED=1 in Azure App Service config to
+    // halt the sweep without redeploying. Lets us stop a runaway sweep
+    // (e.g. sentinel writes silently failing → every hour re-blasts WhatsApp
+    // + taxcrew email for every "loereceived=true, no sentinel" lead) the
+    // moment we notice, then re-enable by flipping the var back.
+    if (process.env.LOE_SWEEP_DISABLED === '1') {
+        console.warn('[Cron] loe-activation-sweep skipped — LOE_SWEEP_DISABLED=1');
+        res.json({ ok: true, skipped: true, reason: 'LOE_SWEEP_DISABLED' });
+        return;
+    }
+
     const summary: { activations: number; activationsFailed: number; irp5Drained: number } = {
         activations: 0,
         activationsFailed: 0,
