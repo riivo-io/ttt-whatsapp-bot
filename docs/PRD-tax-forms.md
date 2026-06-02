@@ -97,9 +97,11 @@ export const TAX_FORMS: TaxFormSpec[] = [
 
 Extend [`src/services/sharepoint.service.ts`](../src/services/sharepoint.service.ts):
 
-- New env var: `SHAREPOINT_FORMS_FOLDER` (default `Vehicle Tax Calculator/TTT Forms`). Resolved relative to the existing `SHAREPOINT_KB_FOLDER`'s site (`/sites/TaxNavigator`).
-- New method `listFormFiles(): Promise<Array<{ name: string; id: string; downloadUrl: string }>>` — lists files in the forms folder (no recursion). Mirrors `listKbFiles()` but scoped to one folder.
-- Reuse `downloadFile(itemId)` for the actual byte fetch.
+- New env vars on the KB site (`/sites/TaxNavigator`):
+  - `SHAREPOINT_FORMS_LIBRARY` (default `Vehicle Tax Calculator`) — display name of the document library that holds the forms. This is a SEPARATE library from the KB's default Documents library; the lookup uses `/sites/{siteId}/drives` and matches by name (same pattern as the docs upload flow).
+  - `SHAREPOINT_FORMS_FOLDER` (default `TTT Forms`) — subfolder inside that library.
+- New method `listFormFiles(): Promise<Array<{ name: string; id: string }>>` — lists files in the forms folder (no recursion).
+- New method `downloadFormFile(itemId)` for the byte fetch. The existing `downloadFile(itemId)` only works against the default library, so form item IDs need the dedicated method.
 
 ### 3.3 New tools in `claude.service.ts`
 

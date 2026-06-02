@@ -41,10 +41,12 @@ class SharePointService {
     private cachedSiteId: string | null = null;
     private cachedDocsSiteId: string | null = null;
     private cachedDocsDriveId: string | null = null;
+    private cachedFormsDriveId: string | null = null;
 
     private readonly hostname: string;
     private readonly sitePath: string;
     private readonly kbFolder: string;
+    private readonly formsLibraryName: string;
     private readonly formsFolder: string;
     private readonly docsSitePath: string;
     private readonly docsLibraryName: string;
@@ -60,7 +62,8 @@ class SharePointService {
         this.hostname = process.env.SHAREPOINT_HOSTNAME || '';
         this.sitePath = process.env.SHAREPOINT_SITE_PATH || '';
         this.kbFolder = process.env.SHAREPOINT_KB_FOLDER || '';
-        this.formsFolder = process.env.SHAREPOINT_FORMS_FOLDER || 'Vehicle Tax Calculator/TTT Forms';
+        this.formsLibraryName = process.env.SHAREPOINT_FORMS_LIBRARY || 'Vehicle Tax Calculator';
+        this.formsFolder = process.env.SHAREPOINT_FORMS_FOLDER || 'TTT Forms';
         this.docsSitePath = process.env.SHAREPOINT_DOCS_SITE_PATH || '';
         // Name of the SharePoint document library client docs live in. Matches
         // Power Automate's target: a top-level library called "Contact" (not
@@ -161,16 +164,41 @@ class SharePointService {
     }
 
     /**
-     * List files in the configured forms folder (non-recursive). Mirrors
-     * listKbFiles but scoped to a single folder under the KB site so the
-     * fillable-template catalog can resolve filenames to driveItem IDs.
+     * Resolve the drive ID for the SharePoint document library that holds the
+     * fillable tax forms (e.g. "Vehicle Tax Calculator"). It is a SEPARATE
+     * library from the KB site's default Documents library — list /drives and
+     * match by name. Cached for the process lifetime.
+     */
+    private async resolveFormsDriveId(): Promise<string> {
+        if (this.cachedFormsDriveId) return this.cachedFormsDriveId;
+
+        const siteId = await this.resolveSiteId();
+        const url = `${GRAPH_BASE}/sites/${siteId}/drives`;
+        const headers = await this.authedHeaders();
+        const response = await axios.get<{ value: Array<{ id: string; name: string }> }>(url, { headers });
+        const drives = response.data.value || [];
+        const target = drives.find(d => d.name?.toLowerCase() === this.formsLibraryName.toLowerCase());
+        if (!target) {
+            const available = drives.map(d => d.name).join(', ');
+            throw new Error(`[SharePoint] No document library named "${this.formsLibraryName}" on KB site. Available: ${available}`);
+        }
+        this.cachedFormsDriveId = target.id;
+        console.log(`[SharePoint] Resolved forms library "${target.name}" → drive ${target.id}`);
+        return this.cachedFormsDriveId!;
+    }
+
+    /**
+     * List files in the configured forms folder (non-recursive). The forms
+     * live in a dedicated library on the KB site ("Vehicle Tax Calculator"),
+     * not under the default Documents library — so we look the library drive
+     * up by name first, then list children of the named subfolder.
      */
     async listFormFiles(): Promise<Array<{ id: string; name: string }>> {
-        const siteId = await this.resolveSiteId();
+        const driveId = await this.resolveFormsDriveId();
         const headers = await this.authedHeaders();
 
         const encodedPath = this.formsFolder.split('/').map(encodeURIComponent).join('/');
-        let nextUrl: string | null = `${GRAPH_BASE}/sites/${siteId}/drive/root:/${encodedPath}:/children`;
+        let nextUrl: string | null = `${GRAPH_BASE}/drives/${driveId}/root:/${encodedPath}:/children`;
 
         const files: Array<{ id: string; name: string }> = [];
         while (nextUrl) {
@@ -182,17 +210,31 @@ class SharePointService {
             nextUrl = response.data['@odata.nextLink'] || null;
         }
 
-        console.log(`[SharePoint] Listed ${files.length} form file(s) under "${this.formsFolder}"`);
+        console.log(`[SharePoint] Listed ${files.length} form file(s) under "${this.formsLibraryName}/${this.formsFolder}"`);
         return files;
     }
 
     /**
-     * Download a driveItem's bytes. Graph returns a 302 to a temporary Azure
+     * Download a driveItem's bytes from the KB site's DEFAULT document library
+     * (the one `listKbFiles` walks). Graph returns a 302 to a temporary Azure
      * Blob URL; axios follows the redirect transparently with arraybuffer.
      */
     async downloadFile(itemId: string): Promise<Buffer> {
         const siteId = await this.resolveSiteId();
         const url = `${GRAPH_BASE}/sites/${siteId}/drive/items/${itemId}/content`;
+        const headers = await this.authedHeaders();
+        const response = await axios.get<ArrayBuffer>(url, { headers, responseType: 'arraybuffer' });
+        return Buffer.from(response.data);
+    }
+
+    /**
+     * Download a driveItem's bytes from the forms library. Item IDs returned
+     * by `listFormFiles` are scoped to that drive, so /drive/items/{id} on the
+     * default library would 404.
+     */
+    async downloadFormFile(itemId: string): Promise<Buffer> {
+        const driveId = await this.resolveFormsDriveId();
+        const url = `${GRAPH_BASE}/drives/${driveId}/items/${itemId}/content`;
         const headers = await this.authedHeaders();
         const response = await axios.get<ArrayBuffer>(url, { headers, responseType: 'arraybuffer' });
         return Buffer.from(response.data);

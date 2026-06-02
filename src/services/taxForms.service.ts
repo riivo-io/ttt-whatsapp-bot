@@ -185,7 +185,7 @@ export async function resolveLatestFormFile(form: TaxFormSpec): Promise<Resolved
         return null;
     }
     const latest = matches[0];
-    const buffer = await sharePointService.downloadFile(latest.id);
+    const buffer = await sharePointService.downloadFormFile(latest.id);
     console.log(`[TaxForms] resolved key=${form.key} filename="${latest.name}" year=${latest.year}`);
     return { buffer, filename: latest.name, year: latest.year };
 }
