@@ -269,6 +269,33 @@ L1 topics — general knowledge the bot answers without CRM lookups:
     }
 
     /**
+     * Close a single case as resolved_by_bot without involving the feedback
+     * prompt. Used by the topic-shift path in the processor: when the client's
+     * next inbound clearly opens a new question, we treat the previous
+     * bot-answered case as implicitly satisfied (they moved on rather than
+     * pushing back). `reason` lands in resolution_method so reporting can tell
+     * implicit resolutions from explicit "Yes, thanks" taps.
+     */
+    async markResolvedByBot(caseId: string, reason: string, crmRequestId?: string | null): Promise<void> {
+        const resolvedAt = new Date().toISOString();
+        await supabaseService.updateCase(caseId, {
+            status: 'resolved_by_bot',
+            resolution_method: reason,
+            resolved_at: resolvedAt,
+        });
+        const crmId = crmRequestId ?? await this.resolveCrmId(caseId);
+        if (crmId) {
+            await dynamicsService.updateRequest(crmId, {
+                statecode: REQUEST_STATE.INACTIVE,
+                statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
+                riivo_clientfeedback: CLIENT_FEEDBACK.NOT_ASKED,
+                riivo_resolvedon: resolvedAt,
+                riivo_resolutionmethod: RESOLUTION_METHOD.AUTO_DIRECT_ANSWER,
+            });
+        }
+    }
+
+    /**
      * Mark a case as escalated in both Supabase and Dynamics. Escalation
      * keeps the Dynamics request in statecode=Active (the consultant still
      * needs to work it) with statuscode=Escalated.

@@ -744,11 +744,31 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     //      pending-feedback replies, follow-ups within the session).
     //   2. New request created synchronously for a qualifying question.
     //   3. null — falls back to contact/lead binding in logMessage.
+    // Case routing — three possibilities each turn:
+    //   1. Topic shift: prior case is in bot_responded and this inbound qualifies
+    //      as a new question → implicitly resolve the prior case as
+    //      resolved_by_bot (the client moved on rather than pushing back) and
+    //      open a new case for the new topic.
+    //   2. Continuation: a prior case exists (still 'open' while the bot drafts,
+    //      OR 'bot_responded' but this inbound is a short ack like "yes") →
+    //      reuse its Dynamics request; no new case.
+    //   3. Fresh: no prior case in the session and the inbound qualifies → open
+    //      the first case.
     let crmRequestId: string | null = null;
     let newCaseId: string | null = null;
+    let respondingCaseId: string | null = null;
     if (crmEntity.type === 'client' || crmEntity.type === 'lead') {
-        crmRequestId = await supabaseService.findOpenRequestForSession(session.id);
-        if (!crmRequestId && caseService.qualifyMessage(effectiveText)) {
+        const latestCase = await supabaseService.findOpenCaseForSession(session.id);
+        const qualifies = caseService.qualifyMessage(effectiveText);
+
+        if (latestCase && latestCase.status === 'bot_responded' && qualifies) {
+            // Topic shift — close the prior thread before opening a new one.
+            try {
+                await caseService.markResolvedByBot(latestCase.id, 'topic_shift', latestCase.crm_case_id);
+                console.log(`[Processor] topic_shift closed caseId=${latestCase.id} sessionId=${session.id}`);
+            } catch (e: any) {
+                console.warn(`[Processor] topic_shift close failed caseId=${latestCase.id} err=${e?.message || e}`);
+            }
             const created = await caseService.createCase({
                 sessionId: session.id,
                 contactId: crmEntity.id,
@@ -758,6 +778,30 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             });
             if (created) {
                 newCaseId = created.id;
+                respondingCaseId = created.id;
+                crmRequestId = created.crm_case_id;
+            }
+        } else if (latestCase) {
+            // Continuation — reuse the existing case + Dynamics request.
+            crmRequestId = latestCase.crm_case_id;
+            // Only schedule a feedback prompt for the follow-up if the case has
+            // actually been answered. Status='open' means the bot is still
+            // drafting concurrently; the in-flight turn will record the answer.
+            if (latestCase.status !== 'escalated') {
+                respondingCaseId = latestCase.id;
+            }
+        } else if (qualifies) {
+            // Fresh — first qualifying message in the session.
+            const created = await caseService.createCase({
+                sessionId: session.id,
+                contactId: crmEntity.id,
+                contactType: crmEntity.type,
+                phoneNumber: from,
+                queryText: effectiveText,
+            });
+            if (created) {
+                newCaseId = created.id;
+                respondingCaseId = created.id;
                 crmRequestId = created.crm_case_id;
             }
         }
@@ -916,28 +960,33 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         }
     }
 
-    // After the main answer lands, close the case loop. Escalations skip the
-    // feedback prompt entirely — those go straight to a human, no point
-    // asking the client whether the bot answered. Every other case schedules
-    // the idle prompt; the worker decides at fire time whether to send it.
-    if (newCaseId) {
-        if (classifyOutcome.level === 'escalation') {
-            await caseService.markEscalated(newCaseId, 'Bot classified as escalation', crmRequestId);
-        } else {
-            const botAnswerSentAt = new Date().toISOString();
-            await caseService.recordBotResponse(newCaseId, 'direct_answer', finalResponseText, crmRequestId);
-            try {
-                await enqueueFeedbackPrompt({
-                    caseId: newCaseId,
-                    sessionId: session.id,
-                    phoneNumber: from,
-                    crmRequestId: crmRequestId,
-                    botAnswerSentAt,
-                });
-                console.log(`[FeedbackPrompt] scheduled caseId=${newCaseId} sessionId=${session.id}`);
-            } catch (e: any) {
-                console.warn(`[FeedbackPrompt] enqueue_failed caseId=${newCaseId} sessionId=${session.id} err=${e?.message || e}`);
-            }
+    // After the main answer lands, close the case loop.
+    //   - Escalations (only meaningful for newly-created cases) skip the
+    //     feedback prompt — straight to a human.
+    //   - Newly-created L1 cases transition to bot_responded.
+    //   - Continuation turns (respondingCaseId set, but newCaseId null) ride on
+    //     an existing case that's already bot_responded; no status write needed.
+    // Every non-escalated path enqueues a feedback prompt against the responding
+    // case. The worker dedups at fire time via session.pending_case_id so
+    // multiple enqueues across the conversation collapse to one prompt.
+    if (newCaseId && classifyOutcome.level === 'escalation') {
+        await caseService.markEscalated(newCaseId, 'Bot classified as escalation', crmRequestId);
+    } else if (respondingCaseId) {
+        const botAnswerSentAt = new Date().toISOString();
+        // Idempotent on continuations: case is already in bot_responded, the
+        // call refreshes riivo_botanswers in Dynamics with the latest reply.
+        await caseService.recordBotResponse(respondingCaseId, 'direct_answer', finalResponseText, crmRequestId);
+        try {
+            await enqueueFeedbackPrompt({
+                caseId: respondingCaseId,
+                sessionId: session.id,
+                phoneNumber: from,
+                crmRequestId: crmRequestId,
+                botAnswerSentAt,
+            });
+            console.log(`[FeedbackPrompt] scheduled caseId=${respondingCaseId} sessionId=${session.id} new=${newCaseId ? 'yes' : 'no'}`);
+        } catch (e: any) {
+            console.warn(`[FeedbackPrompt] enqueue_failed caseId=${respondingCaseId} sessionId=${session.id} err=${e?.message || e}`);
         }
     }
 

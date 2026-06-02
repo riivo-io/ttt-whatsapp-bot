@@ -53,13 +53,17 @@ export async function processFeedbackPromptJob(payload: FeedbackPromptJobPayload
         return;
     }
 
-    // 3. Session must not have another pending prompt in flight.
+    // 3. Session must not have any pending prompt in flight. Multiple enqueues
+    //    across a conversation (each bot answer schedules one) collapse here:
+    //    once the first prompt fires, pending_case_id is set and every later
+    //    prompt skips. pending_case_id is cleared when the client replies or
+    //    when their feedback resolves the case, freeing future sessions.
     const session = await supabaseService.getSession(sessionId);
     if (!session) {
         console.log(`[FeedbackPrompt] skipped_session_superseded caseId=${caseId} sessionId=${sessionId} reason=session_missing`);
         return;
     }
-    if (session.pending_case_id && session.pending_case_id !== caseId) {
+    if (session.pending_case_id) {
         console.log(`[FeedbackPrompt] skipped_session_superseded caseId=${caseId} sessionId=${sessionId} reason=pending=${session.pending_case_id}`);
         return;
     }
