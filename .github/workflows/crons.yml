@@ -17,7 +17,10 @@ on:
     - cron: '0 2 * * *'    # case-timeout            (daily 02:00 UTC)
     - cron: '0 */6 * * *'  # graph-renew-subscription (every 6h)
     - cron: '0 3 * * *'    # cleanup-webhook-events   (daily 03:00 UTC)
-    - cron: '0 * * * *'    # loe-activation-sweep     (hourly)
+    # loe-activation-sweep schedule disabled — investigating runaway sentinel
+    # writes that caused 400 taxcrew emails overnight 2026-06-01/02. Re-enable
+    # only after root cause fixed and historical leads backfilled with sentinels.
+    # - cron: '0 * * * *'    # loe-activation-sweep     (hourly)
   workflow_dispatch:
     inputs:
       target:
