@@ -37,6 +37,11 @@ const CLASSIFIER_MODEL = 'claude-haiku-4-5-20251001';
 export const CASE_FEEDBACK_BUTTON_YES = 'case_feedback_yes';
 export const CASE_FEEDBACK_BUTTON_NO = 'case_feedback_no';
 
+// Exact wording of the resolution prompt sent by feedbackPromptWorker. Shared
+// with the processor so the "previous bot turn was the prompt" gate can match
+// the last assistant message without drift.
+export const CASE_FEEDBACK_PROMPT_TEXT = 'Did that answer your question?';
+
 export const L1_TOPICS = [
     // Tool-backed lookups the bot resolves directly
     'invoice_query',
@@ -525,7 +530,11 @@ class CaseService {
         if (!t || t.length > 60) return false;
         if (t.includes('?')) return false;
         if (/\b(but|however|actually|also|wait|another|one more)\b/.test(t)) return false;
-        return /\b(thanks|thank you|thx|ty|perfect|sorted|got it|all good|appreciate|cheers|awesome|amazing|brilliant|lekker)\b/.test(t);
+        // Bare gratitude ("thanks", "thank you", "thx", "ty") is intentionally
+        // excluded — clients thank intermediate replies, and treating that as
+        // a wrap-up close caused premature resolutions. Stronger closing
+        // signals ("perfect", "sorted", "all good") remain.
+        return /\b(perfect|sorted|got it|all good|all sorted|appreciate it|cheers|awesome|amazing|brilliant|lekker)\b/.test(t);
     }
 
     /**
@@ -548,14 +557,21 @@ class CaseService {
     /**
      * Detect a feedback reply from an incoming message. The Meta interactive
      * button reply arrives as its title (e.g. "Yes, thanks") via extractIncoming,
-     * so we match on both button ids (if the text matches one) and a fuzzy
+     * so we match on both button ids (if the text matches one) and a tight
      * yes/no heuristic.
+     *
+     * "thanks" is deliberately NOT a confirmed trigger here — clients commonly
+     * thank intermediate replies, and equating gratitude with case-resolution
+     * caused premature closes (e.g. Francis Kabelo: "Yes" to "want me to list
+     * docs?" was read as feedback-confirmed instead of "yes please list"). The
+     * caller (whatsappProcessor) additionally gates this on the previous bot
+     * turn being the explicit resolution prompt.
      */
     detectFeedback(text: string): 'confirmed' | 'rejected' | null {
         const t = (text || '').trim().toLowerCase();
         if (!t) return null;
 
-        if (t === CASE_FEEDBACK_BUTTON_YES || t.includes('yes, thanks') || /^(y|yes|yep|resolved|solved|sorted|thanks)\b/.test(t)) {
+        if (t === CASE_FEEDBACK_BUTTON_YES || t.includes('yes, thanks') || /^(y|yes|yep|yeah|yup|sure|ok|okay|all good|sorted|resolved|solved)\b/.test(t)) {
             return 'confirmed';
         }
         if (t === CASE_FEEDBACK_BUTTON_NO || t.includes('still need help') || /^(n|no|nope|not really|still)\b/.test(t)) {

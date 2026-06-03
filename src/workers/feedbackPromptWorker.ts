@@ -14,6 +14,7 @@ import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.servic
 import {
     CASE_FEEDBACK_BUTTON_YES,
     CASE_FEEDBACK_BUTTON_NO,
+    CASE_FEEDBACK_PROMPT_TEXT,
 } from '../services/case.service';
 import { enqueueCaseAutoClose } from '../queue/caseAutoCloseQueue';
 import { messageContextStorage } from '../utils/messageContext';
@@ -72,12 +73,17 @@ export async function processFeedbackPromptJob(payload: FeedbackPromptJobPayload
     try {
         await metaWhatsAppService.sendReplyButtons(
             phoneNumber,
-            'Did that answer your question?',
+            CASE_FEEDBACK_PROMPT_TEXT,
             [
                 { id: CASE_FEEDBACK_BUTTON_YES, title: 'Yes, thanks' },
                 { id: CASE_FEEDBACK_BUTTON_NO, title: 'Still need help' },
             ]
         );
+        // Persist the prompt as an assistant message so the processor's
+        // "previous bot turn was the prompt" gate can match it on the next
+        // inbound (otherwise the prompt is button-only and invisible to the
+        // gate, which would let any "yes" mid-conversation close the case).
+        await supabaseService.saveMessage(sessionId, 'assistant', CASE_FEEDBACK_PROMPT_TEXT);
         const promptSentAt = new Date().toISOString();
         await supabaseService.setSessionPendingCase(sessionId, caseId);
         if (crmRequestId) {

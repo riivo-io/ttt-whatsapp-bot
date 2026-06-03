@@ -4,7 +4,12 @@ import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.servic
 import { supabaseService } from '../services/supabase.service';
 import { stagePendingUpload, peekPendingUpload, clearPendingUpload } from '../services/pendingUpload.service';
 import { pendingIrp5Service } from '../services/pendingIrp5.service';
-import { caseService } from '../services/case.service';
+import {
+    caseService,
+    CASE_FEEDBACK_BUTTON_YES,
+    CASE_FEEDBACK_BUTTON_NO,
+    CASE_FEEDBACK_PROMPT_TEXT,
+} from '../services/case.service';
 import { sharePointService } from '../services/sharepoint.service';
 import {
     matchFormByFilename,
@@ -27,6 +32,12 @@ import {
     buildReferralFallback,
     serviceLabelFromLeadType,
 } from '../utils/firstContactRouting';
+import { looksLikeGreetingOnly } from '../utils/greeting';
+import {
+    looksLikeAutoReply,
+    shouldSendAutoReplyClarification,
+    AUTO_REPLY_CLARIFICATION,
+} from '../utils/autoReply';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
@@ -621,6 +632,20 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         return;
     }
 
+    // Auto-reply / out-of-office filter. Email-forwarding setups occasionally
+    // bounce another business's OOO body through the WhatsApp number; without
+    // this, the bot would parse it as a real intent. Send one clarification
+    // per phone per 24h, then silently drop further matches.
+    if (!document && !interactiveId && looksLikeAutoReply(effectiveText)) {
+        if (shouldSendAutoReplyClarification(from)) {
+            await metaWhatsAppService.sendMessage(from, AUTO_REPLY_CLARIFICATION);
+            console.log(`[Processor] ${from} inbound matched auto-reply patterns — sent clarification`);
+        } else {
+            console.log(`[Processor] ${from} inbound matched auto-reply patterns — silently dropped (clarification already sent)`);
+        }
+        return;
+    }
+
     // Client menu taps: rewrite the tap's title into a canonical question so the
     // existing AI + tools path routes to the right handler without bespoke
     // dispatch. OTHER is handled separately after session resolution.
@@ -797,12 +822,15 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     }
 
     // Client first-message interactive menu. Only fires on a fresh session
-    // (no prior messages) for an organic text inbound — skip for documents,
-    // menu taps, and L1 feedback button replies so those flows aren't broken.
+    // (no prior messages) for an organic text inbound AND only when the
+    // inbound looks like a bare greeting. Substantive first messages
+    // ("I'd like to know more about the referral", "what's your new number?")
+    // fall through to the AI path so they actually get answered.
     if (
         crmEntity.type === 'client' &&
         !document &&
-        !interactiveId
+        !interactiveId &&
+        looksLikeGreetingOnly(effectiveText)
     ) {
         const existingHistory = await supabaseService.getHistory(session.id);
         if (existingHistory.length === 0) {
@@ -963,11 +991,33 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         caseService.handleTimeout().catch(e => console.warn('[Processor] timeout sweep:', e.message));
     }
 
+    const history = await supabaseService.getHistory(session.id);
+    const historyWithoutCurrent = history.slice(0, -1);
+
     // Feedback routing: if this session is waiting on feedback for a bot answer,
     // and the inbound looks like yes/no, close the loop without invoking the AI.
+    //
+    // Gate: free-text yes/no only counts as feedback when the PREVIOUS bot turn
+    // was the resolution prompt itself. Otherwise a casual "yes" mid-conversation
+    // (e.g. answering "want me to list typical docs?") would close the case
+    // instead of being routed through Claude. Explicit button taps bypass the
+    // gate — clicking the prompt's button is unambiguous.
     const pendingCaseId = (session as any).pending_case_id || null;
     if (crmEntity.type === 'client' && pendingCaseId) {
-        const feedback = caseService.detectFeedback(effectiveText);
+        const isExplicitButtonTap =
+            interactiveId === CASE_FEEDBACK_BUTTON_YES ||
+            interactiveId === CASE_FEEDBACK_BUTTON_NO;
+        let previousWasPrompt = isExplicitButtonTap;
+        if (!isExplicitButtonTap) {
+            for (let i = historyWithoutCurrent.length - 1; i >= 0; i--) {
+                if (historyWithoutCurrent[i].role === 'assistant') {
+                    previousWasPrompt = historyWithoutCurrent[i].content.startsWith(CASE_FEEDBACK_PROMPT_TEXT);
+                    break;
+                }
+            }
+        }
+
+        const feedback = previousWasPrompt ? caseService.detectFeedback(effectiveText) : null;
         if (feedback) {
             await caseService.handleFeedback(pendingCaseId, feedback);
             await supabaseService.setSessionPendingCase(session.id, null);
@@ -988,9 +1038,6 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         // Not a feedback reply — treat as a new query and clear the pending pointer.
         await supabaseService.setSessionPendingCase(session.id, null);
     }
-
-    const history = await supabaseService.getHistory(session.id);
-    const historyWithoutCurrent = history.slice(0, -1);
 
     // Wrap-up short-circuit: an explicit "thanks"-style inbound closes every
     // open case in the session as confirmed and sends the canned notification

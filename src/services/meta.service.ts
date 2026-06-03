@@ -23,6 +23,38 @@ function sanitizeForWhatsApp(text: string): string {
         .replace(/^[ \t]*[•◦▪▫‣⁃]\s*/gm, '- ');
 }
 
+/**
+ * In-memory same-text outbound dedupe (60s window). Catches the case where
+ * an upstream caller (retry, double-fired worker, race between Supabase save
+ * and Meta send) attempts to send identical text to the same phone twice in
+ * quick succession. Best-effort: per-instance, so multi-instance deploys
+ * may still allow one duplicate per instance — for hard guarantees move to
+ * a shared store (Redis or Service Bus dedup ids).
+ */
+const SEND_DEDUPE_TTL_MS = 60_000;
+const recentSends: Map<string, number> = new Map();
+
+function dedupeKey(to: string, text: string): string {
+    const norm = (text || '').replace(/\s+/g, ' ').trim();
+    return `${to}::${norm}`;
+}
+
+function isDuplicateSend(to: string, text: string): boolean {
+    if (!text) return false;
+    const key = dedupeKey(to, text);
+    const now = Date.now();
+    const expiry = recentSends.get(key);
+    if (expiry && expiry > now) return true;
+    recentSends.set(key, now + SEND_DEDUPE_TTL_MS);
+    // Opportunistic cleanup so the map can't grow unbounded under noisy traffic.
+    if (recentSends.size > 1024) {
+        for (const [k, v] of recentSends) {
+            if (v <= now) recentSends.delete(k);
+        }
+    }
+    return false;
+}
+
 export class MetaWhatsAppService {
     private token: string;
     private phoneNumberId: string;
@@ -54,6 +86,11 @@ export class MetaWhatsAppService {
         }
 
         const cleaned = sanitizeForWhatsApp(message);
+
+        if (isDuplicateSend(to, cleaned)) {
+            console.warn(`[Meta WhatsApp] Suppressed duplicate text send to ${to} within ${SEND_DEDUPE_TTL_MS / 1000}s window`);
+            return null;
+        }
 
         try {
             const url = `${this.baseUrl}/${this.activePhoneNumberId()}/messages`;

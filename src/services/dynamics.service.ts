@@ -90,6 +90,24 @@ export const CLASSIFICATION_LEVEL = {
     ESCALATION: 463630003,
 } as const;
 
+/**
+ * Strip trailing parenthetical admin markers from a Dynamics case row's
+ * `new_name` before it ever reaches the model context. Admins occasionally
+ * annotate case names with internal labels — "(duplicate)", "(test)",
+ * "(refund pending)" — that should never surface to clients. The regex
+ * matches at most one parenthetical group of up to 30 chars at the very end.
+ */
+function sanitizeCaseRow<T extends { new_name?: any }>(row: T): T {
+    if (!row || typeof row !== 'object') return row;
+    if (typeof row.new_name === 'string') {
+        const cleaned = row.new_name.replace(/\s*\([^)]{1,30}\)\s*$/, '').trim();
+        if (cleaned !== row.new_name) {
+            return { ...row, new_name: cleaned };
+        }
+    }
+    return row;
+}
+
 export class DynamicsService {
     private cca: msal.ConfidentialClientApplication;
     private baseUrl: string;
@@ -370,11 +388,12 @@ export class DynamicsService {
     }
 
     async getClientCases(contactId: string): Promise<any[]> {
-        return this.getList(
+        const rows = await this.getList(
             'new_cases',
             `_ttt_clientname_value eq ${contactId}`,
             ['new_name', 'icon_caseprocess', 'icon_casestage', 'statecode', 'createdon']
         );
+        return rows.map(sanitizeCaseRow);
     }
 
     /**
@@ -384,7 +403,7 @@ export class DynamicsService {
      * formatted OptionSet labels come along for free.
      */
     async getActiveTaxCases(contactId: string): Promise<any[]> {
-        return this.getList(
+        const rows = await this.getList(
             'new_cases',
             `_ttt_clientname_value eq ${contactId} and statecode eq 0`,
             [
@@ -400,6 +419,7 @@ export class DynamicsService {
                 '_ownerid_value',
             ]
         );
+        return rows.map(sanitizeCaseRow);
     }
 
     /**
@@ -482,11 +502,12 @@ export class DynamicsService {
     }
 
     async getStaffCases(userId: string): Promise<any[]> {
-        return this.getList(
+        const rows = await this.getList(
             'new_cases',
             `_ownerid_value eq ${userId} and statecode eq 0`,
             ['new_name', 'icon_caseprocess', 'icon_casestage', 'statecode', 'createdon', '_ttt_clientname_value']
         );
+        return rows.map(sanitizeCaseRow);
     }
 
     async getContactByPhone(phoneNumber: string): Promise<any | null> {
