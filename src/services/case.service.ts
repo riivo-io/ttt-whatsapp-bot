@@ -49,6 +49,7 @@ export const L1_TOPICS = [
     'required_documents',
     'received_documents',
     'audit_status',
+    'tax_form_request',
     // Knowledge-based topics the bot answers from general SA tax knowledge
     'tax_season_dates',
     'home_office_requirements',
@@ -70,10 +71,21 @@ const EMOJI_ONLY_RE = /^[\p{Emoji}\p{Emoji_Presentation}\p{Extended_Pictographic
 
 const CLASSIFIER_SYSTEM_PROMPT = `Classify the following client WhatsApp query.
 
-Default to "L1" (bot can handle). Only classify as "escalation" for queries
-that clearly require a human consultant — personal financial advice with
-real risk of getting it wrong, complaints, payment disputes, requests to
-change sensitive account details, or explicit asks to talk to a person.
+Default heavily to "L1" (bot can handle). The bot's job is to engage and try
+to help — even with complaints, payment disputes, requests to change account
+details, or sensitive scenarios. The bot stays inside its tool set; it doesn't
+need to "solve" everything to classify as L1, it just needs to be the right
+first responder.
+
+ONLY classify as "escalation" when the client's message is itself a direct,
+explicit request to speak to a human, a consultant, or a person — e.g.
+"can a consultant call me", "I want to speak to someone", "please get a human
+on this", "transfer me to your team". Frustration, complaints, "this is wrong",
+or "I'm not happy" alone are NOT escalation — the bot tries to help first.
+
+A short request that just names a tax form ("vehicle detail sheet", "logbook",
+"commission expense sheet") is the client asking the bot to send that form —
+classify as tax_form_request, not escalation.
 
 L1 topics — tool-backed lookups the bot answers directly from CRM data:
 - invoice_query: outstanding balance, invoice list, invoice details, "do I have any invoices"
@@ -85,6 +97,7 @@ L1 topics — tool-backed lookups the bot answers directly from CRM data:
 - required_documents: "what docs do you need?", "what's outstanding?", what to send
 - received_documents: "have you received my docs?", "what have you got from me?"
 - audit_status: "am I on audit?", verification, SARS reviewing the case
+- tax_form_request: "send me the vehicle detail sheet", "can I have the logbook", any ask for a fillable tax form / template
 
 L1 topics — general knowledge the bot answers without CRM lookups:
 - tax_season_dates: dates, deadlines, filing windows

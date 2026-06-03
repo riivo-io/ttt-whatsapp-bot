@@ -136,7 +136,8 @@ class GraphMailService {
      * "no WhatsApp number on record", "no response in 48h").
      */
     async sendMail(params: {
-        to: string;
+        to: string | string[];
+        cc?: string[];
         subject: string;
         bodyText: string;
         replyToMessageId?: string;
@@ -156,16 +157,24 @@ class GraphMailService {
                 return true;
             }
 
+            const toList = (Array.isArray(params.to) ? params.to : [params.to]).filter(Boolean);
+            const ccList = (params.cc || []).filter(Boolean);
+            const message: any = {
+                subject: params.subject,
+                body: { contentType: 'Text', content: params.bodyText },
+                toRecipients: toList.map(address => ({ emailAddress: { address } })),
+            };
+            if (ccList.length > 0) {
+                message.ccRecipients = ccList.map(address => ({ emailAddress: { address } }));
+            }
+
             const url = `${GRAPH_BASE}${this.mailboxPath()}/sendMail`;
             await axios.post(url, {
-                message: {
-                    subject: params.subject,
-                    body: { contentType: 'Text', content: params.bodyText },
-                    toRecipients: [{ emailAddress: { address: params.to } }],
-                },
+                message,
                 saveToSentItems: true,
             }, { headers });
-            console.log(`[GraphMail] Sent mail to ${params.to} (subject: "${params.subject}")`);
+            const ccLog = ccList.length > 0 ? ` cc=${ccList.join(',')}` : '';
+            console.log(`[GraphMail] Sent mail to ${toList.join(',')}${ccLog} (subject: "${params.subject}")`);
             return true;
         } catch (e: any) {
             console.error('[GraphMail] sendMail failed:', e?.response?.data || e.message);

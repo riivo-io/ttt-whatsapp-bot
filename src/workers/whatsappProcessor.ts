@@ -920,11 +920,14 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         } else if (latestCase) {
             // Continuation — reuse the existing case + Dynamics request.
             crmRequestId = latestCase.crm_case_id;
-            if (latestCase.status === 'escalated' && qualifies) {
+            if (latestCase.status === 'escalated' && (qualifies || caseService.detectWrapUp(effectiveText))) {
                 // Vague openers ("To do my tax") sometimes get flagged escalation
                 // on the first turn; once the client clarifies, the case is
                 // clearly L1. Attempt recovery — if successful, the post-response
                 // block sets respondingCaseId so the L1 feedback flow runs.
+                // A closing ack ("thanks") after an escalation is also strong
+                // evidence the bot actually answered fine; let it run the same
+                // recovery path so the wrap-up close below can pick the case up.
                 reclassifyCaseId = latestCase.id;
             } else if (latestCase.status !== 'escalated') {
                 respondingCaseId = latestCase.id;
@@ -986,12 +989,39 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         await supabaseService.setSessionPendingCase(session.id, null);
     }
 
+    const history = await supabaseService.getHistory(session.id);
+    const historyWithoutCurrent = history.slice(0, -1);
+
     // Wrap-up short-circuit: an explicit "thanks"-style inbound closes every
     // open case in the session as confirmed and sends the canned notification
     // in place of a Claude-generated answer. Falls through to the normal AI
     // path if no open case was actually closed (so a freestanding "thanks"
     // doesn't drop the rest of the bot's behaviour).
     if (crmEntity.type === 'client' && caseService.detectWrapUp(effectiveText)) {
+        // If the latest case was escalated, try to recover it first — a
+        // wrap-up ack is strong evidence the bot actually answered, so we
+        // re-classify with the full conversation. On a recovery flip, the
+        // case becomes status='classified' and the wrap-up close below
+        // picks it up like any other open case.
+        if (reclassifyCaseId) {
+            try {
+                const r = await caseService.reclassifyCase(
+                    reclassifyCaseId,
+                    historyWithoutCurrent,
+                    effectiveText,
+                    crmRequestId,
+                );
+                if (r.recovered) {
+                    console.log(`[Processor] wrap-up recovered escalation caseId=${reclassifyCaseId}`);
+                }
+            } catch (e: any) {
+                console.warn('[Processor] wrap-up reclassify failed:', e?.message || e);
+            }
+            // Done with recovery — null the id so the parallel reclassify
+            // promise below short-circuits and the post-response block
+            // doesn't try to re-promote the same case.
+            reclassifyCaseId = null;
+        }
         const closed = await caseService.resolveAllOpenCasesAsConfirmed(session.id)
             .catch(e => {
                 console.warn('[Processor] wrap-up close failed:', e.message);
@@ -1010,9 +1040,6 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             return;
         }
     }
-
-    const history = await supabaseService.getHistory(session.id);
-    const historyWithoutCurrent = history.slice(0, -1);
 
     console.log(`[Processor] ${from} (${session.crm_type}) session=${session.id} history=${history.length} request=${crmRequestId || 'none'}`);
 

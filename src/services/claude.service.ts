@@ -113,15 +113,17 @@ You provide accurate, helpful advice about South African tax matters and have ac
 - If the user wants to speak to a consultant, talk to a human, needs personal assistance, or wants someone to call them back, use the request_consultant_callback tool.
 - After submitting the request, relay the confirmation message from the tool response.
 
-**NEVER PROMISE WHAT YOU CAN'T DO — escalate instead**:
+**NEVER PROMISE WHAT YOU CAN'T DO — but DO NOT self-escalate**:
 - Stay strictly within what your available tools and your own knowledge actually let you do. NEVER invent a capability, offer to "log", "capture", "create", "submit", "send", "set up", "arrange", "book", or "schedule" anything on the user's behalf unless a tool you can see right now does exactly that. If no tool does it, you can't do it — say so.
 - Examples of forbidden offers (this list is not exhaustive — the principle is what matters):
     * "Want me to log your friend / capture their details / create a referral lead for them?" — NO. You cannot create leads on a client's behalf. Hand them their own referral link via get_my_referral_code and let them forward it.
     * "I'll send the link to your friend for you" — NO. The client forwards the link themselves.
     * "Let me update your address / banking details / industry" — NO, unless an explicit tool for that exists in this conversation.
     * "I'll book a meeting / schedule a call for you" — NO, unless an explicit tool for that exists. Use request_consultant_callback if they want a human to call them.
-- If the user asks for something you genuinely cannot do or you're not confident in your answer (a tax question outside what you're sure of, an account question your tools don't expose, a scenario you've never seen), call escalate_to_taxcrew with their question and a short reason. Then tell them you've flagged it to the taxcrew so they don't repeat themselves.
-- escalate_to_taxcrew vs request_consultant_callback: use request_consultant_callback ONLY when the user has explicitly asked to speak to a person. Use escalate_to_taxcrew when YOU are the one who realised you can't answer — the user didn't ask for a human, you decided you need one. Never use either as a courtesy offer at the end of a reply.
+- **Engage before escalating.** When the client raises something tricky — a complaint, a payment dispute, a confusing scenario, a tax question you're unsure of — your default is to engage and try to understand. Ask a clarifying question. Try a different angle. Use the tools you have. Say what you DO know and what you'd need to confirm. NEVER give up on the first turn and reach for an escalation tool.
+- If after engaging you genuinely cannot answer (your tools don't expose the data, the question is outside your knowledge), say so honestly — name what specifically you can't do, offer the closest thing you CAN do, and stay engaged. Do NOT call escalate_to_taxcrew or request_consultant_callback off your own initiative. The client decides whether they want a human.
+- The ONLY trigger for either escalation tool is a direct, explicit request from the client for a human / consultant / person — e.g. "can a consultant call me", "I want to speak to someone", "please get a human on this", "just put me through to a person". Frustration words alone ("this is wrong", "I'm not happy") do not count — keep engaging.
+- escalate_to_taxcrew vs request_consultant_callback: both only fire on an explicit consultant ask. Default to request_consultant_callback (it creates a Dynamics callback record and routes to the client's consultant automatically). Use escalate_to_taxcrew only when the client wants their specific question forwarded in writing to the team (e.g. "can the team email me about this", "send my question to someone who can answer"). Never use either as a courtesy offer at the end of a reply.
 
 **WhatsApp Opt-Out**:
 - If the user explicitly wants to stop receiving WhatsApp messages, unsubscribe, or opt out, use the opt_out_whatsapp tool.
@@ -248,12 +250,12 @@ const TOOLS: Anthropic.Tool[] = [
     },
     {
         name: "escalate_to_taxcrew",
-        description: "Forward an unanswered question to the TTT taxcrew inbox when you genuinely cannot answer it from your own knowledge or your available tools. Use this when the user asks something outside what you can verify (e.g. an account state your tools don't expose, a tax question you're not confident about, a request to do something no tool supports). Do NOT use this as a generic offer of 'human help' — that is what request_consultant_callback is for. After calling this, tell the user you've flagged it to the taxcrew so they don't repeat themselves.",
+        description: "Forward the client's question in writing to the team — emails the client's TTT consultant (with the taxcrew inbox CC'd). ONLY call this when the client has EXPLICITLY asked for their question to be forwarded, emailed, or sent to a human (e.g. 'can someone email me about this', 'send my question to the team'). Do NOT call this off your own initiative just because you can't answer — say so honestly and stay engaged instead. For a phone callback request, use request_consultant_callback instead.",
         input_schema: {
             type: "object",
             properties: {
                 question: { type: "string", description: "The user's question or request, in their own words. Quote the most recent message; don't paraphrase." },
-                reason: { type: "string", description: "Why you can't answer from your tools or knowledge — short. E.g. 'no tool exposes provisional tax penalty status', 'unsure whether VAT applies to this scenario', 'client asking us to act on third party's behalf'." },
+                reason: { type: "string", description: "Short note on what the client wants — e.g. 'client asked for the team to email them about this', 'client wants written follow-up on penalty status'." },
             },
             required: ["question", "reason"],
         },
@@ -2239,24 +2241,55 @@ What NOT to do:
                                 : entityType === 'lead'
                                     ? 'lead (mid-onboarding)'
                                     : 'unknown sender';
+
+                            // Resolve the client's owner (their assigned consultant) so the
+                            // escalation lands in their inbox first, with taxcrew CC'd as
+                            // backup. Only meaningful for clients — leads/unknown fall
+                            // back to taxcrew-only.
+                            const TAXCREW_INBOX = 'taxcrew@ttt-tax.co.za';
+                            let ownerName: string | null = null;
+                            let ownerEmail: string | null = null;
+                            if (entityType === 'client' && contactId) {
+                                try {
+                                    const ownerId = await dynamicsService.getContactOwnerId(contactId);
+                                    if (ownerId) {
+                                        const consultant = await dynamicsService.getSystemUserById(ownerId);
+                                        if (consultant?.email) {
+                                            ownerName = consultant.fullname || null;
+                                            ownerEmail = consultant.email;
+                                        }
+                                    }
+                                } catch (e: any) {
+                                    console.warn(`[escalate_to_taxcrew] owner lookup failed: ${e?.message || e}`);
+                                }
+                            }
+
                             const subject = `Tina escalation — ${senderLabel}`;
+                            const greeting = ownerName ? `${ownerName.split(/\s+/)[0]},` : 'Team,';
                             const body = [
-                                `${senderLabel} (${phoneLine}, ${roleLabel}) asked Tina something she couldn't answer.`,
+                                greeting,
+                                '',
+                                `${senderLabel} (${phoneLine}, ${roleLabel}) asked Tina to forward their question to you.`,
                                 '',
                                 `Their question:`,
                                 question || '(not captured)',
                                 '',
-                                `Why Tina escalated:`,
+                                `Context:`,
                                 reason || '(not captured)',
                                 '',
-                                `Tina has already told them the taxcrew will follow up, so please reach out on ${phoneLine} or by email when you can.`,
+                                `Tina has told them you'll be in touch, so please reach out on ${phoneLine} or by email when you can.`,
                                 '',
                                 '— Tina',
                             ].join('\n');
+
+                            const toList = ownerEmail ? [ownerEmail] : [TAXCREW_INBOX];
+                            const ccList = ownerEmail ? [TAXCREW_INBOX] : undefined;
+
                             let emailSent = false;
                             try {
                                 emailSent = await graphMailService.sendMail({
-                                    to: 'taxcrew@ttt-tax.co.za',
+                                    to: toList,
+                                    cc: ccList,
                                     subject,
                                     bodyText: body,
                                 });
@@ -2264,14 +2297,17 @@ What NOT to do:
                                 console.error(`[escalate_to_taxcrew] sendMail threw: ${e?.message || e}`);
                             }
                             if (emailSent) {
+                                const routedLabel = ownerEmail
+                                    ? `${ownerName || 'your consultant'} (with taxcrew CC'd)`
+                                    : `the taxcrew`;
                                 functionResponse = JSON.stringify({
                                     status: "success",
-                                    message: "Escalation emailed to taxcrew@ttt-tax.co.za. Tell the user briefly that you've flagged the question to the taxcrew and they'll be in touch on this number. Do NOT promise a specific turnaround time."
+                                    message: `Escalation emailed to ${routedLabel}. Tell the user briefly that you've forwarded their question and the team will be in touch on this number. Do NOT promise a specific turnaround time.`
                                 });
                             } else {
                                 functionResponse = JSON.stringify({
                                     status: "error",
-                                    message: "Could not email the taxcrew. Tell the user to email taxcrew@ttt-tax.co.za directly with their question and the team will pick it up. Apologise briefly."
+                                    message: "Could not send the escalation email. Tell the user to email taxcrew@ttt-tax.co.za directly with their question and the team will pick it up. Apologise briefly."
                                 });
                             }
                         } else if (functionName === 'get_required_documents') {
