@@ -118,31 +118,10 @@ router.get('/graph-renew-subscription', async (req: Request, res: Response) => {
  *      in Dynamics (i.e. the lead has been converted to a Contact by Power
  *      Automate since the last sweep).
  */
-router.get('/loe-activation-sweep', async (req: Request, res: Response) => {
-    if (!isAuthorized(req)) {
-        res.status(401).json({ error: 'unauthorized' });
-        return;
-    }
-
-    // KILL SWITCH — set LOE_SWEEP_DISABLED=1 in Azure App Service config to
-    // halt the sweep without redeploying. Lets us stop a runaway sweep
-    // (e.g. sentinel writes silently failing → every hour re-blasts WhatsApp
-    // + taxcrew email for every "loereceived=true, no sentinel" lead) the
-    // moment we notice, then re-enable by flipping the var back.
-    if (process.env.LOE_SWEEP_DISABLED === '1') {
-        console.warn('[Cron] loe-activation-sweep skipped — LOE_SWEEP_DISABLED=1');
-        res.json({ ok: true, skipped: true, reason: 'LOE_SWEEP_DISABLED' });
-        return;
-    }
-
-    const summary: { activations: number; activationsFailed: number; irp5Drained: number } = {
-        activations: 0,
-        activationsFailed: 0,
-        irp5Drained: 0,
-    };
-
+async function runLoeActivationSweep(): Promise<void> {
+    const summary = { activations: 0, activationsFailed: 0, irp5Drained: 0 };
+    const startedAt = Date.now();
     try {
-        // (1) Activation sweep — find leads that signed but were never activated.
         const leads = await dynamicsService.findLeadsAwaitingPostLoeActivation();
         console.log(`[Cron] loe-activation-sweep: ${leads.length} lead(s) awaiting activation`);
         for (const { id } of leads) {
@@ -159,9 +138,6 @@ router.get('/loe-activation-sweep', async (req: Request, res: Response) => {
             }
         }
 
-        // (2) Pending IRP5 drain — pull any rows whose lead now has a Contact.
-        // We collect distinct lead_ids from the open pending rows and look up
-        // each phone in Dynamics; if the phone now resolves to a Contact, drain.
         const distinctLeadPhones = await supabaseService.findPendingIrp5LeadPhones();
         for (const { leadId, phoneNumber } of distinctLeadPhones) {
             try {
@@ -175,11 +151,38 @@ router.get('/loe-activation-sweep', async (req: Request, res: Response) => {
             }
         }
 
-        res.json({ ok: true, summary });
+        const elapsedMs = Date.now() - startedAt;
+        console.log(`[Cron] loe-activation-sweep done in ${elapsedMs}ms: ${JSON.stringify(summary)}`);
     } catch (e: any) {
         console.error('[Cron] loe-activation-sweep failed:', e?.message || e);
-        res.status(500).json({ ok: false, error: e?.message || 'unknown' });
     }
+}
+
+router.get('/loe-activation-sweep', (req: Request, res: Response) => {
+    if (!isAuthorized(req)) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+
+    // KILL SWITCH — set LOE_SWEEP_DISABLED=1 in Azure App Service config to
+    // halt the sweep without redeploying. Lets us stop a runaway sweep
+    // (e.g. sentinel writes silently failing → every hour re-blasts WhatsApp
+    // + taxcrew email for every "loereceived=true, no sentinel" lead) the
+    // moment we notice, then re-enable by flipping the var back.
+    if (process.env.LOE_SWEEP_DISABLED === '1') {
+        console.warn('[Cron] loe-activation-sweep skipped — LOE_SWEEP_DISABLED=1');
+        res.json({ ok: true, skipped: true, reason: 'LOE_SWEEP_DISABLED' });
+        return;
+    }
+
+    // Fire-and-forget. Azure App Service's load balancer caps requests at ~4
+    // minutes; a backlog or a slow Dynamics/Meta call used to push the sweep
+    // past that, the LB returned 504, and GHA reported a false failure even
+    // though the work kept running. Acknowledging immediately and processing
+    // in the background keeps GHA honest. Cross-invocation safety is already
+    // handled by the per-lead Supabase mutex in idempotencyService.
+    void runLoeActivationSweep();
+    res.status(202).json({ ok: true, accepted: true });
 });
 
 /**
