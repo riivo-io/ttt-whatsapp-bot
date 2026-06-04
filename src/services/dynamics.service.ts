@@ -728,6 +728,21 @@ export class DynamicsService {
     }
 
     /**
+     * Look up the owning systemuser GUID for a given lead. Mirrors
+     * getContactOwnerId so a request raised off a lead can inherit the lead's
+     * owner (keeping request ownership aligned with the consultant already on
+     * the lead).
+     */
+    async getLeadOwnerId(leadId: string): Promise<string | null> {
+        const lead = await this.searchEntity(
+            'new_leads',
+            `new_leadid eq ${leadId} and statecode eq 0`,
+            ['new_leadid', '_ownerid_value']
+        );
+        return lead?._ownerid_value || null;
+    }
+
+    /**
      * Read the fields needed to personalise the required-documents list:
      * the contact's SARS source codes (multi-select optionset, stored as the
      * formatted label string) and industry name.
@@ -2130,6 +2145,17 @@ export class DynamicsService {
             payload['riivo_Lead@odata.bind'] = `/new_leads(${targetId})`;
         }
 
+        // Inherit the owner from the linked client/lead so the request lands
+        // with the consultant who already owns that record rather than the
+        // integration user. Best-effort: if the lookup fails we leave ownerid
+        // unset and let Power Automate's default assignment take over.
+        const ownerId = params.contactType === 'client'
+            ? await this.getContactOwnerId(targetId)
+            : await this.getLeadOwnerId(targetId);
+        if (ownerId) {
+            payload['ownerid@odata.bind'] = `/systemusers(${ownerId})`;
+        }
+
         try {
             const response = await this.crmPost('riivo_requests', payload, targetId);
             const riivoRequestId: string | undefined = response.data?.riivo_requestid;
@@ -2225,6 +2251,17 @@ export class DynamicsService {
                 payload['riivo_Client@odata.bind'] = `/contacts(${entity.id})`;
             } else if (entity.type === 'lead') {
                 payload['riivo_Lead@odata.bind'] = `/new_leads(${entity.id})`;
+            }
+
+            // Inherit the owner from the linked client/lead so the callback
+            // request lands with that record's consultant. Best-effort.
+            const ownerId = entity.type === 'client'
+                ? await this.getContactOwnerId(entity.id)
+                : entity.type === 'lead'
+                    ? await this.getLeadOwnerId(entity.id)
+                    : null;
+            if (ownerId) {
+                payload['ownerid@odata.bind'] = `/systemusers(${ownerId})`;
             }
         }
 
