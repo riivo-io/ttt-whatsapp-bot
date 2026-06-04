@@ -2,7 +2,8 @@ import { claudeService } from '../services/claude.service';
 import { metaWhatsAppService } from '../services/meta.service';
 import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
-import { stagePendingUpload, peekPendingUpload, clearPendingUpload } from '../services/pendingUpload.service';
+import { stagePendingUpload, peekPendingUpload, clearPendingUpload, saveClientDocumentDirect, processClientIrp5Upload } from '../services/pendingUpload.service';
+import { inferDocTypeFromFilename } from '../utils/docTypeMapping';
 import { pendingIrp5Service } from '../services/pendingIrp5.service';
 import {
     caseService,
@@ -615,10 +616,18 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         return;
     }
 
+    // Buffer is hoisted so the deterministic client-document branch (below,
+    // after sender resolution) can persist the file directly without going
+    // back through the single-slot staging Map. We still stage so the staff
+    // and lead Claude-tool paths keep working unchanged.
+    let documentBuffer: Buffer | null = null;
+    let documentMime = '';
     if (document) {
         try {
             const { buffer, mimeType } = await metaWhatsAppService.downloadMedia(document.id);
-            stagePendingUpload(from, document.filename, mimeType || document.mimeType, buffer);
+            documentBuffer = buffer;
+            documentMime = mimeType || document.mimeType;
+            stagePendingUpload(from, document.filename, documentMime, buffer);
         } catch (e) {
             console.error('[Processor] Failed to download Meta media:', (e as Error).message);
             await metaWhatsAppService.sendMessage(from, "Sorry, I couldn't download that file from WhatsApp. Please try sending it again.");
@@ -805,6 +814,83 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         }
     }
 
+    // Client document upload — file it immediately, no classification round-trip.
+    // IRP5s (detected by filename) run the full OCR/parse + onboarding flow;
+    // every other doc is filed under a filename-inferred type. We reuse the
+    // session's open case if there is one, else open ONE case for the upload —
+    // never a fresh case per document, so a burst of files doesn't fan out into
+    // a pile of REQs. The locally-held buffer is persisted directly, so
+    // back-to-back uploads can't clobber each other in the staging Map. Any
+    // caption is preserved on the CRM row as notes; the ack invites a follow-up
+    // so a question sent alongside a file still gets answered on the next turn.
+    if (crmEntity.type === 'client' && document && documentBuffer) {
+        const docType = inferDocTypeFromFilename(document.filename);
+        const caption = (text || '').trim();
+
+        let docCase = await supabaseService.findOpenCaseForSession(session.id);
+        if (!docCase) {
+            docCase = await caseService.createCase({
+                sessionId: session.id,
+                contactId: crmEntity.id,
+                contactType: 'client',
+                phoneNumber: from,
+                queryText: `Document upload: ${document.filename}`,
+            });
+        }
+        const docCrmRequestId = docCase?.crm_case_id || null;
+
+        await supabaseService.saveMessage(session.id, 'user', effectiveText);
+        try {
+            await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, docCrmRequestId);
+        } catch (e) {
+            console.warn('[Processor] Doc incoming log failed:', (e as Error).message);
+        }
+
+        let ack: string;
+        if (docType === 'IRP5') {
+            const result = await processClientIrp5Upload({
+                contactId: crmEntity.id,
+                contactFullName: crmEntity.fullname || '',
+                fileName: document.filename,
+                mimeType: documentMime || document.mimeType,
+                buffer: documentBuffer,
+            });
+            if (result.status === 'error') {
+                ack = "Got your IRP5 but I hit a snag filing it. Please try resending in a few minutes — your consultant will follow up if it keeps failing.";
+            } else if (result.missingDocs.length === 0) {
+                ack = `Got your IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year ✅. Looks like that's everything we need — your consultant will be in touch if anything else comes up.`;
+            } else {
+                const next = result.missingDocs[0];
+                ack = `Got your IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year ✅.${result.wrongYearWarning ? ` One thing — ${result.wrongYearWarning}` : ''} Next I'll need your ${next.label}${next.notes ? ` (${next.notes})` : ''}.`;
+            }
+        } else {
+            const saved = await saveClientDocumentDirect({
+                contactId: crmEntity.id,
+                docType,
+                fileName: document.filename,
+                mimeType: documentMime || document.mimeType,
+                buffer: documentBuffer,
+                notes: caption || undefined,
+            });
+            const label = docType === 'Other' ? 'document' : docType.toLowerCase();
+            ack = saved.success
+                ? `Got it — saved your ${label} ✅. Anything else I can help with?`
+                : "I got the file but hit a snag filing it. Please try resending shortly — your consultant will follow up if it keeps failing.";
+        }
+
+        clearPendingUpload(from);
+
+        await supabaseService.saveMessage(session.id, 'assistant', ack);
+        await metaWhatsAppService.sendMessage(from, ack);
+        try {
+            await dynamicsService.logMessage(crmEntity, ack, 'Outgoing', from, docCrmRequestId);
+        } catch (e) {
+            console.warn('[Processor] Doc outgoing log failed:', (e as Error).message);
+        }
+        console.log(`[Processor] doc_saved phone=${from} type=${docType} case=${docCrmRequestId || 'none'} caption=${caption ? 'yes' : 'no'}`);
+        return;
+    }
+
     // Client-only: "Something else" tap → short ack and return. No case, no AI.
     // The next inbound flows through the normal AI path with full freedom.
     if (crmEntity.type === 'client' && interactiveId === CLIENT_MENU_IDS.OTHER) {
@@ -925,7 +1011,21 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         const latestCase = await supabaseService.findOpenCaseForSession(session.id);
         const qualifies = caseService.qualifyMessage(effectiveText);
 
-        if (latestCase && latestCase.status === 'bot_responded' && qualifies) {
+        // A feedback reply or closing ack belongs to the existing case — it is
+        // NOT a new topic. Without this guard a "Yes, thanks" button tap (which
+        // Meta delivers as the literal title text) reads as a fresh qualifying
+        // question, closing the prior case and spawning a duplicate REQ that
+        // resolves in the same turn. Button taps are unambiguous; a yes/no while
+        // a feedback prompt is outstanding, or any wrap-up ack, is treated the
+        // same way. These all fall through to the continuation branch below and
+        // are then closed properly (as confirmed) by the feedback/wrap-up paths.
+        const looksLikeFeedbackOrAck =
+            interactiveId === CASE_FEEDBACK_BUTTON_YES ||
+            interactiveId === CASE_FEEDBACK_BUTTON_NO ||
+            caseService.detectWrapUp(effectiveText) ||
+            ((session as any).pending_case_id != null && caseService.detectFeedback(effectiveText) !== null);
+
+        if (latestCase && latestCase.status === 'bot_responded' && qualifies && !looksLikeFeedbackOrAck) {
             // Topic shift — close the prior thread before opening a new one.
             try {
                 await caseService.markResolvedByBot(latestCase.id, 'topic_shift', latestCase.crm_case_id);
