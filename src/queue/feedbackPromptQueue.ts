@@ -37,10 +37,18 @@ function getSender(): ServiceBusSender {
 export async function enqueueFeedbackPrompt(payload: FeedbackPromptJobPayload): Promise<void> {
     const msg: ServiceBusMessage = {
         body: payload,
-        // messageId = prompt-<caseId> guarantees at most one delayed prompt
-        // per case even if the enqueue site is ever retried (within the
-        // 10-min dedup window — well under the 2.5-min delay).
-        messageId: `prompt-${payload.caseId}`,
+        // messageId is keyed by case AND answer timestamp — one delayed prompt
+        // per bot answer, not per case. A case reused across a multi-turn
+        // conversation (each answer calls enqueueFeedbackPrompt) must schedule a
+        // fresh prompt per answer: keying on caseId alone would let the queue's
+        // 10-min duplicate detection drop every prompt after the first, leaving
+        // only a stale one pinned to the earliest answer — which then always
+        // fails the worker's "client replied since?" idle check and never fires.
+        // Per-answer keying lets every answer schedule its own check; the worker
+        // collapses them (pending_case_id + idle check) so at most one sends.
+        // Same answer re-enqueued (enqueue-site retry) still dedups on the
+        // identical botAnswerSentAt.
+        messageId: `prompt-${payload.caseId}-${payload.botAnswerSentAt}`,
         scheduledEnqueueTimeUtc: new Date(Date.now() + FEEDBACK_PROMPT_DELAY_MS),
     };
     await getSender().sendMessages(msg);
