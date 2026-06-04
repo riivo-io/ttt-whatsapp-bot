@@ -33,3 +33,33 @@ const BOT_TO_CANONICAL: Record<string, string> = {
 export function mapDocTypeToCanonical(botDocType: string): string {
     return BOT_TO_CANONICAL[botDocType] || 'Other';
 }
+
+/**
+ * Best-effort doc-type guess from an uploaded file's name, returning one of
+ * the bot's `save_document` enum labels (feed it through mapDocTypeToCanonical
+ * for the CRM tag). Used by the WhatsApp processor to file client uploads
+ * immediately without asking the client to classify. Conservative: anything
+ * unrecognised falls back to "Other", which consultants can re-tag from the
+ * filename + notes preserved on the row.
+ *
+ * IRP5 detection here is the trigger for the OCR/parse + onboarding flow, so
+ * keep it tight — only match clear IRP5 signals, not generic "tax certificate".
+ */
+const FILENAME_DOCTYPE_RULES: { re: RegExp; docType: string }[] = [
+    { re: /irp\s*-?_?5/i, docType: 'IRP5' },
+    { re: /it3\s*\(?a\)?/i, docType: 'IT3(a)' },
+    { re: /it3\s*\(?b\)?/i, docType: 'IT3(b)' },
+    { re: /bank|statement/i, docType: 'Bank Statement' },
+    { re: /payslip|salary\s*slip|pay\s*slip/i, docType: 'Payslip' },
+    { re: /medical|med\s*aid|discovery|momentum|bonitas/i, docType: 'Medical Certificate' },
+    { re: /logbook|log\s*book|mileage|travel\s*log/i, docType: 'Logbook' },
+    { re: /receipt|till\s*slip|invoice|slip/i, docType: 'Till Slip / Receipt' },
+];
+
+export function inferDocTypeFromFilename(fileName: string): string {
+    const name = (fileName || '').toLowerCase();
+    for (const rule of FILENAME_DOCTYPE_RULES) {
+        if (rule.re.test(name)) return rule.docType;
+    }
+    return 'Other';
+}

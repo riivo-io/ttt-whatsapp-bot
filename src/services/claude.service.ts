@@ -14,7 +14,7 @@ import { mistralService } from './mistral.service';
 import { loeExtractorService } from './loe-extractor.service';
 import { irp5ExtractorService, inferSourceCodesFromIrp5Row } from './irp5-extractor.service';
 import { supabaseService } from './supabase.service';
-import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload } from './pendingUpload.service';
+import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload, processClientIrp5Upload } from './pendingUpload.service';
 import { sharePointService } from './sharepoint.service';
 import { computeRequiredDocuments, formatRequiredDocumentsMessage, computeMissingDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
 import {
@@ -1867,120 +1867,39 @@ What NOT to do:
                         return JSON.stringify({ status: 'error', error: 'no_contact_record', message: 'Could not load the contact record from CRM. Please retry in a moment.' });
                     }
 
-                    const currentTaxYear = getCurrentSaTaxYear();
-
-                    // Step 1: SharePoint upload.
-                    let webUrl: string | undefined;
-                    try {
-                        const spResult = await sharePointService.uploadDocumentFile({
-                            contactFullName: contact.fullname,
-                            contactId,
-                            uploadYear: new Date().getFullYear(),
-                            fileName: staged.fileName,
-                            mimeType: staged.mimeType,
-                            buffer: staged.buffer,
-                        });
-                        webUrl = spResult.webUrl;
-                    } catch (err: any) {
-                        const msg = err?.response?.data?.error?.message || err?.message || 'unknown error';
-                        console.error(`[upload_irp5] SharePoint upload failed for ${contactId}/${staged.fileName}:`, msg);
-                        return JSON.stringify({ status: 'error', error: 'sharepoint_failed', message: `Couldn't store the file in SharePoint: ${msg}. Ask the client to resend in a moment.` });
-                    }
-
-                    // Step 2: riivo_taxsubmissiondocuments row (canonical IRP5 tag + SharePoint link).
-                    const tsdResult = await dynamicsService.createTaxSubmissionDocument({
+                    // All the SharePoint → tsd-row → OCR → parse → irp5-row →
+                    // missing-docs work lives in processClientIrp5Upload so the
+                    // deterministic WhatsApp upload path and this tool path share
+                    // one implementation. We build the Claude-facing message here.
+                    const result = await processClientIrp5Upload({
                         contactId,
-                        canonicalDocType: 'IRP5',
-                        fileReferenceUrl: webUrl,
-                        documentNotes: `Uploaded via WhatsApp Bot on ${new Date().toISOString().slice(0, 10)}. Bot doc type: IRP5. File: ${staged.fileName}.`,
-                        triggeredBy: contactId,
+                        contactFullName: contact.fullname,
+                        fileName: staged.fileName,
+                        mimeType: staged.mimeType,
+                        buffer: staged.buffer,
                     });
-                    if (!tsdResult.success) {
-                        console.warn(`[upload_irp5] taxsubmissionsdocuments row create failed for ${contactId} — file is at ${webUrl}`);
+                    if (result.status === 'error') {
+                        // Leave the staged file in place so the client can resend.
+                        return JSON.stringify(result);
                     }
-
-                    // Step 3 + 4: OCR + structured extraction (best-effort —
-                    // failure here doesn't undo the file upload).
-                    let ocrMarkdown: string | null = null;
-                    if (mistralService.isConfigured()) {
-                        try {
-                            const ocr = await mistralService.ocrDocument(staged.fileName, staged.buffer, staged.mimeType || 'application/pdf');
-                            ocrMarkdown = ocr.fullMarkdown;
-                            console.log(`[upload_irp5] OCR'd ${staged.fileName} → ${ocr.pageCount} pages, ${ocrMarkdown.length} chars`);
-                        } catch (err: any) {
-                            console.warn(`[upload_irp5] OCR failed: ${err?.message || err}`);
-                        }
-                    }
-
-                    const extracted = ocrMarkdown
-                        ? await irp5ExtractorService.extractIrp5Fields(ocrMarkdown)
-                        : { riivoFields: {}, sourceCodes: [] as string[] };
-
-                    // Out-of-season detection: warn but proceed. The client
-                    // sometimes sends last year's cert by mistake.
-                    let wrongYearWarning: string | undefined;
-                    if (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear !== currentTaxYear.label) {
-                        wrongYearWarning = `The cert reads as the ${extracted.assessmentYear} assessment year, but we're collecting docs for ${currentTaxYear.label} (${currentTaxYear.rangeText}). Ask the client to confirm whether they meant to send this older one before you proceed asking for more docs.`;
-                    }
-
-                    // Step 5: riivo_irp5s row (with cert-number dedupe).
-                    let irp5RecordId: string | undefined;
-                    let irp5Updated = false;
-                    if (Object.keys(extracted.riivoFields).length > 0) {
-                        const irp5Result = await dynamicsService.createIrp5Record({
-                            contactId,
-                            filename: staged.fileName,
-                            sharepointUrl: webUrl,
-                            fields: extracted.riivoFields,
-                        });
-                        if (irp5Result.success) {
-                            irp5RecordId = irp5Result.recordId;
-                            irp5Updated = Boolean(irp5Result.updated);
-                        } else {
-                            console.warn(`[upload_irp5] riivo_irp5s row create failed: ${irp5Result.error}`);
-                        }
-                    } else {
-                        console.warn(`[upload_irp5] No fields extracted — skipping riivo_irp5s row create (file + taxsubmissionsdocuments row already on file)`);
-                    }
-
-                    // Step 6: union source codes across this IRP5 + every
-                    // other IRP5 on file for the same assessment year (multi-
-                    // employer flow). We use the just-extracted assessment
-                    // year if confident, otherwise the current SA tax year.
-                    const targetYear = (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear === currentTaxYear.label)
-                        ? extracted.assessmentYear
-                        : currentTaxYear.label;
-                    const priorIrp5s = await dynamicsService.getIrp5RecordsForClient(contactId, targetYear);
-                    const priorCodes = priorIrp5s
-                        .filter((r: any) => r?.riivo_irp5id !== irp5RecordId) // skip the row we just wrote
-                        .flatMap((r: any) => inferSourceCodesFromIrp5Row(r));
-                    const allCodes = Array.from(new Set([...extracted.sourceCodes, ...priorCodes]));
-
-                    // Step 7: compute outstanding docs.
-                    const missing = await computeMissingDocsForClient(contactId, allCodes, new Date());
-
-                    // Remove "IRP5" from the outstanding list — they've just sent one.
-                    const outstandingForClient = missing.outstanding.filter(d => !/^irp5\b/i.test(d.label));
-
-                    // Clear the staged upload — we're done with it. The PDF
-                    // is in SharePoint and the cert is parsed into CRM.
+                    // Success — done with the staged upload.
                     clearPendingUpload(phone);
 
                     return JSON.stringify({
                         status: 'irp5_processed',
-                        employer_name: extracted.employerName || null,
-                        assessment_year: extracted.assessmentYear || targetYear,
-                        certificate_number: extracted.certificateNumber || null,
-                        source_codes_found: extracted.sourceCodes,
-                        irp5_record_id: irp5RecordId || null,
-                        irp5_updated: irp5Updated,
-                        taxsubmissionsdocument_id: tsdResult.recordId || null,
-                        sharepoint_url: webUrl,
-                        wrong_year_warning: wrongYearWarning,
-                        missing_docs: outstandingForClient.map(d => ({ label: d.label, notes: d.notes })),
-                        message: outstandingForClient.length === 0
-                            ? `IRP5${extracted.employerName ? ` from ${extracted.employerName}` : ''} for the ${targetYear} tax year is on file. Looks like that's everything we need — your consultant will be in touch if anything else comes up.`
-                            : `IRP5${extracted.employerName ? ` from ${extracted.employerName}` : ''} for the ${targetYear} tax year is on file. Compose a short warm reply that (a) thanks the client, (b) names the employer + year, (c) asks for the NEXT single outstanding doc only (do NOT list the full outstanding list — one doc at a time). The next doc is "${outstandingForClient[0].label}"${outstandingForClient[0].notes ? ` (${outstandingForClient[0].notes})` : ''}.${wrongYearWarning ? ' But first: ' + wrongYearWarning : ''}`,
+                        employer_name: result.employerName,
+                        assessment_year: result.assessmentYear,
+                        certificate_number: result.certificateNumber,
+                        source_codes_found: result.sourceCodes,
+                        irp5_record_id: result.irp5RecordId,
+                        irp5_updated: result.irp5Updated,
+                        taxsubmissionsdocument_id: result.taxsubmissionsdocumentId,
+                        sharepoint_url: result.sharepointUrl,
+                        wrong_year_warning: result.wrongYearWarning,
+                        missing_docs: result.missingDocs,
+                        message: result.missingDocs.length === 0
+                            ? `IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year is on file. Looks like that's everything we need — your consultant will be in touch if anything else comes up.`
+                            : `IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year is on file. Compose a short warm reply that (a) thanks the client, (b) names the employer + year, (c) asks for the NEXT single outstanding doc only (do NOT list the full outstanding list — one doc at a time). The next doc is "${result.missingDocs[0].label}"${result.missingDocs[0].notes ? ` (${result.missingDocs[0].notes})` : ''}.${result.wrongYearWarning ? ' But first: ' + result.wrongYearWarning : ''}`,
                     });
                 };
 
