@@ -1886,6 +1886,7 @@ What NOT to do:
                     }
                     // Success — done with the staged upload.
                     clearPendingUpload(phone);
+                    if (sessionId) await supabaseService.flagSessionDocUpload(sessionId);
 
                     return JSON.stringify({
                         status: 'irp5_processed',
@@ -2127,6 +2128,7 @@ What NOT to do:
                             );
 
                             if (success) {
+                                if (sessionId) await supabaseService.flagSessionEscalation(sessionId);
                                 // Check if within working hours (8:00-17:00 SAST, Mon-Fri)
                                 const now = new Date();
                                 const saTime = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Johannesburg' }));
@@ -2218,6 +2220,7 @@ What NOT to do:
                                 console.error(`[escalate_to_taxcrew] sendMail threw: ${e?.message || e}`);
                             }
                             if (emailSent) {
+                                if (sessionId) await supabaseService.flagSessionEscalation(sessionId);
                                 const routedLabel = ownerEmail
                                     ? `${ownerName || 'your consultant'} (with taxcrew CC'd)`
                                     : `the taxcrew`;
@@ -2593,6 +2596,7 @@ What NOT to do:
                                 } else {
                                     const result = await savePendingUpload(phoneNumber, args.doc_type, targetEntity, args.notes);
                                     if (result.success) {
+                                        if (sessionId && targetEntity.type === 'client') await supabaseService.flagSessionDocUpload(sessionId);
                                         functionResponse = JSON.stringify({
                                             status: "success",
                                             message: `Your ${args.doc_type.toLowerCase()} has been saved to your profile.`
