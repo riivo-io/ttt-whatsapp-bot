@@ -90,6 +90,23 @@ export const CLASSIFICATION_LEVEL = {
     ESCALATION: 463630003,
 } as const;
 
+// Model-driven app id for the TTT Dynamics app. Deep links into records must
+// carry the appid so the record opens in the right app context — without it
+// the link can land on a blank/wrong app shell. Override via DYNAMICS_APP_ID
+// if the app id ever changes.
+export const DYNAMICS_APP_ID = process.env.DYNAMICS_APP_ID || '8beff390-07da-4354-9d43-c58f2b665f94';
+
+/**
+ * Build a deep link to a Dynamics record. `entity` is the entity logical name
+ * (e.g. 'new_lead' for leads, 'contact' for clients). Returns null when
+ * DYNAMICS_URL isn't configured so callers can fall back gracefully.
+ */
+export function buildDynamicsRecordUrl(entity: string, id: string): string | null {
+    const base = process.env.DYNAMICS_URL?.replace(/\/$/, '');
+    if (!base) return null;
+    return `${base}/main.aspx?appid=${DYNAMICS_APP_ID}&pagetype=entityrecord&etn=${entity}&id=${id}`;
+}
+
 /**
  * Strip trailing parenthetical admin markers from a Dynamics case row's
  * `new_name` before it ever reaches the model context. Admins occasionally

@@ -8,8 +8,10 @@ import {
     RESOLUTION_METHOD,
     CLIENT_FEEDBACK,
     CLASSIFICATION_LEVEL,
+    buildDynamicsRecordUrl,
 } from './dynamics.service';
 import { supabaseService, WhatsAppCaseRow, CaseLevel } from './supabase.service';
+import { graphMailService } from './graphMail.service';
 import { RateLimitError } from '../utils/anthropicRateLimit';
 
 dotenv.config();
@@ -311,6 +313,9 @@ class CaseService {
                 riivo_resolutionmethod: RESOLUTION_METHOD.AUTO_DIRECT_ANSWER,
             });
         }
+
+        const closed = await supabaseService.getCase(caseId);
+        if (closed?.session_id) this.triggerCloseSummary(closed.session_id);
     }
 
     /**
@@ -320,6 +325,8 @@ class CaseService {
      */
     async markEscalated(caseId: string, reason: string, crmRequestId?: string | null): Promise<void> {
         await supabaseService.updateCase(caseId, { status: 'escalated' });
+        const escalated = await supabaseService.getCase(caseId);
+        if (escalated?.session_id) await supabaseService.flagSessionEscalation(escalated.session_id);
         const crmId = crmRequestId ?? await this.resolveCrmId(caseId);
         if (crmId) {
             await dynamicsService.updateRequest(crmId, {
@@ -449,11 +456,17 @@ class CaseService {
                     });
                 }
             }
+
+            // One summary for the whole session — the claim inside dedups the
+            // sibling fan-out down to a single consultant email.
+            if (anchor?.session_id) this.triggerCloseSummary(anchor.session_id);
         } else {
             await supabaseService.updateCase(caseId, {
                 status: 'escalated',
                 feedback_received: 'rejected',
             });
+            const rejected = await supabaseService.getCase(caseId);
+            if (rejected?.session_id) await supabaseService.flagSessionEscalation(rejected.session_id);
             const crmId = await this.resolveCrmId(caseId);
             if (crmId) {
                 await dynamicsService.updateRequest(crmId, {
@@ -503,6 +516,10 @@ class CaseService {
 
         if (rows.length > 0) {
             console.log(`[CaseService] Resolved ${rows.length} open case(s) for lead ${leadId} reason=${reason} skipFeedback=${opts?.skipFeedback === true}`);
+        }
+
+        for (const sessionId of new Set(rows.map(r => r.session_id))) {
+            this.triggerCloseSummary(sessionId);
         }
         return rows.length;
     }
@@ -601,7 +618,161 @@ class CaseService {
                     riivo_resolutionmethod: RESOLUTION_METHOD.TIMEOUT_ASSUMED_RESOLVED,
                 }))
         );
+
+        // One close-summary per swept session (claimCloseSummary dedups within
+        // the session, so siblings swept together still email the consultant once).
+        for (const sessionId of new Set(swept.map(r => r.session_id))) {
+            this.triggerCloseSummary(sessionId);
+        }
         return swept.length;
+    }
+
+    // -------------------------------------------------------------------------
+    // Consultant close-summary
+    // -------------------------------------------------------------------------
+
+    /**
+     * Fire-and-forget entry point for the consultant close-summary. Safe to call
+     * from any close path — it never throws and never blocks the caller. The
+     * actual work (gate check, claim, summarise, email) runs in the background;
+     * the worker process is long-lived (a queue consumer, not an HTTP request),
+     * so the promise completes well after the close path returns.
+     */
+    triggerCloseSummary(sessionId: string): void {
+        this.sendConsultantCloseSummary(sessionId).catch(e =>
+            console.warn(`[CaseService] close-summary failed for session ${sessionId}:`, e?.message || e)
+        );
+    }
+
+    /**
+     * Email the client's owning consultant a short summary of the conversation
+     * when a noteworthy session closes. "Noteworthy" = the client uploaded a
+     * document or an escalation fired in the session; quiet/ghost closes send
+     * nothing. Idempotent per session via claimCloseSummary, so a fan-out close
+     * or the timeout sweep can't double-send.
+     */
+    private async sendConsultantCloseSummary(sessionId: string): Promise<void> {
+        const session = await supabaseService.getSession(sessionId);
+        if (!session) return;
+
+        // Gate first, claim second — non-noteworthy sessions stay unclaimed so a
+        // later upload + close in the same session could still qualify.
+        if (!session.had_doc_upload && !session.had_escalation) return;
+        if (!session.crm_id) return;
+        if (!(await supabaseService.claimCloseSummary(sessionId))) return;
+
+        const isClient = session.crm_type === 'client' || session.crm_type === 'contact';
+
+        // Resolve the owning consultant. Fall back to the taxcrew inbox so a
+        // client with no owner on file still produces a summary somewhere.
+        const TAXCREW_INBOX = 'taxcrew@ttt-tax.co.za';
+        let ownerName: string | null = null;
+        let ownerEmail: string | null = null;
+        try {
+            const ownerId = isClient
+                ? await dynamicsService.getContactOwnerId(session.crm_id)
+                : await dynamicsService.getLeadOwnerId(session.crm_id);
+            if (ownerId) {
+                const consultant = await dynamicsService.getSystemUserById(ownerId);
+                if (consultant?.email) {
+                    ownerName = consultant.fullname || null;
+                    ownerEmail = consultant.email;
+                }
+            }
+        } catch (e: any) {
+            console.warn(`[CaseService] close-summary owner lookup failed: ${e?.message || e}`);
+        }
+
+        // Best-effort client name for the subject/body.
+        let clientName: string | null = null;
+        if (isClient) {
+            try {
+                const contact = await dynamicsService.getContactDetails(session.crm_id);
+                clientName = contact?.fullname || null;
+            } catch { /* non-fatal */ }
+        }
+        const clientLabel = clientName || session.phone_number || 'the client';
+
+        const history = await supabaseService.getHistory(sessionId);
+        if (history.length === 0) return;
+
+        const summary = await this.summariseConversation(history, clientLabel, session.had_doc_upload);
+
+        const recordLink = buildDynamicsRecordUrl(isClient ? 'contact' : 'new_lead', session.crm_id);
+
+        const greeting = ownerName ? `${ownerName.split(/\s+/)[0]},` : 'Team,';
+        const bodyLines = [
+            greeting,
+            '',
+            `Tina wrapped up a WhatsApp conversation with ${clientLabel}. Quick summary:`,
+            '',
+            summary,
+            '',
+        ];
+        if (session.had_doc_upload) {
+            bodyLines.push('Documents were uploaded during this conversation — they\'re on the client\'s record.', '');
+        }
+        if (recordLink) {
+            bodyLines.push('View client record:', recordLink, '');
+        }
+        bodyLines.push('— Tina');
+
+        const subject = `Tina conversation summary — ${clientLabel}`;
+        try {
+            const sent = await graphMailService.sendMail({
+                to: ownerEmail || TAXCREW_INBOX,
+                subject,
+                bodyText: bodyLines.join('\n'),
+            });
+            console.log(`[CaseService] close-summary ${sent ? 'sent' : 'send failed'} for session ${sessionId} → ${ownerEmail || TAXCREW_INBOX} (docs=${session.had_doc_upload} esc=${session.had_escalation})`);
+        } catch (e: any) {
+            console.error(`[CaseService] close-summary sendMail threw for session ${sessionId}: ${e?.message || e}`);
+        }
+    }
+
+    /**
+     * Summarise a conversation for the consultant in a few tight lines. Uses the
+     * same lightweight Haiku model as the classifier. Returns a plain-text
+     * summary; on any failure returns a short fallback so the email still sends.
+     */
+    private async summariseConversation(
+        history: { role: 'user' | 'assistant'; content: string }[],
+        clientLabel: string,
+        hadDocUpload: boolean,
+    ): Promise<string> {
+        const transcript = history
+            .map(m => `[${m.role === 'user' ? 'Client' : 'Tina'}] ${m.content}`)
+            .join('\n')
+            .slice(0, 12000);
+
+        const system = `You are summarising a closed WhatsApp conversation between a tax client and Tina (an AI assistant at TTT Financial Group) for the client's consultant.
+
+Write a tight summary (2-4 short bullet points or sentences, no preamble) covering:
+- what the client wanted / asked about
+- what Tina did or resolved
+- anything the consultant should follow up on (open questions, documents received, promises made)
+
+Be factual and specific. Do not invent details. No greeting, no sign-off — just the summary.`;
+
+        try {
+            const res = await this.getAnthropic().messages.create({
+                model: CLASSIFIER_MODEL,
+                max_tokens: 400,
+                system,
+                messages: [{ role: 'user', content: `Conversation with ${clientLabel}:\n\n${transcript}` }],
+            });
+            const text = res.content
+                .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+                .map(b => b.text)
+                .join('\n')
+                .trim();
+            if (text) return text;
+        } catch (e: any) {
+            console.warn(`[CaseService] summariseConversation failed: ${e?.message || e}`);
+        }
+        return hadDocUpload
+            ? `${clientLabel} sent documents via WhatsApp. See the client record for details.`
+            : `Conversation with ${clientLabel} closed. See the client record for details.`;
     }
 }
 

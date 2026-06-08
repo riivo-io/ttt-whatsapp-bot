@@ -1,4 +1,4 @@
-import { dynamicsService, LEAD_TYPE_TAX } from './dynamics.service';
+import { dynamicsService, LEAD_TYPE_TAX, buildDynamicsRecordUrl } from './dynamics.service';
 import { metaWhatsAppService } from './meta.service';
 import { graphMailService } from './graphMail.service';
 import { caseService } from './case.service';
@@ -46,9 +46,7 @@ function buildThankYouMessage(firstName: string): string {
  * Build the taxcrew email body. Copy locked in PRD §7.3.
  */
 function buildTaxcrewEmail(leadName: string, phone: string | null, leadId: string): { subject: string; body: string } {
-    const dynamicsUrl = process.env.DYNAMICS_URL
-        ? `${process.env.DYNAMICS_URL.replace(/\/$/, '')}/main.aspx?etn=lead&id=${leadId}&pagetype=entityrecord`
-        : `(Dynamics lead id: ${leadId})`;
+    const dynamicsUrl = buildDynamicsRecordUrl('new_lead', leadId) || `(Dynamics lead id: ${leadId})`;
     const phoneLine = phone || '(no phone on file)';
     const subject = `New lead ready for eFiling OTP call — ${leadName}`;
     const body = [

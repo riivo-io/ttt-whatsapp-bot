@@ -25,6 +25,9 @@ interface Session {
     message_count: number;
     token_count: number;
     cap_blocked_at: string | null;
+    had_doc_upload: boolean;
+    had_escalation: boolean;
+    close_summary_sent_at: string | null;
 }
 
 export type CaseLevel = 'L1' | 'escalation';
@@ -947,7 +950,7 @@ class SupabaseService {
      * Returns the rows that were swept so the caller can mirror state to
      * Dynamics.
      */
-    async sweepTimedOutCases(thresholdHours: number): Promise<{ id: string; crm_case_id: string | null }[]> {
+    async sweepTimedOutCases(thresholdHours: number): Promise<{ id: string; crm_case_id: string | null; session_id: string; contact_id: string }[]> {
         const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000).toISOString();
 
         const { data, error } = await this.client
@@ -959,13 +962,13 @@ class SupabaseService {
             })
             .eq('status', 'bot_responded')
             .lt('updated_at', cutoff)
-            .select('id, crm_case_id');
+            .select('id, crm_case_id, session_id, contact_id');
 
         if (error) {
             console.error('[Supabase] sweepTimedOutCases error:', error.message);
             return [];
         }
-        const rows = (data || []) as { id: string; crm_case_id: string | null }[];
+        const rows = (data || []) as { id: string; crm_case_id: string | null; session_id: string; contact_id: string }[];
         if (rows.length > 0) console.log(`[Supabase] Swept ${rows.length} timed-out case(s)`);
         return rows;
     }
@@ -1110,6 +1113,50 @@ class SupabaseService {
         if (error) {
             console.error('[Supabase] Failed to set pending_case_id:', error.message);
         }
+    }
+
+    /**
+     * Mark that a noteworthy event happened in this session — a client document
+     * upload or an escalation. Both feed the consultant close-summary gate: a
+     * session only earns a summary on close if at least one of these is set.
+     * Best-effort; a failure here just means the session might miss its summary.
+     */
+    async flagSessionDocUpload(sessionId: string): Promise<void> {
+        const { error } = await this.client
+            .from('sessions')
+            .update({ had_doc_upload: true })
+            .eq('id', sessionId);
+        if (error) console.warn('[Supabase] flagSessionDocUpload error:', error.message);
+    }
+
+    async flagSessionEscalation(sessionId: string): Promise<void> {
+        const { error } = await this.client
+            .from('sessions')
+            .update({ had_escalation: true })
+            .eq('id', sessionId);
+        if (error) console.warn('[Supabase] flagSessionEscalation error:', error.message);
+    }
+
+    /**
+     * Atomically claim the right to send this session's close-summary. Sets
+     * close_summary_sent_at only if it was NULL, and returns true to exactly one
+     * caller. A fan-out close (one "Yes" resolving several sibling cases) or the
+     * timeout sweep racing an inbound therefore can't double-send. Returns false
+     * if already claimed or on error (fail-closed — better a missed summary than
+     * a duplicate).
+     */
+    async claimCloseSummary(sessionId: string): Promise<boolean> {
+        const { data, error } = await this.client
+            .from('sessions')
+            .update({ close_summary_sent_at: new Date().toISOString() })
+            .eq('id', sessionId)
+            .is('close_summary_sent_at', null)
+            .select('id');
+        if (error) {
+            console.warn('[Supabase] claimCloseSummary error:', error.message);
+            return false;
+        }
+        return (data?.length || 0) > 0;
     }
 
     // -------------------------------------------------------------------------
