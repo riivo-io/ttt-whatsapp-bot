@@ -847,6 +847,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         }
 
         let ack: string;
+        let docFiled = false;
         if (docType === 'IRP5') {
             const result = await processClientIrp5Upload({
                 contactId: crmEntity.id,
@@ -858,8 +859,10 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             if (result.status === 'error') {
                 ack = "Got your IRP5 but I hit a snag filing it. Please try resending in a few minutes — your consultant will follow up if it keeps failing.";
             } else if (result.missingDocs.length === 0) {
+                docFiled = true;
                 ack = `Got your IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year ✅. Looks like that's everything we need — your consultant will be in touch if anything else comes up.`;
             } else {
+                docFiled = true;
                 const next = result.missingDocs[0];
                 ack = `Got your IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year ✅.${result.wrongYearWarning ? ` One thing — ${result.wrongYearWarning}` : ''} Next I'll need your ${next.label}${next.notes ? ` (${next.notes})` : ''}.`;
             }
@@ -872,11 +875,15 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
                 buffer: documentBuffer,
                 notes: caption || undefined,
             });
+            docFiled = saved.success;
             const label = docType === 'Other' ? 'document' : docType.toLowerCase();
             ack = saved.success
                 ? `Got it — saved your ${label} ✅. Anything else I can help with?`
                 : "I got the file but hit a snag filing it. Please try resending shortly — your consultant will follow up if it keeps failing.";
         }
+
+        // Mark the session noteworthy so its close emails the consultant a summary.
+        if (docFiled) await supabaseService.flagSessionDocUpload(session.id);
 
         clearPendingUpload(from);
 
@@ -887,6 +894,14 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         } catch (e) {
             console.warn('[Processor] Doc outgoing log failed:', (e as Error).message);
         }
+
+        // Mark the doc case as answered so the 12h timeout sweep eventually
+        // closes it — that close fires the consultant summary even when the
+        // client uploads and then goes quiet (the headline doc-drop case).
+        if (docFiled && docCase?.id) {
+            await caseService.recordBotResponse(docCase.id, 'document_upload_ack', ack, docCrmRequestId);
+        }
+
         console.log(`[Processor] doc_saved phone=${from} type=${docType} case=${docCrmRequestId || 'none'} caption=${caption ? 'yes' : 'no'}`);
         return;
     }

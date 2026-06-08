@@ -89,9 +89,9 @@
 <header class="hero">
   <h1>TTT WhatsApp Bot — System Architecture</h1>
   <p class="sub">
-    A hybrid Vercel + worker bot for TTT Financial Group: clients message on WhatsApp, Meta posts to a thin
-    ingester on Vercel, jobs land in a sharded Redis queue, and a long-lived worker calls Claude with tools
-    that read/write Dynamics, Supabase, SharePoint, and Microsoft Graph.
+    A two-process bot for TTT Financial Group, both halves on Azure App Service: clients message on WhatsApp, Meta
+    posts to a thin web ingester that ACKs and enqueues onto Azure Service Bus, and a long-lived worker drains the
+    queue and calls Claude with tools that read/write Dynamics, Supabase, SharePoint, and Microsoft Graph.
   </p>
 </header>
 
@@ -101,8 +101,8 @@
 <section>
   <h2>System overview</h2>
   <p class="muted">
-    The ingester stays fast and returns 200 to Meta in milliseconds; everything heavy (Claude, CRM writes, OCR,
-    knowledge-base lookups) runs on the worker behind a per-phone FIFO queue.
+    The web ingester stays fast and returns 200 to Meta in milliseconds; everything heavy (Claude, CRM writes, OCR,
+    knowledge-base lookups) runs on the worker behind a per-phone FIFO queue (Service Bus sessions keyed by phone).
   </p>
 
   <div class="diagram-wrap">
@@ -115,8 +115,8 @@
           <path d="M0,0 L10,5 L0,10 z" fill="#7dd3fc" />
         </marker>
         <linearGradient id="g-meta" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1f7a3a"/><stop offset="1" stop-color="#0f4d23"/></linearGradient>
-        <linearGradient id="g-vercel" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#222"/><stop offset="1" stop-color="#000"/></linearGradient>
-        <linearGradient id="g-redis" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7a1414"/><stop offset="1" stop-color="#4a0a0a"/></linearGradient>
+        <linearGradient id="g-web" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1f4ea8"/><stop offset="1" stop-color="#0c1f47"/></linearGradient>
+        <linearGradient id="g-bus" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e5fb0"/><stop offset="1" stop-color="#0a2d63"/></linearGradient>
         <linearGradient id="g-worker" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4338ca"/><stop offset="1" stop-color="#1e1b4b"/></linearGradient>
         <linearGradient id="g-claude" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b45309"/><stop offset="1" stop-color="#7c2d12"/></linearGradient>
         <linearGradient id="g-supabase" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f7a4f"/><stop offset="1" stop-color="#064e3b"/></linearGradient>
@@ -141,33 +141,33 @@
         <text class="node-sub" x="300" y="386" text-anchor="middle" fill="#bfe6c8">Templates + media</text>
       </g>
 
-      <!-- Vercel ingester -->
+      <!-- Azure App Service: web ingester -->
       <g>
-        <rect x="430" y="290" rx="14" ry="14" width="190" height="150" fill="url(#g-vercel)" stroke="#2a3464"/>
-        <text class="node-label" x="525" y="318" text-anchor="middle" fill="#fff">Vercel — Express ingester</text>
-        <text class="node-sub" x="525" y="338" text-anchor="middle">src/server.ts</text>
-        <text class="node-sub" x="525" y="358" text-anchor="middle">POST /webhook (Meta)</text>
-        <text class="node-sub" x="525" y="374" text-anchor="middle">POST /webhook/email (Graph)</text>
-        <text class="node-sub" x="525" y="390" text-anchor="middle">GET /api/pdf/:id</text>
-        <text class="node-sub" x="525" y="406" text-anchor="middle">GET /api/cron/* (Vercel cron)</text>
+        <rect x="430" y="290" rx="14" ry="14" width="190" height="150" fill="url(#g-web)" stroke="#2a3464"/>
+        <text class="node-label" x="525" y="318" text-anchor="middle" fill="#fff">Azure App Service — web</text>
+        <text class="node-sub" x="525" y="338" text-anchor="middle" fill="#c8d8f4">src/server.ts (ingester)</text>
+        <text class="node-sub" x="525" y="356" text-anchor="middle" fill="#c8d8f4">POST /webhook (Meta)</text>
+        <text class="node-sub" x="525" y="372" text-anchor="middle" fill="#c8d8f4">/webhook/email · loe-signed</text>
+        <text class="node-sub" x="525" y="388" text-anchor="middle" fill="#c8d8f4">/webhook/outbound-notify</text>
+        <text class="node-sub" x="525" y="404" text-anchor="middle" fill="#c8d8f4">/api/pdf · /api/cron · /admin</text>
         <text class="node-sub" x="525" y="424" text-anchor="middle" fill="#7dd3fc">200 OK in &lt; 50 ms</text>
       </g>
 
-      <!-- Redis / BullMQ -->
+      <!-- Azure Service Bus -->
       <g>
-        <rect x="680" y="290" rx="14" ry="14" width="170" height="150" fill="url(#g-redis)" stroke="#2a3464"/>
-        <text class="node-label" x="765" y="318" text-anchor="middle" fill="#ffeaea">Upstash Redis</text>
-        <text class="node-sub" x="765" y="336" text-anchor="middle" fill="#e8c2c2">BullMQ + GroupMQ</text>
-        <text class="node-sub" x="765" y="358" text-anchor="middle" fill="#e8c2c2">whatsapp-inbound-{0..N-1}</text>
-        <text class="node-sub" x="765" y="376" text-anchor="middle" fill="#e8c2c2">shard = hash(phone) % N</text>
-        <text class="node-sub" x="765" y="396" text-anchor="middle" fill="#e8c2c2">concurrency = 1 per shard</text>
-        <text class="node-sub" x="765" y="416" text-anchor="middle" fill="#fbbf24">jobId = wamid (dedupe)</text>
+        <rect x="680" y="290" rx="14" ry="14" width="170" height="150" fill="url(#g-bus)" stroke="#2a3464"/>
+        <text class="node-label" x="765" y="316" text-anchor="middle" fill="#eaf2ff">Azure Service Bus</text>
+        <text class="node-sub" x="765" y="336" text-anchor="middle" fill="#c8d8f4">whatsapp-inbound (sessions)</text>
+        <text class="node-sub" x="765" y="354" text-anchor="middle" fill="#c8d8f4">feedback-prompt (delayed)</text>
+        <text class="node-sub" x="765" y="372" text-anchor="middle" fill="#c8d8f4">case-auto-close (delayed)</text>
+        <text class="node-sub" x="765" y="392" text-anchor="middle" fill="#c8d8f4">session = phone → FIFO</text>
+        <text class="node-sub" x="765" y="416" text-anchor="middle" fill="#fbbf24">messageId = wamid (dedupe)</text>
       </g>
 
-      <!-- Worker (Fly.io / Railway) -->
+      <!-- Worker (Azure App Service) -->
       <g>
         <rect x="910" y="280" rx="14" ry="14" width="260" height="180" fill="url(#g-worker)" stroke="#2a3464"/>
-        <text class="node-label" x="1040" y="308" text-anchor="middle" fill="#fff">Worker — Fly.io / Railway</text>
+        <text class="node-label" x="1040" y="308" text-anchor="middle" fill="#fff">Worker — Azure App Service</text>
         <text class="node-sub" x="1040" y="326" text-anchor="middle" fill="#cfd2ff">src/worker.ts (long-running)</text>
         <text class="node-sub" x="1040" y="344" text-anchor="middle" fill="#cfd2ff">whatsappProcessor.ts</text>
         <text class="node-sub" x="1040" y="362" text-anchor="middle" fill="#cfd2ff">• Resolves identity (staff/lead/contact)</text>
@@ -175,7 +175,7 @@
         <text class="node-sub" x="1040" y="394" text-anchor="middle" fill="#cfd2ff">• Calls Claude with tools</text>
         <text class="node-sub" x="1040" y="410" text-anchor="middle" fill="#cfd2ff">• Writes Dynamics + Supabase</text>
         <text class="node-sub" x="1040" y="426" text-anchor="middle" fill="#cfd2ff">• Sends reply via Meta</text>
-        <text class="node-sub" x="1040" y="446" text-anchor="middle" fill="#7dd3fc">retry 4x, exp backoff</text>
+        <text class="node-sub" x="1040" y="446" text-anchor="middle" fill="#7dd3fc">MAX_CONCURRENT_SESSIONS · DLQ on exhaustion</text>
       </g>
 
       <!-- Bottom row: external systems the worker talks to -->
@@ -183,16 +183,16 @@
       <g>
         <rect x="40" y="540" rx="12" ry="12" width="170" height="86" fill="url(#g-claude)" stroke="#2a3464"/>
         <text class="node-label" x="125" y="568" text-anchor="middle" fill="#fff">Anthropic Claude</text>
-        <text class="node-sub" x="125" y="586" text-anchor="middle" fill="#fde7c8">claude-opus / haiku</text>
-        <text class="node-sub" x="125" y="602" text-anchor="middle" fill="#fde7c8">tool use, prompt cache</text>
-        <text class="node-sub" x="125" y="618" text-anchor="middle" fill="#fde7c8">streaming responses</text>
+        <text class="node-sub" x="125" y="586" text-anchor="middle" fill="#fde7c8">opus-4-7 (main + intent)</text>
+        <text class="node-sub" x="125" y="602" text-anchor="middle" fill="#fde7c8">haiku-4-5 (classify/extract)</text>
+        <text class="node-sub" x="125" y="618" text-anchor="middle" fill="#fde7c8">tool use, prompt cache</text>
       </g>
       <!-- Supabase -->
       <g>
         <rect x="230" y="540" rx="12" ry="12" width="170" height="86" fill="url(#g-supabase)" stroke="#2a3464"/>
         <text class="node-label" x="315" y="568" text-anchor="middle" fill="#fff">Supabase (Postgres)</text>
         <text class="node-sub" x="315" y="586" text-anchor="middle" fill="#bfeacf">sessions, history</text>
-        <text class="node-sub" x="315" y="602" text-anchor="middle" fill="#bfeacf">cases, idempotency</text>
+        <text class="node-sub" x="315" y="602" text-anchor="middle" fill="#bfeacf">cases, idempotency, DLQ</text>
         <text class="node-sub" x="315" y="618" text-anchor="middle" fill="#bfeacf">KB vectors (pgvector)</text>
       </g>
       <!-- Dynamics -->
@@ -200,7 +200,7 @@
         <rect x="420" y="540" rx="12" ry="12" width="170" height="86" fill="url(#g-ms)" stroke="#2a3464"/>
         <text class="node-label" x="505" y="568" text-anchor="middle" fill="#fff">Dynamics 365</text>
         <text class="node-sub" x="505" y="586" text-anchor="middle" fill="#c8d8f4">contacts, leads</text>
-        <text class="node-sub" x="505" y="602" text-anchor="middle" fill="#c8d8f4">requests, cases</text>
+        <text class="node-sub" x="505" y="602" text-anchor="middle" fill="#c8d8f4">requests, cases, IRP5s</text>
         <text class="node-sub" x="505" y="618" text-anchor="middle" fill="#c8d8f4">invoices, attachments</text>
       </g>
       <!-- Graph Mail -->
@@ -208,7 +208,7 @@
         <rect x="610" y="540" rx="12" ry="12" width="170" height="86" fill="url(#g-ms)" stroke="#2a3464"/>
         <text class="node-label" x="695" y="568" text-anchor="middle" fill="#fff">Microsoft Graph</text>
         <text class="node-sub" x="695" y="586" text-anchor="middle" fill="#c8d8f4">tina-bot@ttt-group</text>
-        <text class="node-sub" x="695" y="602" text-anchor="middle" fill="#c8d8f4">mail subscriptions</text>
+        <text class="node-sub" x="695" y="602" text-anchor="middle" fill="#c8d8f4">mail subscriptions + send</text>
         <text class="node-sub" x="695" y="618" text-anchor="middle" fill="#c8d8f4">push → /webhook/email</text>
       </g>
       <!-- SharePoint -->
@@ -216,7 +216,7 @@
         <rect x="800" y="540" rx="12" ry="12" width="170" height="86" fill="url(#g-ms)" stroke="#2a3464"/>
         <text class="node-label" x="885" y="568" text-anchor="middle" fill="#fff">SharePoint</text>
         <text class="node-sub" x="885" y="586" text-anchor="middle" fill="#c8d8f4">Tax Navigator KB</text>
-        <text class="node-sub" x="885" y="602" text-anchor="middle" fill="#c8d8f4">client doc storage</text>
+        <text class="node-sub" x="885" y="602" text-anchor="middle" fill="#c8d8f4">tax forms + client docs</text>
         <text class="node-sub" x="885" y="618" text-anchor="middle" fill="#c8d8f4">ingested → embeddings</text>
       </g>
       <!-- OpenAI -->
@@ -232,7 +232,7 @@
         <rect x="1085" y="540" rx="12" ry="12" width="85" height="86" fill="url(#g-mistral)" stroke="#2a3464"/>
         <text class="node-label" x="1127" y="572" text-anchor="middle" fill="#fff">Mistral</text>
         <text class="node-sub" x="1127" y="590" text-anchor="middle" fill="#fde7c8">OCR</text>
-        <text class="node-sub" x="1127" y="606" text-anchor="middle" fill="#fde7c8">signed LOE</text>
+        <text class="node-sub" x="1127" y="606" text-anchor="middle" fill="#fde7c8">LOE + IRP5</text>
         <text class="node-sub" x="1127" y="620" text-anchor="middle" fill="#fde7c8">PDFs</text>
       </g>
 
@@ -268,21 +268,21 @@
       </g>
       <text class="edge-label" x="600" y="180" text-anchor="middle" fill="#34d399">reply via Meta send-message API</text>
 
-      <!-- Box: client web (onboarding / PDF) -->
+      <!-- Box: client web (onboarding / LOE) -->
       <g>
         <rect x="430" y="160" rx="12" ry="12" width="190" height="60" fill="#1a2247" stroke="#2a3464"/>
-        <text class="node-label" x="525" y="184" text-anchor="middle">Client onboarding (Next.js)</text>
-        <text class="node-sub" x="525" y="202" text-anchor="middle">ttt-tax.co.za/client-onboarding</text>
+        <text class="node-label" x="525" y="184" text-anchor="middle">LOE onboarding (Next.js)</text>
+        <text class="node-sub" x="525" y="202" text-anchor="middle">ttt-financial-forms.vercel.app</text>
       </g>
       <g stroke="#a78bfa" fill="none" marker-end="url(#arrow)" stroke-dasharray="3 3">
         <path class="edge dim" d="M525,220 L525,290"/>
       </g>
-      <text class="edge-label" x="650" y="260" fill="#a78bfa">magic link / LOE submit</text>
+      <text class="edge-label" x="650" y="260" fill="#a78bfa">magic link / LOE submit → /webhook/loe-signed</text>
 
-      <!-- Vercel cron -->
+      <!-- Scheduled cron -->
       <g>
         <rect x="430" y="470" rx="10" ry="10" width="190" height="50" fill="#101732" stroke="#2a3464"/>
-        <text class="node-label" x="525" y="492" text-anchor="middle">Vercel Cron</text>
+        <text class="node-label" x="525" y="492" text-anchor="middle">Scheduled (cron)</text>
         <text class="node-sub" x="525" y="510" text-anchor="middle">case-timeout, graph-renew</text>
       </g>
       <g stroke="#fbbf24" fill="none" marker-end="url(#arrow)" stroke-dasharray="3 3">
@@ -312,38 +312,50 @@
   <div class="grid-3">
     <div class="card">
       <h4>Split the ingester from the worker <span class="tag">latency</span></h4>
-      <p class="muted">Meta retries aggressively if the webhook doesn't return 2xx within seconds. The Vercel
-        ingester does the bare minimum (parse, idempotency check, enqueue) then returns 200. The worker can take
+      <p class="muted">Meta retries aggressively if the webhook doesn't return 2xx within seconds. The web App
+        Service does the bare minimum (parse, idempotency claim, enqueue) then returns 200. The worker can take
         20s on a Claude call without Meta caring.</p>
     </div>
     <div class="card">
-      <h4>Per-phone FIFO via sharded queues <span class="tag">ordering</span></h4>
+      <h4>Per-phone FIFO via Service Bus sessions <span class="tag">ordering</span></h4>
       <p class="muted">A user sending three messages in a row must be processed in order — Claude sees their full
-        context. Hashing phone → shard with <code>concurrency=1</code> per shard guarantees serial processing per
-        conversation while letting different phones run in parallel.</p>
+        context. The Service Bus <strong>session id is the phone number</strong>, so one consumer holds a phone's
+        messages at a time while different phones run in parallel up to <code>MAX_CONCURRENT_SESSIONS</code>.</p>
     </div>
     <div class="card">
-      <h4>Job ID = Meta's wamid <span class="tag">idempotency</span></h4>
-      <p class="muted">Meta will re-deliver the same message on transient failures. BullMQ rejects duplicate
-        jobIds, and Supabase has a unique constraint as the second line of defense. The DLQ table catches the rest.</p>
+      <h4>Dedupe = wamid, twice <span class="tag">idempotency</span></h4>
+      <p class="muted">Meta re-delivers on transient failures. The ingester claims the wamid in Supabase
+        (<code>INSERT … ON CONFLICT DO NOTHING</code>); Service Bus also dedupes on <code>messageId = wamid</code>.
+        Exhausted jobs land in <code>whatsapp_queue_dlq</code>.</p>
+    </div>
+    <div class="card">
+      <h4>Delayed jobs, not inline timers <span class="tag">flow</span></h4>
+      <p class="muted">After an L1 answer the worker enqueues a <code>feedback-prompt</code> job (~2.5 min) so it
+        doesn't interrupt a still-typing client; that in turn enqueues <code>case-auto-close</code> (~10 min) to
+        close silent cases. A 12h cron sweep is the fallback.</p>
     </div>
     <div class="card">
       <h4>Supabase as the phone→identity cache <span class="tag">cost</span></h4>
-      <p class="muted">Every inbound message would otherwise query Dynamics to know who's calling. Supabase caches
-        the mapping plus session + history + intent. Dynamics edits don't propagate until <code>npm run sync:users</code>
+      <p class="muted">Every inbound would otherwise query Dynamics to know who's calling. Supabase caches the
+        mapping plus session + history + intent. Dynamics edits don't propagate until <code>npm run sync:users</code>
         runs.</p>
     </div>
     <div class="card">
-      <h4>Vercel for the HTTP plane, Fly/Railway for the worker <span class="tag">runtime</span></h4>
-      <p class="muted">Vercel serverless is great for thin webhook handlers and PDF generation, but can't keep a
-        BullMQ worker warm. A persistent worker on Fly.io or Railway holds the Redis connection, runs N shards,
-        and survives long Claude streams.</p>
+      <h4>Two App Service apps, one queue between <span class="tag">runtime</span></h4>
+      <p class="muted">The web app is a thin HTTP plane (webhooks, PDF, admin); the worker app is a persistent
+        Service Bus consumer that survives long Claude streams. The queue is the only handoff — they share no memory.</p>
     </div>
     <div class="card">
       <h4>Claude does the routing, tools do the IO <span class="tag">flexibility</span></h4>
-      <p class="muted">Instead of writing a hardcoded intent classifier, the worker hands Claude a toolbox
-        (<code>get_invoices</code>, <code>get_refund_status</code>, <code>log_callback</code>, …) gated by the
-        sender's role. Claude chooses; the worker executes against Dynamics/Supabase.</p>
+      <p class="muted">Instead of a hardcoded intent classifier, the worker hands Claude a 39-tool box
+        (<code>get_client_invoices</code>, <code>get_refund_status</code>, <code>request_consultant_callback</code>, …)
+        gated by the sender's role. Claude chooses; the worker executes against Dynamics/Supabase.</p>
+    </div>
+    <div class="card">
+      <h4>Grounded answers via KB retrieval <span class="tag">accuracy</span></h4>
+      <p class="muted">Client/lead turns embed the message (OpenAI <code>text-embedding-3-small</code>) and pull the
+        top SharePoint-KB chunks from pgvector (<code>match_kb_chunks</code>), injected into the prompt only when
+        they're relevant — keeping the prompt cache warm on the common path.</p>
     </div>
   </div>
 </section>
@@ -386,11 +398,11 @@
         <rect x="190" y="40" rx="8" width="100" height="36" fill="url(#g-meta)" stroke="#2a3464"/>
         <text class="node-label" x="240" y="63" text-anchor="middle" fill="#eaffea">Meta</text>
 
-        <rect x="350" y="40" rx="8" width="100" height="36" fill="url(#g-vercel)" stroke="#2a3464"/>
-        <text class="node-label" x="400" y="63" text-anchor="middle" fill="#fff">Vercel</text>
+        <rect x="350" y="40" rx="8" width="100" height="36" fill="url(#g-web)" stroke="#2a3464"/>
+        <text class="node-label" x="400" y="63" text-anchor="middle" fill="#fff">Web (App Svc)</text>
 
-        <rect x="510" y="40" rx="8" width="100" height="36" fill="url(#g-redis)" stroke="#2a3464"/>
-        <text class="node-label" x="560" y="63" text-anchor="middle" fill="#ffeaea">Redis/BullMQ</text>
+        <rect x="510" y="40" rx="8" width="100" height="36" fill="url(#g-bus)" stroke="#2a3464"/>
+        <text class="node-label" x="560" y="63" text-anchor="middle" fill="#eaf2ff">Service Bus</text>
 
         <rect x="680" y="40" rx="8" width="100" height="36" fill="url(#g-worker)" stroke="#2a3464"/>
         <text class="node-label" x="730" y="63" text-anchor="middle" fill="#fff">Worker</text>
@@ -408,34 +420,34 @@
         <text class="edge-label" x="165" y="104" text-anchor="middle">1. "Has my 2024 refund been paid?"</text>
       </g>
 
-      <!-- Step 2: Meta → Vercel -->
+      <!-- Step 2: Meta → Web -->
       <g>
         <line x1="240" y1="140" x2="400" y2="140" stroke="#7dd3fc" stroke-width="1.6" marker-end="url(#seq-arrow-blue)"/>
         <text class="edge-label" x="320" y="134" text-anchor="middle">2. POST /webhook (wamid abc123)</text>
       </g>
 
-      <!-- Step 3: Vercel → Supabase (idempotency claim) -->
+      <!-- Step 3: Web → Supabase (idempotency claim) -->
       <g>
         <line x1="400" y1="180" x2="880" y2="180" stroke="#9aa3c7" stroke-width="1.4" marker-end="url(#seq-arrow)"/>
         <text class="edge-label" x="640" y="174" text-anchor="middle">3. claim(wamid) — INSERT ... ON CONFLICT DO NOTHING</text>
       </g>
 
-      <!-- Step 4: Vercel → Redis (enqueue) -->
+      <!-- Step 4: Web → Service Bus (enqueue) -->
       <g>
         <line x1="400" y1="215" x2="560" y2="215" stroke="#9aa3c7" stroke-width="1.4" marker-end="url(#seq-arrow)"/>
-        <text class="edge-label" x="480" y="209" text-anchor="middle">4. add({phone, wamid, raw}) shard = hash(+27...)%16</text>
+        <text class="edge-label" x="480" y="209" text-anchor="middle">4. enqueue {phone, wamid, raw} · session = +27…</text>
       </g>
 
-      <!-- Step 5: Vercel → Meta 200 OK -->
+      <!-- Step 5: Web → Meta 200 OK -->
       <g>
         <line x1="400" y1="250" x2="240" y2="250" stroke="#34d399" stroke-width="1.4" marker-end="url(#seq-arrow-green)"/>
         <text class="edge-label" x="320" y="244" text-anchor="middle" fill="#34d399">5. 200 OK (within ~50 ms)</text>
       </g>
 
-      <!-- Step 6: Redis → Worker -->
+      <!-- Step 6: Service Bus → Worker -->
       <g>
         <line x1="560" y1="290" x2="730" y2="290" stroke="#9aa3c7" stroke-width="1.4" marker-end="url(#seq-arrow)"/>
-        <text class="edge-label" x="645" y="284" text-anchor="middle">6. job assigned to shard-7</text>
+        <text class="edge-label" x="645" y="284" text-anchor="middle">6. session +27… handed to a worker slot</text>
       </g>
 
       <!-- Step 7: Worker → Supabase (session, history, identity) -->
@@ -447,13 +459,13 @@
       <!-- Step 8: Worker → Dynamics (lookup contact + recent requests) -->
       <g>
         <line x1="730" y1="360" x2="1040" y2="360" stroke="#9aa3c7" stroke-width="1.4" marker-end="url(#seq-arrow)"/>
-        <text class="edge-label" x="885" y="354" text-anchor="middle">8. Dynamics: contact by phone, recent tax requests</text>
+        <text class="edge-label" x="885" y="354" text-anchor="middle">8. Dynamics: contact by phone + KB retrieval (pgvector)</text>
       </g>
 
       <!-- Step 9: Worker → Claude (prompt + tools) -->
       <g>
         <line x1="730" y1="400" x2="1040" y2="400" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#seq-arrow)"/>
-        <text class="edge-label" x="885" y="394" text-anchor="middle" fill="#fbbf24">9. Claude: prompt + tools [get_refund_status, get_invoices...]</text>
+        <text class="edge-label" x="885" y="394" text-anchor="middle" fill="#fbbf24">9. Claude: prompt + tools [get_refund_status, get_client_invoices...]</text>
       </g>
 
       <!-- Step 10: Claude → Worker (tool call) -->
@@ -465,13 +477,13 @@
       <!-- Step 11: Worker → Dynamics (exec tool) -->
       <g>
         <line x1="730" y1="470" x2="1040" y2="470" stroke="#9aa3c7" stroke-width="1.4" marker-end="url(#seq-arrow)"/>
-        <text class="edge-label" x="885" y="464" text-anchor="middle">11. Dynamics: SARS refund status for 2024 return</text>
+        <text class="edge-label" x="885" y="464" text-anchor="middle">11. Dynamics: refund status for 2024 return</text>
       </g>
 
       <!-- Step 12: Worker → Claude (tool_result) -->
       <g>
         <line x1="730" y1="505" x2="1040" y2="505" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#seq-arrow)"/>
-        <text class="edge-label" x="885" y="499" text-anchor="middle" fill="#fbbf24">12. tool_result + Claude streams final answer</text>
+        <text class="edge-label" x="885" y="499" text-anchor="middle" fill="#fbbf24">12. tool_result → Claude composes final answer</text>
       </g>
 
       <!-- Step 13: Worker → Supabase (save reply + intent) -->
@@ -492,10 +504,10 @@
         <text class="edge-label" x="165" y="609" text-anchor="middle" fill="#34d399">15. delivered to Sarah's phone</text>
       </g>
 
-      <!-- Step 16: Worker → Dynamics (log inbound + outbound on case) -->
+      <!-- Step 16: Worker → Service Bus (enqueue delayed feedback prompt) -->
       <g>
-        <line x1="730" y1="650" x2="1040" y2="650" stroke="#9aa3c7" stroke-width="1.4" marker-end="url(#seq-arrow)" stroke-dasharray="4 3"/>
-        <text class="edge-label" x="885" y="644" text-anchor="middle">16. (async) Dynamics: append note to case, auto-resolve L1</text>
+        <line x1="730" y1="650" x2="560" y2="650" stroke="#9aa3c7" stroke-width="1.4" marker-end="url(#seq-arrow)" stroke-dasharray="4 3"/>
+        <text class="edge-label" x="645" y="644" text-anchor="middle">16. enqueue feedback-prompt (~2.5 min, delayed)</text>
       </g>
     </svg>
   </div>
@@ -510,7 +522,7 @@
     <div class="step-row">
       <span class="step-num">2</span>
       <div class="body"><strong>Meta posts to our webhook</strong> with the message envelope (wamid, phone,
-        text). The route lives in <code>src/controllers/webhook.controller.ts</code>.
+        text). The route lives in <code>src/controllers/webhook.controller.ts</code> on the web App Service.
       </div>
     </div>
     <div class="step-row">
@@ -522,8 +534,9 @@
     </div>
     <div class="step-row">
       <span class="step-num">4</span>
-      <div class="body"><strong>Enqueue on BullMQ.</strong> Shard is picked by <code>hash(phone) % N</code>, so
-        every message from Sarah lands on the same shard. JobId = wamid.
+      <div class="body"><strong>Enqueue on Service Bus.</strong> The message goes onto <code>whatsapp-inbound</code>
+        with the <strong>session id set to Sarah's phone</strong>, so every message from her is processed in order.
+        <code>messageId = wamid</code> is the second dedupe layer.
       </div>
     </div>
     <div class="step-row">
@@ -534,40 +547,40 @@
     </div>
     <div class="step-row">
       <span class="step-num">6</span>
-      <div class="body"><strong>The worker picks the job.</strong> Shard-7 has concurrency=1, so if Sarah had
-        also sent a follow-up, it queues behind this one.
+      <div class="body"><strong>The worker accepts the session.</strong> One slot holds Sarah's phone, so if she'd
+        also sent a follow-up, it queues behind this one (FIFO within the session).
         <div class="why">Why: Claude sees messages in the order Sarah sent them, not whichever finished first.</div>
       </div>
     </div>
     <div class="step-row">
       <span class="step-num">7</span>
-      <div class="body"><strong>Load session + history</strong> from Supabase. We also load identity: staff?
+      <div class="body"><strong>Load session + history</strong> from Supabase. We also resolve identity: staff?
         contact? lead?
       </div>
     </div>
     <div class="step-row">
       <span class="step-num">8</span>
-      <div class="body"><strong>Dynamics lookup.</strong> Pulls Sarah's contact + her most recent tax requests.
-        This becomes part of Claude's context.
+      <div class="body"><strong>Dynamics + KB.</strong> Pulls Sarah's contact and runs a pgvector KB retrieval on
+        her message; both feed Claude's context.
       </div>
     </div>
     <div class="step-row">
       <span class="step-num">9</span>
-      <div class="body"><strong>Call Claude</strong> with the system prompt, conversation history, KB snippets,
-        and a toolbox filtered by Sarah's role (clients can't <code>log_callback</code>, staff can).
+      <div class="body"><strong>Call Claude</strong> (<code>opus-4-7</code>) with the system prompt, conversation
+        history, KB snippets, and a toolbox filtered by Sarah's role (clients can't run staff tools).
         <div class="why">Why tools: the same model handles routing and response. No separate intent classifier to drift.</div>
       </div>
     </div>
     <div class="step-row">
       <span class="step-num">10–12</span>
       <div class="body"><strong>Tool round-trip.</strong> Claude requests <code>get_refund_status</code>, the
-        worker calls Dynamics, sends the result back, Claude streams a natural-language reply.
+        worker calls Dynamics, sends the result back, Claude composes a natural-language reply (loop capped at 5 rounds).
       </div>
     </div>
     <div class="step-row">
       <span class="step-num">13</span>
       <div class="body"><strong>Persist.</strong> Save inbound + outbound to Supabase, update intent, log token
-        usage against the per-session and per-day caps.
+        usage + any 429 telemetry against the per-session and per-day caps.
       </div>
     </div>
     <div class="step-row">
@@ -577,9 +590,10 @@
     </div>
     <div class="step-row">
       <span class="step-num">16</span>
-      <div class="body"><strong>Background bookkeeping.</strong> Dynamics gets a case note; if Claude classified
-        the message as an L1 question and resolved it, the case auto-closes.
-        <div class="why">Why async: we already replied to Sarah. Logging is best-effort and shouldn't block her experience.</div>
+      <div class="body"><strong>Delayed feedback loop.</strong> Because Claude classified this as an L1 answer, the
+        worker enqueues a <code>feedback-prompt</code> job (~2.5 min). If Sarah hasn't replied by then, the bot sends
+        Yes/No buttons and schedules a <code>case-auto-close</code> job (~10 min).
+        <div class="why">Why delayed: we don't interrupt a still-typing client, and silent cases still close cleanly.</div>
       </div>
     </div>
   </div>
@@ -611,9 +625,9 @@
         <text class="node-label" x="305" y="172" text-anchor="middle" fill="#fff">Graph subscription</text>
         <text class="node-sub" x="305" y="190" text-anchor="middle" fill="#c8d8f4">tina-bot mailbox</text>
 
-        <rect x="430" y="140" rx="12" width="180" height="74" fill="url(#g-vercel)" stroke="#2a3464"/>
+        <rect x="430" y="140" rx="12" width="180" height="74" fill="url(#g-web)" stroke="#2a3464"/>
         <text class="node-label" x="520" y="172" text-anchor="middle" fill="#fff">/webhook/email</text>
-        <text class="node-sub" x="520" y="190" text-anchor="middle">emailRelay.controller</text>
+        <text class="node-sub" x="520" y="190" text-anchor="middle" fill="#c8d8f4">emailRelay.controller</text>
 
         <rect x="650" y="60" rx="12" width="200" height="74" fill="url(#g-ms)" stroke="#2a3464"/>
         <text class="node-label" x="750" y="92" text-anchor="middle" fill="#fff">Dynamics</text>
@@ -621,7 +635,7 @@
 
         <rect x="650" y="220" rx="12" width="200" height="74" fill="url(#g-supabase)" stroke="#2a3464"/>
         <text class="node-label" x="750" y="252" text-anchor="middle" fill="#fff">Supabase</text>
-        <text class="node-sub" x="750" y="270" text-anchor="middle" fill="#bfeacf">pending_email_relays (48h)</text>
+        <text class="node-sub" x="750" y="270" text-anchor="middle" fill="#bfeacf">email_relay_pending (48h)</text>
 
         <rect x="900" y="140" rx="12" width="200" height="74" fill="url(#g-meta)" stroke="#2a3464"/>
         <text class="node-label" x="1000" y="172" text-anchor="middle" fill="#eaffea">Client on WhatsApp</text>
@@ -643,13 +657,20 @@
         <text class="edge-label" x="760" y="170" text-anchor="middle">4</text>
       </g>
 
-      <!-- Return reply: Yes → relay email -->
+      <!-- Return reply: Yes → relay -->
       <g stroke="#34d399" fill="none" marker-end="url(#er-arrow)" stroke-dasharray="4 3">
         <path class="edge" d="M900,200 C 700,330 350,330 100,214"/>
       </g>
-      <text class="edge-label" x="500" y="320" text-anchor="middle" fill="#34d399">5. If client taps Yes → bot relays email content over WhatsApp; staff get confirmation email</text>
+      <text class="edge-label" x="500" y="320" text-anchor="middle" fill="#34d399">5. If client taps Yes → conversation continues over WhatsApp; the forwarder gets a confirmation email</text>
     </svg>
   </div>
+  <p class="muted" style="margin-top:12px;">
+    Two more Graph-backed flows ride the same mailbox: <strong>post-LOE activation</strong> (the Next.js signing app
+    calls <code>/webhook/loe-signed</code> → Tina thanks the lead on WhatsApp and emails taxcrew the eFiling-OTP
+    walkthrough) and the <strong>consultant close-summary</strong> (when a noteworthy session closes — a doc upload or
+    an escalation happened — Tina emails the client's owning consultant a short Haiku-written summary, claimed once
+    per session so a fan-out close can't double-send).
+  </p>
 </section>
 
 <!-- ============================== DEPLOYMENT TARGETS ============================== -->
@@ -657,47 +678,54 @@
   <h2>Deployment targets at a glance</h2>
   <div class="grid-2">
     <div class="card">
-      <h4>Vercel — HTTP plane</h4>
-      <p class="muted">Hosts the Express ingester (<code>src/server.ts</code>), Vercel Cron triggers
-      (<code>case-timeout</code>, <code>graph-renew-subscription</code>), and the PDF route for invoice
-      downloads. Cold-start tolerant, scales to zero.</p>
-      <p class="muted"><span class="pill">/webhook (Meta)</span><span class="pill">/webhook/email (Graph)</span><span class="pill">/api/pdf/:id</span><span class="pill">/api/cron/*</span></p>
+      <h4>Azure App Service — web plane</h4>
+      <p class="muted">Hosts the Express ingester (<code>src/server.ts</code>), the cron-triggered sweeps
+      (<code>case-timeout</code>, <code>graph-renew</code>), the PDF route, and the admin/template-refresh route.
+      Thin and fast — no business logic.</p>
+      <p class="muted"><span class="pill">/webhook (Meta)</span><span class="pill">/webhook/email</span><span class="pill">/webhook/loe-signed</span><span class="pill">/webhook/outbound-notify</span><span class="pill">/api/pdf</span><span class="pill">/api/cron</span><span class="pill">/admin</span></p>
     </div>
     <div class="card">
-      <h4>Fly.io / Railway — worker plane</h4>
-      <p class="muted">Hosts the persistent BullMQ worker (<code>src/worker.ts</code>). Long-running, holds Redis
-      connection, runs <code>WORKER_NUM_SHARDS</code> shards. Sized for parallel Claude streaming.</p>
+      <h4>Azure App Service — worker plane</h4>
+      <p class="muted">Hosts the persistent Service Bus consumer (<code>src/worker.ts</code>). Long-running, drains
+      three queues, runs up to <code>MAX_CONCURRENT_SESSIONS</code> phones in parallel. Exposes a trivial liveness
+      endpoint only to satisfy the App Service probe.</p>
       <p class="muted"><span class="pill">whatsappProcessor</span><span class="pill">claude.service</span><span class="pill">dynamics.service</span><span class="pill">graphMail.service</span></p>
     </div>
     <div class="card">
-      <h4>Upstash Redis</h4>
-      <p class="muted">Backing store for BullMQ. Sharded queues + dedupe on jobId. Retries 4× with exponential
-      backoff; completed jobs aged out after 1h.</p>
+      <h4>Azure Service Bus</h4>
+      <p class="muted">The work backbone. <code>whatsapp-inbound</code> uses sessions (session = phone) for per-phone
+      FIFO; <code>feedback-prompt</code> and <code>case-auto-close</code> are scheduled (delayed) queues. Dedupe on
+      <code>messageId</code>; up to 5 deliveries then DLQ.</p>
     </div>
     <div class="card">
       <h4>Supabase</h4>
-      <p class="muted">Postgres + pgvector. Holds session state, message history, cases, idempotency table,
-      KB embeddings, pending email relays, and the DLQ for failed jobs.</p>
+      <p class="muted">Postgres + pgvector. Holds session state, message history, cases, idempotency + DLQ tables,
+      KB embeddings, pending LOE/IRP5 staging, and the email-relay consent table.</p>
     </div>
   </div>
+  <p class="muted" style="margin-top:12px;">
+    Note: the repo's <code>vercel.json</code> crons are dead on Azure — the case-timeout sweep and Graph subscription
+    renewal must be scheduled via Azure (or an external pinger). Some code comments still reference the old
+    BullMQ/Redis queue; the live implementation is Azure Service Bus.
+  </p>
 </section>
 
 <!-- ============================== ALL THE SERVICES ============================== -->
 <section>
   <h2>Every external system, in one place</h2>
   <div class="grid-3">
-    <div class="card"><h4>Meta WhatsApp Cloud</h4><p class="muted">Inbound webhook + outbound send-message API + template management.</p></div>
-    <div class="card"><h4>Anthropic Claude</h4><p class="muted">Response generation, tool orchestration, prompt caching, intent classification.</p></div>
-    <div class="card"><h4>Supabase</h4><p class="muted">Sessions, history, cases, idempotency, KB vectors, DLQ, pending email relays.</p></div>
-    <div class="card"><h4>Microsoft Dynamics 365</h4><p class="muted">Contacts, leads, requests, cases, invoices, notes, attachments.</p></div>
-    <div class="card"><h4>Microsoft Graph (Mail)</h4><p class="muted">Subscriptions to tina-bot mailbox + push notifications for forwarded emails.</p></div>
-    <div class="card"><h4>SharePoint</h4><p class="muted">Tax Navigator KB source + client document storage.</p></div>
+    <div class="card"><h4>Meta WhatsApp Cloud</h4><p class="muted">Inbound webhook + outbound send-message API + template management + Flows.</p></div>
+    <div class="card"><h4>Anthropic Claude</h4><p class="muted">opus-4-7 for the main turn + intent; haiku-4-5 for case classification, LOE/IRP5 extraction, and close-summaries.</p></div>
+    <div class="card"><h4>Azure Service Bus</h4><p class="muted">whatsapp-inbound (sessions = phone, FIFO) + feedback-prompt + case-auto-close delayed queues; messageId dedupe.</p></div>
+    <div class="card"><h4>Supabase</h4><p class="muted">Sessions, history, cases, idempotency, DLQ, KB vectors, pending LOE/IRP5, email-relay state, usage telemetry.</p></div>
+    <div class="card"><h4>Microsoft Dynamics 365</h4><p class="muted">Contacts, leads, requests, cases, invoices, IRP5s, tax-submission documents, notes, attachments.</p></div>
+    <div class="card"><h4>Microsoft Graph (Mail)</h4><p class="muted">tina-bot mailbox subscription + push notifications for forwarded emails; outbound consultant/taxcrew email.</p></div>
+    <div class="card"><h4>SharePoint (Graph)</h4><p class="muted">Tax Navigator KB source, tax-form templates, and client document storage.</p></div>
     <div class="card"><h4>OpenAI</h4><p class="muted">Embeddings (text-embedding-3-small, 1536-d) for KB chunks and queries.</p></div>
-    <div class="card"><h4>Mistral OCR</h4><p class="muted">Extracts banking details + signatures from signed LOE PDFs.</p></div>
-    <div class="card"><h4>Upstash Redis</h4><p class="muted">BullMQ backend, GroupMQ for FIFO grouping by phone.</p></div>
-    <div class="card"><h4>Vercel</h4><p class="muted">HTTP host for the ingester + scheduled cron triggers.</p></div>
-    <div class="card"><h4>Fly.io / Railway</h4><p class="muted">Persistent worker host — long-lived processes that the BullMQ consumer needs.</p></div>
-    <div class="card"><h4>TTT Onboarding (Next.js)</h4><p class="muted">Magic-link landing page for LOE signing + SARS eFiling OTP. Shares <code>LOE_SIGNING_SECRET</code>.</p></div>
+    <div class="card"><h4>Mistral OCR</h4><p class="muted">Turns signed LOE and IRP5 PDFs into markdown for field extraction.</p></div>
+    <div class="card"><h4>Azure App Service</h4><p class="muted">Hosts both the web ingester and the persistent worker process.</p></div>
+    <div class="card"><h4>TTT LOE onboarding (Next.js)</h4><p class="muted">Magic-link landing for LOE signing; calls <code>/webhook/loe-signed</code>. Shares <code>LOE_SIGNING_SECRET</code>.</p></div>
+    <div class="card"><h4>Outbound senders (Power Automate, …)</h4><p class="muted">Fire Meta templates outside the bot, then call <code>/webhook/outbound-notify</code> so the bot seeds session history.</p></div>
   </div>
 </section>
 
@@ -706,28 +734,34 @@
   <h2>What protects the system when something breaks</h2>
   <details open>
     <summary>Meta retries (network blip)</summary>
-    <p>Same wamid arrives twice → Supabase idempotency table rejects the second insert. BullMQ also rejects the
-    duplicate jobId. The user sees one reply.</p>
+    <p>Same wamid arrives twice → Supabase idempotency table rejects the second claim. Service Bus also dedupes the
+    duplicate <code>messageId</code>. The user sees one reply.</p>
   </details>
   <details>
     <summary>Worker crash mid-job</summary>
-    <p>BullMQ requeues automatically after the job timeout. Up to 4 attempts with exponential backoff. Then it
-    lands in the <code>whatsapp_queue_dlq</code> table and ops gets paged.</p>
+    <p>Service Bus redelivers the message (the lock expires) until it succeeds or hits the max delivery count (5),
+    after which it lands in the <code>whatsapp_queue_dlq</code> table and ops gets paged.</p>
   </details>
   <details>
-    <summary>Claude returns slow or 5xx</summary>
-    <p>Worker retries inside the job. Vercel ingester already returned 200, so Meta isn't waiting. Per-session
-    token caps prevent runaway cost spirals.</p>
+    <summary>Claude rate-limited (429) or slow</summary>
+    <p>The wrapper throws a typed <code>RateLimitError</code>; the worker re-enqueues with the <code>retry-after</code>
+    delay (up to 5 attempts) before dead-lettering. The web ingester already returned 200, so Meta isn't waiting.
+    Per-session token caps prevent runaway cost.</p>
   </details>
   <details>
     <summary>Dynamics is unreachable</summary>
     <p>Tool calls fail gracefully; Claude is told the tool errored and falls back to a "we'll check and come
-    back to you" reply. Case gets created so a human picks it up.</p>
+    back to you" reply. A case is created so a human picks it up.</p>
   </details>
   <details>
     <summary>Graph subscription expires</summary>
-    <p>Subscriptions max out at ~70 hours. Vercel Cron renews every 6 hours; if it lapses, the next cron tick
-    creates a new one. Idempotent.</p>
+    <p>Subscriptions live ~3 days. A scheduled cron renews them; if one lapses, the next tick recreates it
+    idempotently (<code>ensureSubscription</code>).</p>
+  </details>
+  <details>
+    <summary>Duplicate close emails</summary>
+    <p>A "Yes" can resolve several sibling cases, and the 12h sweep can race an inbound. <code>close_summary_sent_at</code>
+    is claimed atomically (update-if-NULL), so the consultant gets exactly one summary per session.</p>
   </details>
   <details>
     <summary>Stale phone→identity cache</summary>
@@ -739,7 +773,8 @@
 </main>
 
 <footer>
-  TTT Financial Group — WhatsApp bot architecture · generated 2026-05-18 · single-file diagram, no external deps
+  TTT Financial Group — WhatsApp bot architecture · updated 2026-06-05 · single-file diagram, no external deps
 </footer>
 </body>
 </html>
+</content>

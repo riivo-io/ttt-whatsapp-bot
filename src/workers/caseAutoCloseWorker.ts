@@ -16,6 +16,7 @@ import {
     RESOLUTION_METHOD,
     CLIENT_FEEDBACK,
 } from '../services/dynamics.service';
+import { caseService } from '../services/case.service';
 import { messageContextStorage } from '../utils/messageContext';
 
 // 10-min auto-close for cases left in the feedback-prompt window.
@@ -68,6 +69,12 @@ export async function processCaseAutoCloseJob(payload: CaseAutoCloseJobPayload):
             console.warn(`[CaseAutoClose] dynamics_mirror_failed caseId=${caseId} err=${e?.message || e}`);
         }
     }
+    // Fire-and-forget the consultant close summary, same as the other close
+    // paths. The summary is gated on the session being noteworthy (doc upload
+    // or escalation) and is idempotent per session, so this is safe even if
+    // another close path already ran for the same session.
+    caseService.triggerCloseSummary(sessionId);
+
     console.log(`[CaseAutoClose] fired caseId=${caseId} sessionId=${sessionId}`);
 }
 
