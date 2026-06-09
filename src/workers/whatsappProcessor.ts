@@ -1040,7 +1040,19 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             caseService.detectWrapUp(effectiveText) ||
             ((session as any).pending_case_id != null && caseService.detectFeedback(effectiveText) !== null);
 
-        if (latestCase && latestCase.status === 'bot_responded' && qualifies && !looksLikeFeedbackOrAck) {
+        // Topic-shift relaxation (see docs/topic-shift-relaxation.md). Not every
+        // qualifying follow-up is a new topic. A new message only opens a NEW
+        // case when it lands well after the open case's last activity; within a
+        // short window it's almost always the same client continuing the same
+        // thread (especially in a campaign reply burst), so we reuse the open
+        // case via the continuation branch below instead of fanning out a fresh
+        // REQ per message. 30 min matches the session-timeout grain. Reversible:
+        // delete `&& !withinContinuationWindow` to restore the old behaviour.
+        const TOPIC_SHIFT_MIN_GAP_MS = 30 * 60 * 1000;
+        const withinContinuationWindow = !!latestCase &&
+            (Date.now() - new Date(latestCase.updated_at).getTime()) < TOPIC_SHIFT_MIN_GAP_MS;
+
+        if (latestCase && latestCase.status === 'bot_responded' && qualifies && !looksLikeFeedbackOrAck && !withinContinuationWindow) {
             // Topic shift — close the prior thread before opening a new one.
             try {
                 await caseService.markResolvedByBot(latestCase.id, 'topic_shift', latestCase.crm_case_id);
