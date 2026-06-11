@@ -825,6 +825,42 @@ export class DynamicsService {
         };
     }
 
+    /**
+     * Read a contact's location fields so the office-contact tool can route the
+     * client to their nearest branch. riivo_geographiclocation is an optionset,
+     * so we read its formatted label rather than the raw numeric value. All
+     * three fields are best-effort — any/all may be empty.
+     */
+    async getContactLocation(
+        contactId: string
+    ): Promise<{ city: string | null; province: string | null; geographicLocation: string | null } | null> {
+        const token = await this.getToken();
+        try {
+            const url = `${this.baseUrl}/api/data/v9.2/contacts(${contactId})?$select=contactid,address1_city,address1_stateorprovince,riivo_geographiclocation`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"',
+                },
+            });
+            const c = response.data;
+            if (!c) return null;
+            return {
+                city: c.address1_city || null,
+                province: c.address1_stateorprovince || null,
+                geographicLocation:
+                    c['riivo_geographiclocation@OData.Community.Display.V1.FormattedValue'] || null,
+            };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[CRM GET ✗] getContactLocation(${contactId}) — ${errMsg}`);
+            return null;
+        }
+    }
+
     async getEntityById(crmId: string, crmType: string): Promise<any | null> {
         try {
             if (crmType === 'contact' || crmType === 'client') {

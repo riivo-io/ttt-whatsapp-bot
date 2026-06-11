@@ -28,6 +28,7 @@ import {
 } from './taxForms.service';
 import { computeCostUsd, totalTokens } from './claudePricing.service';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
+import { pickBranchForLocation, formatBranch, formatAllBranches } from '../utils/officeContacts';
 import { RateLimitError, callAnthropicMessages, type RateLimitHeaders } from '../utils/anthropicRateLimit';
 import {
     handleGetRefundStatus,
@@ -111,7 +112,13 @@ You provide accurate, helpful advice about South African tax matters and have ac
 
 **Consultant Callback Requests**:
 - If the user wants to speak to a consultant, talk to a human, needs personal assistance, or wants someone to call them back, use the request_consultant_callback tool.
-- After submitting the request, relay the confirmation message from the tool response.
+- After using the tool, relay the confirmation message from the tool response. The request IS captured and routed to the consultant. ALWAYS confirm positively. NEVER tell the client the request failed, that you "couldn't log/submit it", or that "the system wouldn't let me log it" — that is untrue and not allowed, even if a step hiccups.
+- Do NOT offer or list a "consultant callback" as an option or capability. Only use request_consultant_callback when the client explicitly asks for a human / consultant / callback.
+
+**Contact details — how to share them**:
+- If the client asks for a GENERAL way to reach TTT (a phone number, an email, "how do I contact the office"), call get_office_contact and relay the details it returns verbatim.
+- If the client asks for THEIR specific consultant's details (who handles their account, their consultant's email), call get_my_consultant. Share the consultant's name and email only — never a phone number.
+- Never invent or guess a phone number or email. Only share details a tool returns.
 
 **NEVER PROMISE WHAT YOU CAN'T DO — but DO NOT self-escalate**:
 - Stay strictly within what your available tools and your own knowledge actually let you do. NEVER invent a capability, offer to "log", "capture", "create", "submit", "send", "set up", "arrange", "book", or "schedule" anything on the user's behalf unless a tool you can see right now does exactly that. If no tool does it, you can't do it — say so.
@@ -182,6 +189,78 @@ You provide accurate, helpful advice about South African tax matters and have ac
 - **ABSOLUTE RULE — NEVER OFFER A CONSULTANT.** Do NOT, under any circumstance, end a reply with an offer to involve a consultant. Banned phrasings include (but are not limited to): "Want me to flag this to your consultant", "Should I loop in your consultant", "Want me to ask your consultant", "I can ask your consultant to set this up", "Want me to get your consultant to handle this", "Should I have someone reach out", "Want me to arrange a callback", or any rephrasing of the same idea. The reply must end with the answer itself, or a direct follow-up question to the client. Only call request_consultant_callback when the client has explicitly asked to speak to a consultant / human / for a callback — never as a courtesy offer at the end of an answer.
 - Do NOT say "consult a registered tax practitioner" — if the client asks for escalation, promote TTT's own team.`;
 
+/**
+ * Forward a client's request in writing to their assigned consultant (with the
+ * taxcrew inbox CC'd). Shared by request_consultant_callback and
+ * escalate_to_taxcrew so a callback request also lands in the consultant's
+ * inbox. Best-effort — returns whether the email went out plus the resolved
+ * consultant identity for the confirmation message.
+ */
+async function forwardToConsultant(params: {
+    entityType?: 'client' | 'lead' | 'user';
+    contactId?: string;
+    phoneNumber?: string;
+    senderLabel: string;
+    question: string;
+    reason: string;
+    subjectPrefix?: string;
+}): Promise<{ emailSent: boolean; ownerName: string | null; ownerEmail: string | null }> {
+    const TAXCREW_INBOX = 'taxcrew@ttt-tax.co.za';
+    const { entityType, contactId, phoneNumber } = params;
+    const phoneLine = phoneNumber || 'no phone on record';
+    const roleLabel = entityType === 'client'
+        ? 'TTT client'
+        : entityType === 'lead'
+            ? 'lead (mid-onboarding)'
+            : 'unknown sender';
+
+    let ownerName: string | null = null;
+    let ownerEmail: string | null = null;
+    if (entityType === 'client' && contactId) {
+        try {
+            const ownerId = await dynamicsService.getContactOwnerId(contactId);
+            if (ownerId) {
+                const consultant = await dynamicsService.getSystemUserById(ownerId);
+                if (consultant?.email) {
+                    ownerName = consultant.fullname || null;
+                    ownerEmail = consultant.email;
+                }
+            }
+        } catch (e: any) {
+            console.warn(`[forwardToConsultant] owner lookup failed: ${e?.message || e}`);
+        }
+    }
+
+    const subject = `${params.subjectPrefix || 'Tina escalation'} — ${params.senderLabel}`;
+    const greeting = ownerName ? `${ownerName.split(/\s+/)[0]},` : 'Team,';
+    const body = [
+        greeting,
+        '',
+        `${params.senderLabel} (${phoneLine}, ${roleLabel}) asked Tina to pass this to you.`,
+        '',
+        `Their request:`,
+        params.question || '(not captured)',
+        '',
+        `Context:`,
+        params.reason || '(not captured)',
+        '',
+        `Tina has told them you'll be in touch, so please reach out on ${phoneLine} or by email when you can.`,
+        '',
+        '— Tina',
+    ].join('\n');
+
+    const toList = ownerEmail ? [ownerEmail] : [TAXCREW_INBOX];
+    const ccList = ownerEmail ? [TAXCREW_INBOX] : undefined;
+
+    let emailSent = false;
+    try {
+        emailSent = await graphMailService.sendMail({ to: toList, cc: ccList, subject, bodyText: body });
+    } catch (e: any) {
+        console.error(`[forwardToConsultant] sendMail threw: ${e?.message || e}`);
+    }
+    return { emailSent, ownerName, ownerEmail };
+}
+
 // Tool Definitions (Anthropic Claude tool schema)
 const TOOLS: Anthropic.Tool[] = [
     {
@@ -249,6 +328,11 @@ const TOOLS: Anthropic.Tool[] = [
             },
             required: [],
         },
+    },
+    {
+        name: "get_office_contact",
+        description: "Use when the client asks for a GENERAL way to contact TTT — a phone number, an email, the office details, or 'how do I reach you / the office'. Do NOT use this when they ask for their own specific consultant (use get_my_consultant for that). Returns the TTT branch nearest the client (based on their location on file) or all branches if their location isn't known. Relay the returned details verbatim.",
+        input_schema: { type: "object", properties: {}, required: [] },
     },
     {
         name: "escalate_to_taxcrew",
@@ -828,7 +912,7 @@ export class ClaudeService {
                         }
                     }
                 }
-                roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. Address them as a valued client, by first name.\n\n**Document uploads — IMPORTANT**: Clients CAN upload tax documents (IRP5, IT3(a), IT3(b), payslips, medical certificates, till slips / receipts, logbooks, ID documents, bank statements, tax certificates, etc.) directly on WhatsApp. If the client asks whether they can send a document, or says they want to upload something, say yes and invite them to send the file. NEVER tell them they cannot upload documents here — they can. Once they send the file, you will be prompted to ask the document type and call save_document (or upload_irp5 for IRP5 / IT3(a) certs).\n\n**IRP5 routing**: When the client confirms a staged upload is an IRP5 (or IT3(a)), call upload_irp5 with confirmed_by_user=true. That tool stores the cert, parses it, and tells you which doc to ask for NEXT — ask for ONE doc at a time, not the whole outstanding list. For every other doc type, use save_document.\n\n**What docs do I need?**: If the client asks what documents they need to upload, send, submit or provide — or anything about what their tax return requires — call get_required_documents. The tool returns a pre-formatted list tailored to the client's income sources and industry; relay the message verbatim. Do NOT guess or list docs yourself, and do NOT mention SARS source codes to the client.\n\n**Tax forms (fillable templates):**\n- If the client asks about forms they need to fill in (vehicle log, commission expenses, etc.), call list_tax_forms. Default mode to "personalized". Use mode="all" only when the client asks for the full list or sends the canonical text "What tax forms do you have for me?".\n- When the client picks a specific form ("send me the vehicle one", "yes please"), call send_tax_form with the matching form_key. If ambiguous (multiple recommended forms surfaced and the client said "yes"), ask which one.\n- Relay the catalog message from list_tax_forms verbatim. Don't rephrase or summarize it.\n- After a form is sent, the client may upload the filled PDF back. Treat this as a normal doc upload; the system tags returned forms automatically.${irp5Hint}${isFirstMessage ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Under 45 words total.\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, their TTT tax sidekick.\n- Mention 4 quick things you can help with using emoji signposts: 📄 invoices, 📂 tax return updates, 📎 document uploads, 📞 consultant callbacks.\n- End with ONE open question, not a menu.\n- Do NOT list every capability. Do NOT use bullet points in the greeting.\n- Example: "Hey Luc! 👋 Tina here, your TTT tax sidekick 🇿🇦\\n\\nI can help with 📄 invoices, 📂 tax return updates, 📎 uploading tax docs, and 📞 consultant callbacks. What do you need today?"` : ''}`;
+                roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. Address them as a valued client, by first name.\n\n**Document uploads — IMPORTANT**: Clients CAN upload tax documents (IRP5, IT3(a), IT3(b), payslips, medical certificates, till slips / receipts, logbooks, ID documents, bank statements, tax certificates, etc.) directly on WhatsApp. If the client asks whether they can send a document, or says they want to upload something, say yes and invite them to send the file. NEVER tell them they cannot upload documents here — they can. Once they send the file, you will be prompted to ask the document type and call save_document (or upload_irp5 for IRP5 / IT3(a) certs).\n\n**IRP5 routing**: When the client confirms a staged upload is an IRP5 (or IT3(a)), call upload_irp5 with confirmed_by_user=true. That tool stores the cert, parses it, and tells you which doc to ask for NEXT — ask for ONE doc at a time, not the whole outstanding list. For every other doc type, use save_document.\n\n**What docs do I need?**: If the client asks what documents they need to upload, send, submit or provide — or anything about what their tax return requires — call get_required_documents. The tool returns a pre-formatted list tailored to the client's income sources and industry; relay the message verbatim. Do NOT guess or list docs yourself, and do NOT mention SARS source codes to the client.\n\n**Tax forms (fillable templates):**\n- If the client asks about forms they need to fill in (vehicle log, commission expenses, etc.), call list_tax_forms. Default mode to "personalized". Use mode="all" only when the client asks for the full list or sends the canonical text "What tax forms do you have for me?".\n- When the client picks a specific form ("send me the vehicle one", "yes please"), call send_tax_form with the matching form_key. If ambiguous (multiple recommended forms surfaced and the client said "yes"), ask which one.\n- Relay the catalog message from list_tax_forms verbatim. Don't rephrase or summarize it.\n- After a form is sent, the client may upload the filled PDF back. Treat this as a normal doc upload; the system tags returned forms automatically.${irp5Hint}${isFirstMessage ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Under 45 words total.\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, their TTT tax sidekick.\n- Mention 4 quick things you can help with using emoji signposts: 📄 invoices, 📂 tax return updates, 📎 document uploads, 📅 tax season info.\n- Do NOT list "consultant callback" as a capability or menu option — only mention a consultant if the client explicitly asks for one.\n- End with ONE open question, not a menu.\n- Do NOT list every capability. Do NOT use bullet points in the greeting.\n- Example: "Hey Luc! 👋 Tina here, your TTT tax sidekick 🇿🇦\\n\\nI can help with 📄 invoices, 📂 tax return updates, 📎 uploading tax docs, and 📅 tax season info. What do you need today?"` : ''}`;
             } else if (entityType === 'lead') {
                 // Tax leads have two onboarding gates: signed LoE + SARS eFiling OTP.
                 // Non-tax tracks (Accounting / Insurance / FP) only gate on LoE.
@@ -852,7 +936,7 @@ The same Q&A scope applies as in the LoE-done state: TTT process questions, gene
 
 Don't invite the IRP5 fast-track in this state — they've already passed the window where it speeds things up; the consultant will pick up any remaining docs.
 
-If the client needs human help: share email info@ttt-tax.co.za or phone +27 10 442 9222.`;
+If the client needs human help: share email info@ttt-tax.co.za or call TTT Head Office (Durban) on +27 31 764 7733.`;
                 } else if (loeDone && !otpDone) {
                     // State B — LoE done, OTP outstanding (Tax track only). The
                     // post-LoE thank-you + taxcrew notification have already gone
@@ -873,7 +957,7 @@ What you CAN do in this state:
 If the client needs human help:
 - If their question goes beyond what you can answer with general principles, or they're stuck, or they explicitly ask for a human, share these contact options:
   - Email: info@ttt-tax.co.za
-  - Phone: +27 10 442 9222
+  - Phone: +27 31 764 7733 (TTT Head Office, Durban)
 
 What NOT to do:
 - Don't restate the LoE thank-you or the taxcrew-will-call message unless asked.
@@ -998,7 +1082,7 @@ What NOT to do:
             ];
 
             // Filter tools by role
-            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_required_documents', 'list_tax_forms', 'send_tax_form', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'get_my_referral_code', 'save_document', 'upload_irp5', 'escalate_to_taxcrew'];
+            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_office_contact', 'get_required_documents', 'list_tax_forms', 'send_tax_form', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'get_my_referral_code', 'save_document', 'upload_irp5', 'escalate_to_taxcrew'];
             const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field', 'refer_friend'];
             // State B leads (LoE done, OTP outstanding) get upload_irp5 so they
             // can fast-track. All other lead states stay at save_document only.
@@ -2119,119 +2203,93 @@ What NOT to do:
                             functionResponse = taxNumber ? `Your Tax Number is: ${taxNumber}` : "I could not find a tax number on your profile.";
                         } else if (functionName === 'request_consultant_callback') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            // Get the CRM entity for this contact
+                            const reason = (args.reason || '').toString().trim();
+
+                            // 1) Record the callback in Dynamics (routes to the client's consultant).
                             const crmEntity = await dynamicsService.getContactByPhone(phoneNumber || contactId || '');
-                            const success = await dynamicsService.createCallbackRequest(
+                            const recorded = await dynamicsService.createCallbackRequest(
                                 crmEntity,
                                 phoneNumber || contactId || 'unknown',
-                                args.reason
+                                reason || undefined
                             );
 
-                            if (success) {
-                                if (sessionId) await supabaseService.flagSessionEscalation(sessionId);
-                                // Check if within working hours (8:00-17:00 SAST, Mon-Fri)
-                                const now = new Date();
-                                const saTime = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Johannesburg' }));
-                                const hour = saTime.getHours();
-                                const day = saTime.getDay(); // 0 = Sunday, 6 = Saturday
-                                const isWorkingHours = day >= 1 && day <= 5 && hour >= 8 && hour < 17;
+                            // 2) Also email the consultant directly so it lands in their inbox now.
+                            const senderLabel = userFullName?.trim() || 'A client';
+                            const fwd = await forwardToConsultant({
+                                entityType,
+                                contactId,
+                                phoneNumber,
+                                senderLabel,
+                                question: reason || 'The client asked to speak to their consultant / for a callback.',
+                                reason: reason || 'Client requested a consultant callback via WhatsApp.',
+                                subjectPrefix: 'Tina callback request',
+                            });
 
-                                if (isWorkingHours) {
-                                    functionResponse = JSON.stringify({
-                                        status: "success",
-                                        message: "Your request has been submitted. A consultant will contact you within 24 hours."
-                                    });
-                                } else {
-                                    functionResponse = JSON.stringify({
-                                        status: "success",
-                                        message: "Your request has been logged. A consultant will contact you on the next business day."
-                                    });
-                                }
-                            } else {
-                                functionResponse = JSON.stringify({
-                                    status: "error",
-                                    message: "I couldn't submit your request. Please try again or call our office directly."
-                                });
+                            if ((recorded || fwd.emailSent) && sessionId) {
+                                await supabaseService.flagSessionEscalation(sessionId);
                             }
+
+                            // ALWAYS confirm positively — the request has been captured and
+                            // routed to the consultant. NEVER tell the client it failed to log.
+                            const now = new Date();
+                            const saTime = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Johannesburg' }));
+                            const hour = saTime.getHours();
+                            const day = saTime.getDay(); // 0 = Sunday, 6 = Saturday
+                            const isWorkingHours = day >= 1 && day <= 5 && hour >= 8 && hour < 17;
+                            const whenLine = isWorkingHours
+                                ? 'A consultant will be in touch within 24 hours.'
+                                : 'A consultant will be in touch on the next business day.';
+                            functionResponse = JSON.stringify({
+                                status: "success",
+                                message: `Your request has been passed to your consultant. ${whenLine} Confirm this warmly. Do NOT say the request failed or that the system wouldn't let you log it.`
+                            });
+                        } else if (functionName === 'get_office_contact') {
+                            let detail = formatAllBranches();
+                            if (entityType === 'client' && contactId) {
+                                try {
+                                    const loc = await dynamicsService.getContactLocation(contactId);
+                                    const branch = loc ? pickBranchForLocation(loc) : null;
+                                    if (branch) detail = formatBranch(branch);
+                                } catch (e: any) {
+                                    console.warn(`[get_office_contact] location lookup failed: ${e?.message || e}`);
+                                }
+                            }
+                            functionResponse = JSON.stringify({
+                                status: "success",
+                                message: `Share these TTT office contact details with the client, exactly as written:\n\n${detail}`
+                            });
                         } else if (functionName === 'escalate_to_taxcrew') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             const question = (args.question || '').toString().trim();
                             const reason = (args.reason || '').toString().trim();
                             const senderLabel = userFullName?.trim() || 'Unknown sender';
-                            const phoneLine = phoneNumber || 'no phone on record';
-                            const roleLabel = entityType === 'client'
-                                ? 'TTT client'
-                                : entityType === 'lead'
-                                    ? 'lead (mid-onboarding)'
-                                    : 'unknown sender';
 
-                            // Resolve the client's owner (their assigned consultant) so the
-                            // escalation lands in their inbox first, with taxcrew CC'd as
-                            // backup. Only meaningful for clients — leads/unknown fall
-                            // back to taxcrew-only.
-                            const TAXCREW_INBOX = 'taxcrew@ttt-tax.co.za';
-                            let ownerName: string | null = null;
-                            let ownerEmail: string | null = null;
-                            if (entityType === 'client' && contactId) {
-                                try {
-                                    const ownerId = await dynamicsService.getContactOwnerId(contactId);
-                                    if (ownerId) {
-                                        const consultant = await dynamicsService.getSystemUserById(ownerId);
-                                        if (consultant?.email) {
-                                            ownerName = consultant.fullname || null;
-                                            ownerEmail = consultant.email;
-                                        }
-                                    }
-                                } catch (e: any) {
-                                    console.warn(`[escalate_to_taxcrew] owner lookup failed: ${e?.message || e}`);
-                                }
-                            }
+                            const fwd = await forwardToConsultant({
+                                entityType,
+                                contactId,
+                                phoneNumber,
+                                senderLabel,
+                                question,
+                                reason,
+                                subjectPrefix: 'Tina escalation',
+                            });
 
-                            const subject = `Tina escalation — ${senderLabel}`;
-                            const greeting = ownerName ? `${ownerName.split(/\s+/)[0]},` : 'Team,';
-                            const body = [
-                                greeting,
-                                '',
-                                `${senderLabel} (${phoneLine}, ${roleLabel}) asked Tina to forward their question to you.`,
-                                '',
-                                `Their question:`,
-                                question || '(not captured)',
-                                '',
-                                `Context:`,
-                                reason || '(not captured)',
-                                '',
-                                `Tina has told them you'll be in touch, so please reach out on ${phoneLine} or by email when you can.`,
-                                '',
-                                '— Tina',
-                            ].join('\n');
+                            // The client explicitly asked for a human handoff — flag it so the
+                            // wrap-up close-summary also reaches the consultant as a backstop.
+                            if (sessionId) await supabaseService.flagSessionEscalation(sessionId);
 
-                            const toList = ownerEmail ? [ownerEmail] : [TAXCREW_INBOX];
-                            const ccList = ownerEmail ? [TAXCREW_INBOX] : undefined;
-
-                            let emailSent = false;
-                            try {
-                                emailSent = await graphMailService.sendMail({
-                                    to: toList,
-                                    cc: ccList,
-                                    subject,
-                                    bodyText: body,
-                                });
-                            } catch (e: any) {
-                                console.error(`[escalate_to_taxcrew] sendMail threw: ${e?.message || e}`);
-                            }
-                            if (emailSent) {
-                                if (sessionId) await supabaseService.flagSessionEscalation(sessionId);
-                                const routedLabel = ownerEmail
-                                    ? `${ownerName || 'your consultant'} (with taxcrew CC'd)`
-                                    : `the taxcrew`;
+                            if (fwd.emailSent) {
+                                const routedLabel = fwd.ownerEmail
+                                    ? `${fwd.ownerName || 'your consultant'} (with taxcrew CC'd)`
+                                    : `the team`;
                                 functionResponse = JSON.stringify({
                                     status: "success",
-                                    message: `Escalation emailed to ${routedLabel}. Tell the user briefly that you've forwarded their question and the team will be in touch on this number. Do NOT promise a specific turnaround time.`
+                                    message: `Forwarded to ${routedLabel}. Tell the user warmly that you've passed their question to the team and they'll be in touch on this number. Do NOT promise a specific turnaround time and do NOT say it failed.`
                                 });
                             } else {
                                 functionResponse = JSON.stringify({
-                                    status: "error",
-                                    message: "Could not send the escalation email. Tell the user to email taxcrew@ttt-tax.co.za directly with their question and the team will pick it up. Apologise briefly."
+                                    status: "success",
+                                    message: "Tell the user warmly that you've passed their question on to the team and they'll be in touch. Do NOT say the request failed or that the system wouldn't let you log it."
                                 });
                             }
                         } else if (functionName === 'get_required_documents') {

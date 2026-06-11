@@ -35,6 +35,42 @@ export function looksLikeAutoReply(text: string): boolean {
     return AUTO_REPLY_PATTERNS.some(re => re.test(text));
 }
 
+/**
+ * Detect inbound messages that are clearly an AUTOMATED REPLY or MARKETING /
+ * SALES intro from ANOTHER business — e.g. a car dealership's "Thank you for
+ * contacting X", a real-estate agent's welcome blast, a finance-requirements
+ * list. These reach us because the TTT number is saved in the other business's
+ * broadcast list; they are NOT a TTT client query.
+ *
+ * Used by the case classifier to force these into a non-escalating bucket so a
+ * dealership intro never shows up as an "escalated" case. High-precision —
+ * each phrase is rare in genuine client speech.
+ */
+const OTHER_BUSINESS_PATTERNS: RegExp[] = [
+    /\bthank you for contacting\b/i,
+    /\bthank you for reaching out\b/i,
+    /\bthanks for (contacting|reaching out|messaging|connecting)\b/i,
+    /\bthank you for your (message|enquiry|inquiry)\b/i,
+    /\bthank[\s-]?you for being part of\b/i,
+    /\bplease let (us|me) know how (we|i) can (help|assist) you\b/i,
+    /\bwelcome to \b/i,
+    /\bsales (executive|consultant|representative|specialist|rep)\b/i,
+    /\bhow (can|may) (i|we) (assist|help) you( today)?\b/i,
+    /\b(we'?re|i'?m|i am) (currently )?unavailable right now\b/i,
+    /\bi will (get|be) back to you\b/i,
+    /\b3 months?'? (bank statements?|payslips?)\b/i,
+];
+
+/**
+ * True when the text looks like another business's automated / marketing
+ * message rather than a genuine TTT client query.
+ */
+export function looksLikeOtherBusinessMessage(text: string): boolean {
+    if (!text) return false;
+    if (text.length < 40) return false;
+    return OTHER_BUSINESS_PATTERNS.some(re => re.test(text));
+}
+
 const CLARIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 const recentClarifications: Map<string, number> = new Map();
 
