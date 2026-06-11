@@ -13,6 +13,7 @@ import {
 import { supabaseService, WhatsAppCaseRow, CaseLevel } from './supabase.service';
 import { graphMailService } from './graphMail.service';
 import { RateLimitError } from '../utils/anthropicRateLimit';
+import { looksLikeOtherBusinessMessage } from '../utils/autoReply';
 
 dotenv.config();
 
@@ -64,6 +65,10 @@ export const L1_TOPICS = [
     'basic_tax_structuring',
     'referral_enquiries',
     'general_tax_question',
+    // Inbound that isn't a real TTT client query — another business's automated
+    // / marketing message. Non-escalating; bucketed so it never shows as an
+    // escalation in metrics.
+    'non_customer',
 ] as const;
 
 type L1Topic = typeof L1_TOPICS[number];
@@ -93,6 +98,13 @@ or "I'm not happy" alone are NOT escalation — the bot tries to help first.
 A short request that just names a tax form ("vehicle detail sheet", "logbook",
 "commission expense sheet") is the client asking the bot to send that form —
 classify as tax_form_request, not escalation.
+
+If the message is clearly an AUTOMATED REPLY or MARKETING / SALES intro from
+ANOTHER business — e.g. "Thank you for contacting [dealership]", "Welcome to
+[shop]", a real-estate agent's welcome blast, a car-finance requirements list
+("3 months bank statements, payslips, ID, driver's licence") — it is NOT a TTT
+client query. Classify it as L1 with topic "non_customer". NEVER classify these
+as escalation.
 
 L1 topics — tool-backed lookups the bot answers directly from CRM data:
 - invoice_query: outstanding balance, invoice list, invoice details, "do I have any invoices"
@@ -212,7 +224,40 @@ class CaseService {
      * for reliable JSON output. The tool is never actually "executed"; the tool
      * call's `input` field is the structured response we want.
      */
+    /**
+     * Record a case as a non-customer message: L1 level (never escalation) with
+     * the non_customer topic. Mirrors the same Supabase + Dynamics writes the
+     * classifier uses for an L1 outcome.
+     */
+    private async recordNonCustomer(caseId: string): Promise<{ level: CaseLevel; topic: string | null }> {
+        await supabaseService.updateCase(caseId, {
+            level: 'L1',
+            level_topic: 'non_customer',
+            status: 'classified',
+        });
+        try {
+            const crmId = await this.resolveCrmId(caseId);
+            if (crmId) {
+                await dynamicsService.updateRequest(crmId, {
+                    statuscode: REQUEST_STATUSCODE.CLASSIFIED,
+                    riivo_classificationlevel: CLASSIFICATION_LEVEL.L1,
+                    riivo_classificationtopic: 'non_customer',
+                });
+            }
+        } catch (e: any) {
+            console.warn(`[CaseService] recordNonCustomer mirror failed for ${caseId}: ${e?.message || e}`);
+        }
+        return { level: 'L1', topic: 'non_customer' };
+    }
+
     async classifyCase(caseId: string, queryText: string): Promise<{ level: CaseLevel; topic: string | null }> {
+        // Deterministic guard: another business's automated / marketing message
+        // is never an escalation. Force it into the non_customer bucket and skip
+        // the model call entirely. Backstop for ones the classifier might miss.
+        if (looksLikeOtherBusinessMessage(queryText)) {
+            const out = await this.recordNonCustomer(caseId);
+            return out;
+        }
         try {
             const res = await this.getAnthropic().messages.create({
                 model: CLASSIFIER_MODEL,
@@ -351,6 +396,13 @@ class CaseService {
         latestText: string,
         crmRequestId?: string | null,
     ): Promise<{ level: CaseLevel; topic: string | null; recovered: boolean }> {
+        // Another business's automated / marketing message is never an
+        // escalation — recover it straight into the non_customer bucket.
+        if (looksLikeOtherBusinessMessage(latestText)) {
+            await this.recoverFromEscalation(caseId, 'non_customer', crmRequestId);
+            return { level: 'L1', topic: 'non_customer', recovered: true };
+        }
+
         const transcript = [
             ...history.map(m => `[${m.role === 'user' ? 'Client' : 'Bot'}] ${m.content}`),
             `[Client] ${latestText}`,
