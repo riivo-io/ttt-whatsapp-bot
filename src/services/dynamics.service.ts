@@ -528,6 +528,11 @@ export class DynamicsService {
     }
 
     async getContactByPhone(phoneNumber: string): Promise<any | null> {
+        // Staff (internal "user") resolution is gated behind STAFF_MODE_ENABLED.
+        // While it's off we skip the systemusers lookup so a staff phone falls
+        // through to contact/lead instead of resolving as 'user' (which otherwise
+        // wins the user > client > lead priority below).
+        const staffModeEnabled = process.env.STAFF_MODE_ENABLED === 'true';
         // Search ALL tables in parallel to detect duplicates and pick the right role
         const contactsFilter = this.phoneOrFilter('mobilephone', phoneNumber);
         const leadsFilter = this.phoneOrFilter('ttt_mobilephone', phoneNumber);
@@ -543,11 +548,13 @@ export class DynamicsService {
                 `(${leadsFilter}) and statecode eq 0`,
                 ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             ),
-            this.searchEntity(
-                'systemusers',
-                usersFilter,
-                ['systemuserid', 'fullname']
-            ),
+            staffModeEnabled
+                ? this.searchEntity(
+                    'systemusers',
+                    usersFilter,
+                    ['systemuserid', 'fullname']
+                )
+                : Promise.resolve(null),
         ]);
 
         // Count how many tables matched — warn if duplicated
@@ -610,6 +617,8 @@ export class DynamicsService {
         // but `eq` on string columns is already case-insensitive — so a plain
         // equality match handles "Foo@bar.com" vs. "foo@bar.com" correctly.
         const odataEmail = normalized.replace(/'/g, "''");
+        // Staff resolution gated behind STAFF_MODE_ENABLED — see getContactByPhone.
+        const staffModeEnabled = process.env.STAFF_MODE_ENABLED === 'true';
         const [contact, lead, user] = await Promise.all([
             this.searchEntity(
                 'contacts',
@@ -621,11 +630,13 @@ export class DynamicsService {
                 `ttt_email eq '${odataEmail}' and statecode eq 0`,
                 ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             ),
-            this.searchEntity(
-                'systemusers',
-                `internalemailaddress eq '${odataEmail}' and isdisabled eq false`,
-                ['systemuserid', 'fullname', 'mobilephone', 'internalemailaddress']
-            ),
+            staffModeEnabled
+                ? this.searchEntity(
+                    'systemusers',
+                    `internalemailaddress eq '${odataEmail}' and isdisabled eq false`,
+                    ['systemuserid', 'fullname', 'mobilephone', 'internalemailaddress']
+                )
+                : Promise.resolve(null),
         ]);
 
         const matches = [contact ? 'client' : null, lead ? 'lead' : null, user ? 'user' : null].filter(Boolean);
