@@ -327,13 +327,19 @@ async function resolveSender(phoneNumber: string): Promise<ResolvedEntity> {
     let staffRoleId: string | null = null;
     let permittedTools: string[] = [];
 
-    const staff = await supabaseService.findStaffByPhone(phoneNumber);
-    if (staff) {
-        crmEntity = { id: staff.dynamics_user_id, type: 'user', fullname: staff.full_name };
-        staffRoleId = staff.role_id;
-        permittedTools = staff.role_id ? await supabaseService.getPermittedTools(staff.role_id) : [];
-        console.log(`[Processor] ${phoneNumber} matched staff "${staff.full_name}" role_id=${staff.role_id || 'NONE'} tools=${permittedTools.length}`);
-        return { crmEntity, staffRoleId, permittedTools };
+    // Staff (internal "user") mode is gated behind STAFF_MODE_ENABLED. While it's
+    // off we skip the users-table lookup entirely so staff phones fall through to
+    // the Dynamics resolution below and get the lead/client experience like anyone
+    // else. Flip STAFF_MODE_ENABLED=true to restore the colleague/CRM-tools path.
+    if (process.env.STAFF_MODE_ENABLED === 'true') {
+        const staff = await supabaseService.findStaffByPhone(phoneNumber);
+        if (staff) {
+            crmEntity = { id: staff.dynamics_user_id, type: 'user', fullname: staff.full_name };
+            staffRoleId = staff.role_id;
+            permittedTools = staff.role_id ? await supabaseService.getPermittedTools(staff.role_id) : [];
+            console.log(`[Processor] ${phoneNumber} matched staff "${staff.full_name}" role_id=${staff.role_id || 'NONE'} tools=${permittedTools.length}`);
+            return { crmEntity, staffRoleId, permittedTools };
+        }
     }
 
     const previousSession = await supabaseService.findPreviousSession(phoneNumber);
