@@ -14,6 +14,13 @@ import { supabaseService, WhatsAppCaseRow, CaseLevel } from './supabase.service'
 import { graphMailService } from './graphMail.service';
 import { RateLimitError } from '../utils/anthropicRateLimit';
 import { looksLikeOtherBusinessMessage } from '../utils/autoReply';
+import {
+    qualifyMessage as qualifyMessageImpl,
+    detectWrapUp as detectWrapUpImpl,
+    detectFeedback as detectFeedbackImpl,
+    CASE_FEEDBACK_BUTTON_YES as CASE_FEEDBACK_BUTTON_YES_DOMAIN,
+    CASE_FEEDBACK_BUTTON_NO as CASE_FEEDBACK_BUTTON_NO_DOMAIN,
+} from '../domain/caseRouting';
 
 dotenv.config();
 
@@ -37,8 +44,10 @@ dotenv.config();
 const FEEDBACK_TIMEOUT_HOURS = 12;
 const CLASSIFIER_MODEL = 'claude-haiku-4-5-20251001';
 
-export const CASE_FEEDBACK_BUTTON_YES = 'case_feedback_yes';
-export const CASE_FEEDBACK_BUTTON_NO = 'case_feedback_no';
+// Feedback button ids live in the pure domain routing module (detectFeedback
+// depends on them); re-exported here so existing importers are unaffected.
+export const CASE_FEEDBACK_BUTTON_YES = CASE_FEEDBACK_BUTTON_YES_DOMAIN;
+export const CASE_FEEDBACK_BUTTON_NO = CASE_FEEDBACK_BUTTON_NO_DOMAIN;
 
 // Exact wording of the resolution prompt sent by feedbackPromptWorker. Shared
 // with the processor so the "previous bot turn was the prompt" gate can match
@@ -72,14 +81,6 @@ export const L1_TOPICS = [
 ] as const;
 
 type L1Topic = typeof L1_TOPICS[number];
-
-const NOISE_WORDS = new Set([
-    'thanks', 'thank', 'thx', 'ty', 'ok', 'okay', 'k', 'kk',
-    'noted', 'cool', 'great', 'test', 'hi', 'hello', 'hey',
-    'yes', 'no', 'yep', 'nope', 'sure', 'fine',
-]);
-
-const EMOJI_ONLY_RE = /^[\p{Emoji}\p{Emoji_Presentation}\p{Extended_Pictographic}\s]+$/u;
 
 const CLASSIFIER_SYSTEM_PROMPT = `Classify the following client WhatsApp query.
 
@@ -162,14 +163,7 @@ class CaseService {
      * tracking as a case. Rule-based — no model call — so it's free.
      */
     qualifyMessage(text: string): boolean {
-        const trimmed = (text || '').trim();
-        if (trimmed.length < 3) return false;
-        if (EMOJI_ONLY_RE.test(trimmed)) return false;
-
-        const words = trimmed.toLowerCase().split(/\s+/).filter(Boolean);
-        if (words.length === 1 && NOISE_WORDS.has(words[0].replace(/[^a-z]/g, ''))) return false;
-
-        return true;
+        return qualifyMessageImpl(text);
     }
 
     /**
@@ -595,15 +589,7 @@ class CaseService {
      * that suggest the client is actually asking for more.
      */
     detectWrapUp(text: string): boolean {
-        const t = (text || '').trim().toLowerCase();
-        if (!t || t.length > 60) return false;
-        if (t.includes('?')) return false;
-        if (/\b(but|however|actually|also|wait|another|one more)\b/.test(t)) return false;
-        // Bare gratitude ("thanks", "thank you", "thx", "ty") is intentionally
-        // excluded — clients thank intermediate replies, and treating that as
-        // a wrap-up close caused premature resolutions. Stronger closing
-        // signals ("perfect", "sorted", "all good") remain.
-        return /\b(perfect|sorted|got it|all good|all sorted|appreciate it|cheers|awesome|amazing|brilliant|lekker)\b/.test(t);
+        return detectWrapUpImpl(text);
     }
 
     /**
@@ -637,16 +623,7 @@ class CaseService {
      * turn being the explicit resolution prompt.
      */
     detectFeedback(text: string): 'confirmed' | 'rejected' | null {
-        const t = (text || '').trim().toLowerCase();
-        if (!t) return null;
-
-        if (t === CASE_FEEDBACK_BUTTON_YES || t.includes('yes, thanks') || /^(y|yes|yep|yeah|yup|sure|ok|okay|all good|sorted|resolved|solved)\b/.test(t)) {
-            return 'confirmed';
-        }
-        if (t === CASE_FEEDBACK_BUTTON_NO || t.includes('still need help') || /^(n|no|nope|not really|still)\b/.test(t)) {
-            return 'rejected';
-        }
-        return null;
+        return detectFeedbackImpl(text);
     }
 
     /**
@@ -829,3 +806,11 @@ Be factual and specific. Do not invent details. No greeting, no sign-off — jus
 }
 
 export const caseService = new CaseService();
+
+// The routing predicates now live in the pure domain module; re-exported here
+// so module-level importers of case.service keep working unchanged.
+export {
+    qualifyMessage,
+    detectWrapUp,
+    detectFeedback,
+} from '../domain/caseRouting';
