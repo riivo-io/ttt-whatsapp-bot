@@ -11,6 +11,7 @@ import {
     CASE_FEEDBACK_BUTTON_NO,
     CASE_FEEDBACK_PROMPT_TEXT,
 } from '../services/case.service';
+import { decideCaseRouting } from '../domain/caseRouting';
 import { sharePointService } from '../services/sharepoint.service';
 import {
     matchFormByFilename,
@@ -1004,16 +1005,10 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     //      pending-feedback replies, follow-ups within the session).
     //   2. New request created synchronously for a qualifying question.
     //   3. null — falls back to contact/lead binding in logMessage.
-    // Case routing — three possibilities each turn:
-    //   1. Topic shift: prior case is in bot_responded and this inbound qualifies
-    //      as a new question → implicitly resolve the prior case as
-    //      resolved_by_bot (the client moved on rather than pushing back) and
-    //      open a new case for the new topic.
-    //   2. Continuation: a prior case exists (still 'open' while the bot drafts,
-    //      OR 'bot_responded' but this inbound is a short ack like "yes") →
-    //      reuse its Dynamics request; no new case.
-    //   3. Fresh: no prior case in the session and the inbound qualifies → open
-    //      the first case.
+    // Case routing is decided by the pure `decideCaseRouting` domain module
+    // (src/domain/caseRouting.ts): topic-shift / fresh / continue / reclassify /
+    // none. The switch below applies the verdict's I/O and sets the downstream
+    // locals; the decision logic itself lives in (and is tested via) the module.
     let crmRequestId: string | null = null;
     let newCaseId: string | null = null;
     let respondingCaseId: string | null = null;
@@ -1024,82 +1019,75 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     let reclassifyCaseId: string | null = null;
     if (crmEntity.type === 'client' || crmEntity.type === 'lead') {
         const latestCase = await supabaseService.findOpenCaseForSession(session.id);
-        const qualifies = caseService.qualifyMessage(effectiveText);
+        const verdict = decideCaseRouting(
+            latestCase,
+            {
+                text: effectiveText,
+                interactiveId,
+                pendingCaseId: (session as any).pending_case_id ?? null,
+            },
+            Date.now(),
+        );
 
-        // A feedback reply or closing ack belongs to the existing case — it is
-        // NOT a new topic. Without this guard a "Yes, thanks" button tap (which
-        // Meta delivers as the literal title text) reads as a fresh qualifying
-        // question, closing the prior case and spawning a duplicate REQ that
-        // resolves in the same turn. Button taps are unambiguous; a yes/no while
-        // a feedback prompt is outstanding, or any wrap-up ack, is treated the
-        // same way. These all fall through to the continuation branch below and
-        // are then closed properly (as confirmed) by the feedback/wrap-up paths.
-        const looksLikeFeedbackOrAck =
-            interactiveId === CASE_FEEDBACK_BUTTON_YES ||
-            interactiveId === CASE_FEEDBACK_BUTTON_NO ||
-            caseService.detectWrapUp(effectiveText) ||
-            ((session as any).pending_case_id != null && caseService.detectFeedback(effectiveText) !== null);
-
-        // Topic-shift relaxation (see docs/topic-shift-relaxation.md). Not every
-        // qualifying follow-up is a new topic. A new message only opens a NEW
-        // case when it lands well after the open case's last activity; within a
-        // short window it's almost always the same client continuing the same
-        // thread (especially in a campaign reply burst), so we reuse the open
-        // case via the continuation branch below instead of fanning out a fresh
-        // REQ per message. 30 min matches the session-timeout grain. Reversible:
-        // delete `&& !withinContinuationWindow` to restore the old behaviour.
-        const TOPIC_SHIFT_MIN_GAP_MS = 30 * 60 * 1000;
-        const withinContinuationWindow = !!latestCase &&
-            (Date.now() - new Date(latestCase.updated_at).getTime()) < TOPIC_SHIFT_MIN_GAP_MS;
-
-        if (latestCase && latestCase.status === 'bot_responded' && qualifies && !looksLikeFeedbackOrAck && !withinContinuationWindow) {
-            // Topic shift — close the prior thread before opening a new one.
-            try {
-                await caseService.markResolvedByBot(latestCase.id, 'topic_shift', latestCase.crm_case_id);
-                console.log(`[Processor] topic_shift closed caseId=${latestCase.id} sessionId=${session.id}`);
-            } catch (e: any) {
-                console.warn(`[Processor] topic_shift close failed caseId=${latestCase.id} err=${e?.message || e}`);
+        switch (verdict.kind) {
+            case 'topic-shift': {
+                // Topic shift — close the prior thread before opening a new one.
+                // markResolvedByBot must run (in this try/catch) BEFORE createCase.
+                try {
+                    await caseService.markResolvedByBot(verdict.priorCaseId, 'topic_shift', verdict.priorCrmRequestId);
+                    console.log(`[Processor] topic_shift closed caseId=${verdict.priorCaseId} sessionId=${session.id}`);
+                } catch (e: any) {
+                    console.warn(`[Processor] topic_shift close failed caseId=${verdict.priorCaseId} err=${e?.message || e}`);
+                }
+                const created = await caseService.createCase({
+                    sessionId: session.id,
+                    contactId: crmEntity.id,
+                    contactType: crmEntity.type,
+                    phoneNumber: from,
+                    queryText: effectiveText,
+                });
+                if (created) {
+                    newCaseId = created.id;
+                    respondingCaseId = created.id;
+                    crmRequestId = created.crm_case_id;
+                }
+                break;
             }
-            const created = await caseService.createCase({
-                sessionId: session.id,
-                contactId: crmEntity.id,
-                contactType: crmEntity.type,
-                phoneNumber: from,
-                queryText: effectiveText,
-            });
-            if (created) {
-                newCaseId = created.id;
-                respondingCaseId = created.id;
-                crmRequestId = created.crm_case_id;
+            case 'fresh': {
+                // Fresh — first qualifying message in the session.
+                const created = await caseService.createCase({
+                    sessionId: session.id,
+                    contactId: crmEntity.id,
+                    contactType: crmEntity.type,
+                    phoneNumber: from,
+                    queryText: effectiveText,
+                });
+                if (created) {
+                    newCaseId = created.id;
+                    respondingCaseId = created.id;
+                    crmRequestId = created.crm_case_id;
+                }
+                break;
             }
-        } else if (latestCase) {
-            // Continuation — reuse the existing case + Dynamics request.
-            crmRequestId = latestCase.crm_case_id;
-            if (latestCase.status === 'escalated' && (qualifies || caseService.detectWrapUp(effectiveText))) {
-                // Vague openers ("To do my tax") sometimes get flagged escalation
-                // on the first turn; once the client clarifies, the case is
-                // clearly L1. Attempt recovery — if successful, the post-response
-                // block sets respondingCaseId so the L1 feedback flow runs.
-                // A closing ack ("thanks") after an escalation is also strong
-                // evidence the bot actually answered fine; let it run the same
-                // recovery path so the wrap-up close below can pick the case up.
-                reclassifyCaseId = latestCase.id;
-            } else if (latestCase.status !== 'escalated') {
-                respondingCaseId = latestCase.id;
+            case 'continue': {
+                // Continuation — reuse the existing case + Dynamics request.
+                crmRequestId = verdict.crmRequestId;
+                respondingCaseId = verdict.caseId;
+                break;
             }
-        } else if (qualifies) {
-            // Fresh — first qualifying message in the session.
-            const created = await caseService.createCase({
-                sessionId: session.id,
-                contactId: crmEntity.id,
-                contactType: crmEntity.type,
-                phoneNumber: from,
-                queryText: effectiveText,
-            });
-            if (created) {
-                newCaseId = created.id;
-                respondingCaseId = created.id;
-                crmRequestId = created.crm_case_id;
+            case 'reclassify': {
+                // Escalated case the client just clarified (or acked). Attempt
+                // recovery — if it flips to L1, the post-response block promotes
+                // reclassifyCaseId to respondingCaseId so the L1 feedback flow runs.
+                crmRequestId = verdict.crmRequestId;
+                reclassifyCaseId = verdict.caseId;
+                break;
+            }
+            case 'none': {
+                // Escalated + neither qualifying nor wrap-up — thread under the
+                // existing request (may be null); no Case action this turn.
+                crmRequestId = verdict.crmRequestId;
+                break;
             }
         }
     }
