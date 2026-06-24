@@ -12,8 +12,8 @@ import { supabaseService } from '../services/supabase.service';
 import { metaWhatsAppService } from '../services/meta.service';
 import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.service';
 import {
-    CASE_FEEDBACK_BUTTON_YES,
-    CASE_FEEDBACK_BUTTON_NO,
+    CASE_FEEDBACK_BUTTON_YES_PREFIX,
+    CASE_FEEDBACK_BUTTON_NO_PREFIX,
     CASE_FEEDBACK_PROMPT_TEXT,
 } from '../services/case.service';
 import { enqueueCaseAutoClose } from '../queue/caseAutoCloseQueue';
@@ -75,8 +75,11 @@ export async function processFeedbackPromptJob(payload: FeedbackPromptJobPayload
             phoneNumber,
             CASE_FEEDBACK_PROMPT_TEXT,
             [
-                { id: CASE_FEEDBACK_BUTTON_YES, title: 'Yes, thanks' },
-                { id: CASE_FEEDBACK_BUTTON_NO, title: 'Still need help' },
+                // Per-case ids so a late tap (after auto-close or even after the
+                // session rolled over) still resolves to THIS exact case rather
+                // than falling through and spawning a duplicate.
+                { id: `${CASE_FEEDBACK_BUTTON_YES_PREFIX}:${caseId}`, title: 'Yes, thanks' },
+                { id: `${CASE_FEEDBACK_BUTTON_NO_PREFIX}:${caseId}`, title: 'Still need help' },
             ]
         );
         // Persist the prompt as an assistant message so the processor's

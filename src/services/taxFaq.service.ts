@@ -20,7 +20,7 @@
  * field on tasks/preseason (mixed schemes).
  */
 
-import { dynamicsService } from './dynamics.service';
+import { dynamicsService, isClientStatedMarkerRow } from './dynamics.service';
 import { graphMailService } from './graphMail.service';
 import { computeRequiredDocuments } from './requiredDocuments.service';
 import { getPersonalizedForms, formatTrailingLine } from './taxForms.service';
@@ -295,19 +295,36 @@ export async function handleGetReceivedDocuments(params: {
         });
     }
 
-    const docs = rows.map(r => ({
+    // Verified uploads vs. Issue 27 "client states provided" markers. The two
+    // are surfaced separately so we never present an unverified, client-stated
+    // doc as something TTT has actually received.
+    const toEntry = (r: any) => ({
         label: pickSubmissionDocLabel(r),
         tax_year: typeof r?.riivo_taxyear === 'number' ? r.riivo_taxyear : null,
         created_on: r?.createdon || null,
-    }));
+    });
+    const docs = rows.filter(r => !isClientStatedMarkerRow(r)).map(toEntry);
+    const clientStated = rows.filter(r => isClientStatedMarkerRow(r)).map(toEntry);
 
-    const lines = [`Here's what we've got on file from you${params.taxYear ? ` for ${params.taxYear}` : ''}:`];
-    docs.forEach(d => lines.push(`• ${d.label}${formatYearTag(d.tax_year)}`));
+    const lines: string[] = [];
+    if (docs.length > 0) {
+        lines.push(`Here's what we've got on file from you${params.taxYear ? ` for ${params.taxYear}` : ''}:`);
+        docs.forEach(d => lines.push(`• ${d.label}${formatYearTag(d.tax_year)}`));
+    } else {
+        lines.push(`I haven't got any documents confirmed on file from you yet${params.taxYear ? ` for ${params.taxYear}` : ''}.`);
+    }
+
+    if (clientStated.length > 0) {
+        if (lines.length > 0) lines.push('');
+        lines.push('You\'ve told me these are already with your consultant (I\'ve noted them, but they\'re not confirmed on our side yet):');
+        clientStated.forEach(d => lines.push(`• ${d.label}${formatYearTag(d.tax_year)} — noted as sent to your consultant`));
+    }
 
     return JSON.stringify({
-        status: 'received',
+        status: docs.length > 0 ? 'received' : 'client_stated_only',
         message: lines.join('\n'),
         documents: docs,
+        client_stated_unverified: clientStated,
         count: docs.length,
     });
 }
@@ -357,19 +374,28 @@ export async function handleGetRequiredDocuments(params: {
         ? params.taxYear
         : expected.taxYear.label;
     const uploadedRows = await dynamicsService.getTaxSubmissionDocsByClient(params.contactId, targetYear);
-    const uploadedLabels = uploadedRows.map(pickSubmissionDocLabel);
+    // Verified uploads suppress the ask AND count as received; Issue 27
+    // "client states provided" markers suppress the ask but are surfaced
+    // distinctly — never as a verified receipt.
+    const uploadedLabels = uploadedRows.filter(r => !isClientStatedMarkerRow(r)).map(pickSubmissionDocLabel);
+    const clientStatedLabels = uploadedRows.filter(r => isClientStatedMarkerRow(r)).map(pickSubmissionDocLabel);
 
     const allExpected = [...expected.bySourceCode, ...expected.byIndustry, ...expected.baseline];
     const seen = new Set<string>();
     const received: { label: string }[] = [];
+    const clientStated: { label: string }[] = [];
     const outstanding: { label: string; notes?: string }[] = [];
     for (const doc of allExpected) {
         const key = doc.label.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
-        const hit = uploadedLabels.some(u => labelsMatch(doc.label, u));
-        if (hit) received.push({ label: doc.label });
-        else outstanding.push({ label: doc.label, notes: doc.notes });
+        if (uploadedLabels.some(u => labelsMatch(doc.label, u))) {
+            received.push({ label: doc.label });
+        } else if (clientStatedLabels.some(u => labelsMatch(doc.label, u))) {
+            clientStated.push({ label: doc.label });
+        } else {
+            outstanding.push({ label: doc.label, notes: doc.reason });
+        }
     }
 
     const yearLabel = targetYear;
@@ -378,6 +404,12 @@ export async function handleGetRequiredDocuments(params: {
     if (received.length > 0) {
         lines.push(`Here's what we've got on file from you for ${yearLabel}:`);
         received.forEach(d => lines.push(`• ${d.label}`));
+        lines.push('');
+    }
+
+    if (clientStated.length > 0) {
+        lines.push(`Noted as already sent to your consultant (not yet confirmed on our side):`);
+        clientStated.forEach(d => lines.push(`• ${d.label}`));
         lines.push('');
     }
 
@@ -405,6 +437,7 @@ export async function handleGetRequiredDocuments(params: {
         message: lines.join('\n'),
         tax_year: yearLabel,
         received,
+        client_stated_unverified: clientStated,
         outstanding,
         has_personalisation: expected.hasPersonalisation,
     });

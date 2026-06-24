@@ -23,10 +23,48 @@
 // Predicate constants + helpers (moved from case.service — already pure)
 // ---------------------------------------------------------------------------
 
-// Stable ids for the case-resolution feedback buttons. Meta delivers a button
-// tap as its title text, but the ids are matched directly where available.
+// Legacy bare ids for the case-resolution feedback buttons. Still recognised
+// for in-flight prompts sent before the per-case ids deployed; new prompts use
+// the prefixed `case_fb_*:<caseId>` form below. Meta delivers a button tap as
+// its title text, but the ids are matched directly where available.
 export const CASE_FEEDBACK_BUTTON_YES = 'case_feedback_yes';
 export const CASE_FEEDBACK_BUTTON_NO = 'case_feedback_no';
+
+// Per-case feedback button id prefixes. The feedback prompt worker builds ids
+// as `${prefix}:${caseId}` so a tap is self-identifying — it resolves to its
+// exact case even after pending_case_id was cleared (auto-close) or the session
+// rolled over (30-min timeout), instead of falling through to a fresh case.
+export const CASE_FEEDBACK_BUTTON_YES_PREFIX = 'case_fb_yes';
+export const CASE_FEEDBACK_BUTTON_NO_PREFIX = 'case_fb_no';
+
+/**
+ * Parse a feedback reply-button id into its verdict and the case it belongs to.
+ * The single place that knows the id shape.
+ *
+ * - Per-case id (`case_fb_yes:<caseId>` / `case_fb_no:<caseId>`) → verdict +
+ *   the embedded caseId.
+ * - Bare legacy constant (`case_feedback_yes` / `case_feedback_no`) → verdict
+ *   with `caseId: null`, so a tap on a prompt sent before this deployed still
+ *   parses and the caller falls back to the surviving pending pointer.
+ * - Anything else (including undefined / a non-feedback button) → null.
+ */
+export function parseFeedbackButton(
+    interactiveId: string | null | undefined,
+): { verdict: 'confirmed' | 'rejected'; caseId: string | null } | null {
+    if (!interactiveId) return null;
+
+    if (interactiveId === CASE_FEEDBACK_BUTTON_YES) return { verdict: 'confirmed', caseId: null };
+    if (interactiveId === CASE_FEEDBACK_BUTTON_NO) return { verdict: 'rejected', caseId: null };
+
+    const sep = interactiveId.indexOf(':');
+    if (sep === -1) return null;
+    const prefix = interactiveId.slice(0, sep);
+    const caseId = interactiveId.slice(sep + 1);
+    if (!caseId) return null;
+    if (prefix === CASE_FEEDBACK_BUTTON_YES_PREFIX) return { verdict: 'confirmed', caseId };
+    if (prefix === CASE_FEEDBACK_BUTTON_NO_PREFIX) return { verdict: 'rejected', caseId };
+    return null;
+}
 
 const NOISE_WORDS = new Set([
     'thanks', 'thank', 'thx', 'ty', 'ok', 'okay', 'k', 'kk',
@@ -157,8 +195,7 @@ export function decideCaseRouting(
     // its literal title text) reads as a fresh qualifying question, closing the
     // prior case and spawning a duplicate REQ that resolves the same turn.
     const looksLikeFeedbackOrAck =
-        msg.interactiveId === CASE_FEEDBACK_BUTTON_YES ||
-        msg.interactiveId === CASE_FEEDBACK_BUTTON_NO ||
+        parseFeedbackButton(msg.interactiveId) !== null ||
         detectWrapUp(msg.text) ||
         (msg.pendingCaseId != null && detectFeedback(msg.text) !== null);
 

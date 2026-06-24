@@ -18,9 +18,12 @@ import {
     qualifyMessage,
     detectWrapUp,
     detectFeedback,
+    parseFeedbackButton,
     TOPIC_SHIFT_MIN_GAP_MS,
     CASE_FEEDBACK_BUTTON_YES,
     CASE_FEEDBACK_BUTTON_NO,
+    CASE_FEEDBACK_BUTTON_YES_PREFIX,
+    CASE_FEEDBACK_BUTTON_NO_PREFIX,
     type RoutingCase,
 } from '../../src/domain/caseRouting';
 
@@ -104,6 +107,19 @@ test('pending-case id + free-text feedback -> continue (not topic-shift)', () =>
     assert.deepEqual(v, { kind: 'continue', caseId: 'case-1', crmRequestId: 'req-1' });
 });
 
+test('bot_responded + per-case feedback button id -> continue (not topic-shift)', () => {
+    // Self-identifying button id (case_fb_no:<caseId>) must still trip the
+    // feedback guard so the tap is NOT read as a fresh topic. pendingCaseId is
+    // null here on purpose — the id alone has to be enough.
+    const c = caseRow({ status: 'bot_responded', updated_at: justOutsideWindow });
+    const v = decideCaseRouting(
+        c,
+        { text: 'Still need help', interactiveId: `${CASE_FEEDBACK_BUTTON_NO_PREFIX}:case-1`, pendingCaseId: null },
+        NOW,
+    );
+    assert.deepEqual(v, { kind: 'continue', caseId: 'case-1', crmRequestId: 'req-1' });
+});
+
 // ---------------------------------------------------------------------------
 // Non-terminal "drafting" status — always continuation
 // ---------------------------------------------------------------------------
@@ -182,4 +198,32 @@ test('detectFeedback: yes/no heuristics and button ids', () => {
     assert.equal(detectFeedback('no'), 'rejected');
     assert.equal(detectFeedback(CASE_FEEDBACK_BUTTON_NO), 'rejected');
     assert.equal(detectFeedback('how do I file'), null);
+});
+
+// ---------------------------------------------------------------------------
+// parseFeedbackButton — the single place that knows the button id shape
+// ---------------------------------------------------------------------------
+
+test('parseFeedbackButton: well-formed per-case ids -> verdict + caseId', () => {
+    assert.deepEqual(
+        parseFeedbackButton(`${CASE_FEEDBACK_BUTTON_YES_PREFIX}:abc-123`),
+        { verdict: 'confirmed', caseId: 'abc-123' },
+    );
+    assert.deepEqual(
+        parseFeedbackButton(`${CASE_FEEDBACK_BUTTON_NO_PREFIX}:abc-123`),
+        { verdict: 'rejected', caseId: 'abc-123' },
+    );
+});
+
+test('parseFeedbackButton: bare legacy constants -> verdict with null caseId', () => {
+    assert.deepEqual(parseFeedbackButton(CASE_FEEDBACK_BUTTON_YES), { verdict: 'confirmed', caseId: null });
+    assert.deepEqual(parseFeedbackButton(CASE_FEEDBACK_BUTTON_NO), { verdict: 'rejected', caseId: null });
+});
+
+test('parseFeedbackButton: malformed / unrelated / empty ids -> null', () => {
+    assert.equal(parseFeedbackButton(undefined), null);
+    assert.equal(parseFeedbackButton(''), null);
+    assert.equal(parseFeedbackButton('some_other_button'), null);
+    assert.equal(parseFeedbackButton('client_menu:foo'), null);
+    assert.equal(parseFeedbackButton(`${CASE_FEEDBACK_BUTTON_YES_PREFIX}:`), null); // empty caseId
 });

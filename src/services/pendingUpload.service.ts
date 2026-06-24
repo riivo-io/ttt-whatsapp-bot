@@ -3,6 +3,8 @@ import { sharePointService } from './sharepoint.service';
 import { mistralService } from './mistral.service';
 import { irp5ExtractorService, inferSourceCodesFromIrp5Row } from './irp5-extractor.service';
 import { computeMissingDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
+import { supabaseService } from './supabase.service';
+import type { DocRecommendationItem } from '../domain/docRecommendation';
 import { mapDocTypeToCanonical } from '../utils/docTypeMapping';
 console.log('[boot] pendingUpload.service: imports done');
 
@@ -193,7 +195,17 @@ export type ClientIrp5Result =
         taxsubmissionsdocumentId: string | null;
         sharepointUrl: string | null;
         wrongYearWarning?: string;
-        missingDocs: { label: string; notes?: string }[];
+        /**
+         * Full tailored outstanding list (forms + docs, reason-annotated,
+         * IRP5 itself filtered out) for the list-once presentation (Issue 26).
+         */
+        outstanding: DocRecommendationItem[];
+        /**
+         * True when OCR/extraction yielded no source codes off the cert, so the
+         * list degraded to the generic profile/baseline fallback. INTERNAL ONLY
+         * — for staff logging; never surfaced to the client (we have the file).
+         */
+        extractionDegraded: boolean;
     };
 
 /**
@@ -302,7 +314,18 @@ export async function processClientIrp5Upload(params: {
         .flatMap((r: any) => inferSourceCodesFromIrp5Row(r));
     const allCodes = Array.from(new Set([...extracted.sourceCodes, ...priorCodes]));
 
-    // Step 7: compute outstanding docs, minus the IRP5 they just sent.
+    // Graceful OCR/extraction failure (Issue 26): no source codes off this cert
+    // means we couldn't read it (or it carried none). The file is already on
+    // file, so we still confirm receipt and fall back to the generic
+    // profile/baseline list inside computeMissingDocsForClient — we NEVER tell
+    // the client we couldn't read it. Log it so staff can follow up.
+    const extractionDegraded = extracted.sourceCodes.length === 0;
+    if (extractionDegraded) {
+        console.warn(`[IRP5] No source codes extracted from ${fileName} for ${contactId} — degrading to generic profile/baseline doc list. Cert is on file at ${webUrl}.`);
+    }
+
+    // Step 7: compute the full tailored outstanding list (forms + docs),
+    // minus the IRP5 they just sent.
     const missing = await computeMissingDocsForClient(contactId, allCodes, new Date());
     const outstandingForClient = missing.outstanding.filter(d => !/^irp5\b/i.test(d.label));
 
@@ -317,8 +340,106 @@ export async function processClientIrp5Upload(params: {
         taxsubmissionsdocumentId: tsdResult.recordId || null,
         sharepointUrl: webUrl || null,
         wrongYearWarning,
-        missingDocs: outstandingForClient.map(d => ({ label: d.label, notes: d.notes })),
+        outstanding: outstandingForClient,
+        extractionDegraded,
     };
+}
+
+/**
+ * State-B lead IRP5 fast-track: a lead who has signed their LoE but hasn't yet
+ * completed the SARS OTP can send their IRP5 early. We can't write a
+ * Contact-scoped riivo_irp5s/taxsubmissionsdocuments row yet (they're still a
+ * Lead), so we stage the cert in Supabase (pending_irp5s) keyed on the lead and
+ * apply it once they convert to a Contact. SharePoint stores under
+ * leads/{leadId}/{year}/; a Lead annotation records the extraction for staff.
+ *
+ * Lifted verbatim out of the claude.service upload_irp5 closure (Issue 4) so the
+ * Tool handler reaches it through the Irp5Port instead of capturing it from
+ * enclosing scope. Clears the staged buffer on success.
+ */
+export async function processStateBLeadIrp5Upload(
+    leadId: string,
+    phone: string,
+    staged: { fileName: string; mimeType: string; buffer: Buffer },
+): Promise<string> {
+    const currentTaxYear = getCurrentSaTaxYear();
+
+    // Step 1: SharePoint upload under leads/{leadId}/{year}/.
+    let webUrl: string;
+    try {
+        const spResult = await sharePointService.uploadLeadDocumentFile({
+            leadId,
+            uploadYear: new Date().getFullYear(),
+            fileName: staged.fileName,
+            mimeType: staged.mimeType,
+            buffer: staged.buffer,
+        });
+        webUrl = spResult.webUrl;
+    } catch (err: any) {
+        const msg = err?.response?.data?.error?.message || err?.message || 'unknown error';
+        console.error(`[upload_irp5 lead] SharePoint upload failed for lead ${leadId}/${staged.fileName}:`, msg);
+        return JSON.stringify({ status: 'error', error: 'sharepoint_failed', message: `Couldn't store the file in SharePoint: ${msg}. Ask the client to resend in a moment.` });
+    }
+
+    // Step 2 + 3: OCR + extraction (best-effort).
+    let ocrMarkdown: string | null = null;
+    if (mistralService.isConfigured()) {
+        try {
+            const ocr = await mistralService.ocrDocument(staged.fileName, staged.buffer, staged.mimeType || 'application/pdf');
+            ocrMarkdown = ocr.fullMarkdown;
+            console.log(`[upload_irp5 lead] OCR'd ${staged.fileName} → ${ocr.pageCount} pages, ${ocrMarkdown.length} chars`);
+        } catch (err: any) {
+            console.warn(`[upload_irp5 lead] OCR failed: ${err?.message || err}`);
+        }
+    }
+    const extracted = ocrMarkdown
+        ? await irp5ExtractorService.extractIrp5Fields(ocrMarkdown)
+        : { riivoFields: {} as Record<string, any>, sourceCodes: [] as string[] };
+
+    let wrongYearWarning: string | undefined;
+    if (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear !== currentTaxYear.label) {
+        wrongYearWarning = `The cert reads as the ${extracted.assessmentYear} assessment year, but we're collecting docs for ${currentTaxYear.label} (${currentTaxYear.rangeText}). Ask the client to confirm whether they meant to send this older one.`;
+    }
+
+    // Step 4: stage in Supabase.
+    const inserted = await supabaseService.insertPendingIrp5({
+        leadId,
+        phoneNumber: phone,
+        sharepointUrl: webUrl,
+        fileName: staged.fileName,
+        certificateNumber: extracted.certificateNumber || null,
+        assessmentYear: typeof extracted.assessmentYear === 'number' ? extracted.assessmentYear : null,
+        employerName: extracted.employerName || null,
+        sourceCodes: extracted.sourceCodes || [],
+        extractedFields: extracted.riivoFields || null,
+    });
+
+    // Step 5: Lead annotation (best-effort — we don't roll back
+    // SharePoint or Supabase if this fails).
+    await dynamicsService.createIrp5AnnotationOnLead(leadId, {
+        employerName: extracted.employerName || null,
+        assessmentYear: typeof extracted.assessmentYear === 'number' ? extracted.assessmentYear : null,
+        certificateNumber: extracted.certificateNumber || null,
+        sourceCodes: extracted.sourceCodes || [],
+        sharepointUrl: webUrl,
+    });
+
+    clearPendingUpload(phone);
+
+    const targetYear = (typeof extracted.assessmentYear === 'number' && extracted.assessmentYear === currentTaxYear.label)
+        ? extracted.assessmentYear
+        : currentTaxYear.label;
+
+    return JSON.stringify({
+        status: 'irp5_staged_for_lead',
+        employer_name: extracted.employerName || null,
+        assessment_year: extracted.assessmentYear || targetYear,
+        certificate_number: extracted.certificateNumber || null,
+        sharepoint_url: webUrl,
+        pending_id: inserted?.id || null,
+        wrong_year_warning: wrongYearWarning,
+        message: `IRP5${extracted.employerName ? ` from ${extracted.employerName}` : ''} for the ${targetYear} tax year is staged on our side. Compose a short warm confirmation: thank the client by name if you know it, mention the employer + year, and tell them the consultant will pick it up when they're set up on eFiling.${wrongYearWarning ? ' But first: ' + wrongYearWarning : ''}`,
+    });
 }
 
 export function hasPendingUpload(phoneNumber: string): boolean {
