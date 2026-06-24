@@ -8,6 +8,13 @@ const EMBEDDING_DIMS = 1536;
 const TARGET_CHUNK_TOKENS = 500;
 const MIN_CHUNK_TOKENS = 50;
 
+// Embeddings API per-request limits: 300k tokens and 2048 inputs. We budget a
+// sub-batch on character count, not estimated tokens, because the real token
+// count is always <= the character count — so capping chars under 300k is a
+// provably safe bound, where a chars/4 token estimate could undershoot 4x.
+const MAX_REQUEST_CHARS = 280000;
+const MAX_REQUEST_INPUTS = 2048;
+
 export type Chunk = {
     content: string;
     headingPath: string;
@@ -43,11 +50,32 @@ class EmbeddingsService {
     async embedBatch(texts: string[]): Promise<number[][]> {
         if (texts.length === 0) return [];
         const client = this.getClient();
-        const response = await client.embeddings.create({
-            model: EMBEDDING_MODEL,
-            input: texts,
-        });
-        return response.data.map(d => d.embedding);
+
+        // The embeddings API caps a single request at 300k tokens and 2048
+        // inputs. A large doc can exceed the token cap in one shot, so pack
+        // inputs into sub-batches that stay under both limits, then flatten.
+        const out: number[][] = [];
+        let batch: string[] = [];
+        let batchChars = 0;
+        const flush = async () => {
+            if (batch.length === 0) return;
+            const response = await client.embeddings.create({
+                model: EMBEDDING_MODEL,
+                input: batch,
+            });
+            out.push(...response.data.map(d => d.embedding));
+            batch = [];
+            batchChars = 0;
+        };
+        for (const text of texts) {
+            if (batch.length > 0 && (batchChars + text.length > MAX_REQUEST_CHARS || batch.length >= MAX_REQUEST_INPUTS)) {
+                await flush();
+            }
+            batch.push(text);
+            batchChars += text.length;
+        }
+        await flush();
+        return out;
     }
 
     /**
@@ -96,8 +124,15 @@ class EmbeddingsService {
 
             // Section too big — pack paragraphs into chunks. Use the previous
             // paragraph as overlap so chunk boundaries don't sever sentences
-            // that span a paragraph break.
-            const paragraphs = body.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+            // that span a paragraph break. A single paragraph can itself blow
+            // past the target (and the embedding API's hard 8192-token limit)
+            // when the source has no paragraph breaks — e.g. tables or letter
+            // bodies — so split oversized paragraphs down first.
+            const paragraphs = body
+                .split(/\n\s*\n/)
+                .map(p => p.trim())
+                .filter(Boolean)
+                .flatMap(p => this.splitOversizedParagraph(p));
             let buf: string[] = [];
             let bufTokens = 0;
             for (const p of paragraphs) {
@@ -126,6 +161,43 @@ class EmbeddingsService {
         }
 
         return chunks;
+    }
+
+    /**
+     * Break a single paragraph that exceeds the target chunk size into smaller
+     * pieces — first on sentence boundaries, then on a hard character cap as a
+     * last resort. The char cap (TARGET_CHUNK_TOKENS * 4) guarantees each piece
+     * is well under the embedding API's 8192-token limit, since a token is
+     * always at least one character.
+     */
+    private splitOversizedParagraph(paragraph: string): string[] {
+        if (this.estimateTokens(paragraph) <= TARGET_CHUNK_TOKENS) return [paragraph];
+
+        const sentences = paragraph.split(/(?<=[.!?])\s+/);
+        const packed: string[] = [];
+        let buf = '';
+        for (const sentence of sentences) {
+            const next = buf ? `${buf} ${sentence}` : sentence;
+            if (buf && this.estimateTokens(next) > TARGET_CHUNK_TOKENS) {
+                packed.push(buf);
+                buf = sentence;
+            } else {
+                buf = next;
+            }
+        }
+        if (buf) packed.push(buf);
+
+        // Any single sentence still over the target (no sentence breaks at all)
+        // gets sliced on a fixed character window.
+        const maxChars = TARGET_CHUNK_TOKENS * 4;
+        return packed.flatMap(piece => {
+            if (this.estimateTokens(piece) <= TARGET_CHUNK_TOKENS) return [piece];
+            const slices: string[] = [];
+            for (let i = 0; i < piece.length; i += maxChars) {
+                slices.push(piece.slice(i, i + maxChars));
+            }
+            return slices;
+        });
     }
 }
 

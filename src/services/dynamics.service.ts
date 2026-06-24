@@ -7,8 +7,15 @@ import dotenv from 'dotenv';
 console.log('[boot] dynamics.service: before crm types');
 import { CrmEntity } from '../types/crm.types';
 console.log('[boot] dynamics.service: before supabase');
-import { supabaseService } from './supabase.service';
+import { supabaseService, BadDebtDetail, BadDebtInvoiceSummary } from './supabase.service';
 import { PRESEASON_SELECT_FIELDS } from '../utils/preseasonDocTypes';
+import {
+    Invoice,
+    InvoiceLineItem,
+    invoiceFromByNumberRow,
+    invoiceFromByIdRow,
+    lineItemFromRow,
+} from '../domain/invoice';
 console.log('[boot] dynamics.service: imports done');
 // mistralService and loeExtractorService are no longer called from dynamics.service
 // — OCR + extraction now happen in the claude.service handler, and confirmed
@@ -25,6 +32,27 @@ export interface LocalCrmEntity {
 }
 
 const AUDIT_FIELDS = ['ttt_ai_triggered_by', 'ttt_ai_model', 'ttt_ai_generated_at'];
+
+/**
+ * Notes sentinel stamped on the Issue 27 "already sent it" escape-hatch row.
+ * A `riivo_taxsubmissionsdocuments` row carrying this in `riivo_documentnotes`
+ * is an UNVERIFIED client-stated marker, NOT a verified receipt: it suppresses
+ * the re-ask in re-derivation but must never be counted/surfaced as received.
+ * Worded so a consultant reading the CRM sees exactly what it is (ADR 0002
+ * decision 3). Do not reword without updating isClientStatedMarkerRow.
+ */
+export const CLIENT_STATED_DOC_NOTE = 'CLIENT STATES PROVIDED — UNVERIFIED (client says this was sent to their consultant; TTT has not received or verified it)';
+
+/**
+ * True when a tax-submission-document row is an unverified client-stated marker
+ * (Issue 27) rather than a verified upload. Keys on the notes sentinel — the
+ * one field we control on write. Verified WhatsApp uploads and Power Automate
+ * emailed-doc rows never carry it.
+ */
+export function isClientStatedMarkerRow(row: any): boolean {
+    const notes = typeof row?.riivo_documentnotes === 'string' ? row.riivo_documentnotes : '';
+    return notes.toUpperCase().includes('CLIENT STATES PROVIDED');
+}
 
 // Boolean field on the new_lead entity indicating a signed Letter of
 // Engagement has been received. Schema name in Dynamics is riivo_LoEReceived;
@@ -89,6 +117,11 @@ export const CLASSIFICATION_LEVEL = {
     L3: 463630002,
     ESCALATION: 463630003,
 } as const;
+
+// Bad-debt threshold (PRD-bad-debt-collection.md §4). An open invoice
+// (ttt_outstanding > 0) that is >= 30 calendar days old (inclusive) puts the
+// client in bad-debt state. Calendar days, not working days.
+export const BAD_DEBT_AGE_DAYS = 30;
 
 // Model-driven app id for the TTT Dynamics app. Deep links into records must
 // carry the appid so the record opens in the right app context — without it
@@ -357,11 +390,16 @@ export class DynamicsService {
         return this.getList(
             'new_invoiceses',
             `_ttt_customer_value eq ${contactId}`,
-            ['new_invoicesid', 'new_name', 'riivo_totalinclvat', 'statecode', 'statuscode']
+            // Bad-debt detection (PRD-bad-debt-collection.md §11.1) needs the
+            // open-invoice signal, the payment-reference number, the invoice age
+            // and the partial-payment fields alongside the existing total.
+            ['new_invoicesid', 'new_name', 'ttt_invoiceid', 'createdon',
+             'ttt_outstanding', 'ttt_paymentreceived', 'riivo_totalinclvat',
+             'statecode', 'statuscode']
         );
     }
 
-    async getInvoiceByNumber(invoiceNumber: string): Promise<any | null> {
+    async getInvoiceByNumber(invoiceNumber: string): Promise<Invoice | null> {
         const token = await this.getToken();
         const selectFields = [
             // Invoice header
@@ -395,7 +433,7 @@ export class DynamicsService {
             });
 
             if (response.data?.value?.length > 0) {
-                return response.data.value[0];
+                return invoiceFromByNumberRow(response.data.value[0]);
             }
             return null;
         } catch (error: any) {
@@ -1007,6 +1045,149 @@ export class DynamicsService {
         );
         const total = invoices.reduce((sum: number, inv: any) => sum + (inv.riivo_totalinclvat || 0), 0);
         return { total, count: invoices.length };
+    }
+
+    /**
+     * Deterministic bad-debt detection (PRD-bad-debt-collection.md §6.2).
+     * Reads the client's open invoices (ttt_outstanding > 0) plus each invoice's
+     * createdon, and returns a BadDebtDetail when at least one open invoice is
+     * >= 30 calendar days old (inclusive). Returns null when the client is in
+     * good standing (no open invoice, or every open invoice still within terms).
+     *
+     * The returned detail describes the OVERDUE (>= 30-day) invoices only — those
+     * are the ones we surface and send. Oldest-first so the PDF cap (§7.1) drops
+     * the freshest extras, not the most-overdue ones.
+     */
+    async getBadDebtState(contactId: string): Promise<BadDebtDetail | null> {
+        const rows = await this.getList(
+            'new_invoiceses',
+            `_ttt_customer_value eq ${contactId} and statecode eq 0 and ttt_outstanding gt 0`,
+            ['new_invoicesid', 'ttt_invoiceid', 'new_name', 'createdon',
+             'ttt_outstanding', 'ttt_paymentreceived', 'riivo_totalinclvat']
+        );
+        if (!rows.length) return null;
+
+        const now = Date.now();
+        const ageInDays = (createdon: string): number => {
+            const created = new Date(createdon).getTime();
+            if (!Number.isFinite(created)) return 0;
+            return Math.floor((now - created) / (1000 * 60 * 60 * 24));
+        };
+
+        const overdue: BadDebtInvoiceSummary[] = rows
+            .map((inv: any): BadDebtInvoiceSummary => ({
+                invoiceId: (inv.ttt_invoiceid || inv.new_name || '').toString().trim(),
+                recordId: inv.new_invoicesid,
+                outstanding: typeof inv.ttt_outstanding === 'number' ? inv.ttt_outstanding : Number(inv.ttt_outstanding) || 0,
+                total: typeof inv.riivo_totalinclvat === 'number' ? inv.riivo_totalinclvat : Number(inv.riivo_totalinclvat) || 0,
+                paymentReceived: typeof inv.ttt_paymentreceived === 'number' ? inv.ttt_paymentreceived : Number(inv.ttt_paymentreceived) || 0,
+                ageDays: ageInDays(inv.createdon),
+            }))
+            .filter(inv => inv.ageDays >= BAD_DEBT_AGE_DAYS)
+            .sort((a, b) => b.ageDays - a.ageDays);
+
+        if (!overdue.length) return null;
+
+        return {
+            totalOutstanding: Math.round(overdue.reduce((s, i) => s + i.outstanding, 0) * 100) / 100,
+            openInvoiceCount: overdue.length,
+            oldestAgeDays: overdue[0].ageDays,
+            invoices: overdue,
+        };
+    }
+
+    /**
+     * Line items for a single invoice (riivo_invoicelineitems), used to build the
+     * invoice-gen API payload. Returns [] on error / no items so the caller can
+     * still generate a header-only PDF or fall back to the text payment ask.
+     */
+    async getInvoiceLineItems(invoiceId: string): Promise<InvoiceLineItem[]> {
+        const token = await this.getToken();
+        const selectFields = [
+            'riivo_invoicelineitemsid', 'riivo_name', 'riivo_itemdescriptionfx',
+            'riivo_qty', 'riivo_price', 'riivo_amount', 'riivo_subtotal',
+            'riivo_totalvat', 'riivo_totalinclvat',
+        ];
+        try {
+            const url = `${this.baseUrl}/api/data/v9.2/riivo_invoicelineitemses?$filter=${encodeURIComponent(`_riivo_invoice_value eq ${invoiceId} and statecode eq 0`)}&$select=${selectFields.join(',')}&$orderby=createdon asc&$top=100`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                },
+            });
+            return (response.data?.value || []).map(lineItemFromRow);
+        } catch (error: any) {
+            console.warn(`[Dynamics CRM] getInvoiceLineItems(${invoiceId}) failed:`, error?.response?.data?.error?.message || error.message);
+            return [];
+        }
+    }
+
+    /**
+     * Fetch a full invoice record by its GUID for the invoice-gen API payload
+     * (PRD-bad-debt-collection.md §7.1). Field set + formatted-label annotations
+     * mirror the Power Automate flow that drives the same Azure Function:
+     * customer/consultant blocks, the 30/60/90-day interest amounts (`terms`),
+     * ttt_discountamount for the totals calc, the icon_* banking option labels,
+     * and _ownerid_value so a Tax invoice can pull the consultant's bank account.
+     */
+    async getInvoiceById(invoiceId: string): Promise<Invoice | null> {
+        const token = await this.getToken();
+        const selectFields = [
+            'new_invoicesid', 'new_name', 'ttt_invoiceid', 'createdon', '_ownerid_value',
+            'riivo_invoicetype', 'ttt_discountamount', 'ttt_description',
+            'riivo_dayinterestamounttest', 'riivo_dayinterestamount', 'riivo_dayinterestamountnew',
+            'riivo_customerfullname', 'riivo_customerstreet', 'riivo_customerprovince',
+            'riivo_customersuburb', 'riivo_customerponumber', 'riivo_customercity',
+            'riivo_customercountry', 'riivo_customervatnumber',
+            'riivo_consultantcompany', 'riivo_consultantfullname', 'riivo_consultantstreet',
+            'riivo_consultantsuburb', 'riivo_consultantprovince', 'riivo_consultantponumber',
+            'riivo_consultantcity', 'riivo_consultantcountry', 'riivo_consultantvatnumber',
+            'icon_accountholdername', 'icon_bank', 'icon_accountnumber',
+            'icon_accounttype', 'icon_branchnumber',
+        ];
+        try {
+            const url = `${this.baseUrl}/api/data/v9.2/new_invoiceses(${invoiceId})?$select=${selectFields.join(',')}`;
+            const response = await axios.get(url, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'OData-MaxVersion': '4.0',
+                    'OData-Version': '4.0',
+                    'Accept': 'application/json',
+                    // icon_bank / icon_accounttype are option sets — the API
+                    // payload needs their display labels, not the numeric values.
+                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"',
+                },
+            });
+            return response.data ? invoiceFromByIdRow(response.data) : null;
+        } catch (error: any) {
+            console.warn(`[Dynamics CRM] getInvoiceById(${invoiceId}) failed:`, error?.response?.data?.error?.message || error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Banking details held on a consultant's systemuser record. For Tax invoices
+     * the invoice-gen payload pulls the account number / holder / branch from the
+     * owning consultant (the icon_* fields on the invoice carry the bank +
+     * account-type option labels only). Returns null on error / not found.
+     */
+    async getConsultantBanking(
+        systemUserId: string
+    ): Promise<{ accountNumber: string; accountHolder: string; branchNumber: string } | null> {
+        const user = await this.searchEntity(
+            'systemusers',
+            `systemuserid eq ${systemUserId}`,
+            ['systemuserid', 'ttt_accountnumber', 'ttt_accountholdername', 'ttt_branchnumber']
+        );
+        if (!user) return null;
+        return {
+            accountNumber: user.ttt_accountnumber || '',
+            accountHolder: user.ttt_accountholdername || '',
+            branchNumber: user.ttt_branchnumber || '',
+        };
     }
 
     async getContactTaxNumber(contactId: string): Promise<string | null> {
@@ -1958,6 +2139,57 @@ export class DynamicsService {
         } catch (error: any) {
             const errMsg = error?.response?.data?.error?.message || error.message;
             console.error(`[Dynamics CRM] Failed to create taxsubmissionsdocument for contact ${params.contactId}:`, errMsg);
+            return { success: false, taxYear: inferred.taxYear, error: errMsg };
+        }
+    }
+
+    /**
+     * Record the Issue 27 "already sent it" escape hatch: an UNVERIFIED
+     * "client states provided" marker for a doc the client says they already
+     * sent to their consultant. Writes a `riivo_taxsubmissionsdocuments`-shaped
+     * row that is clearly distinct from a verified upload —
+     *   - `riivo_uploaded = false` (verified WhatsApp/Power Automate rows set true)
+     *   - NO `riivo_filereference` (there is no file)
+     *   - `riivo_documentnotes` = CLIENT_STATED_DOC_NOTE sentinel
+     * The canonical doc label rides in `riivo_taxsubmissionsdocument` so
+     * re-derivation can loose-match and suppress that item's re-ask across
+     * session resets. It is NEVER counted as a verified receipt (see
+     * isClientStatedMarkerRow); a consultant can confirm or clear it.
+     */
+    async markDocumentClientStated(params: {
+        contactId: string;
+        canonicalDocType: string;
+        triggeredBy: string;
+    }): Promise<{ success: boolean; recordId?: string; taxYear: number; error?: string }> {
+        const inferred = await this.inferUploadContext(params.contactId);
+
+        const payload: any = {
+            'riivo_taxsubmissionsdocument': params.canonicalDocType,
+            'riivo_taxyear': inferred.taxYear,
+            'riivo_uploaded': false,
+            'riivo_documentnotes': `${CLIENT_STATED_DOC_NOTE} — ${params.canonicalDocType}`,
+            'riivo_Client@odata.bind': `/contacts(${params.contactId})`,
+        };
+
+        try {
+            const response = await this.crmPost('riivo_taxsubmissionsdocumentses', payload, params.triggeredBy);
+            const recordId = response.data?.riivo_taxsubmissionsdocumentsid;
+            console.log(`[Dynamics CRM] Recorded UNVERIFIED client-stated marker ${recordId} for contact ${params.contactId}, doc "${params.canonicalDocType}", year ${inferred.taxYear}`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'riivo_taxsubmissionsdocumentses',
+                crmRecordId: recordId,
+                action: 'create',
+                payload: {
+                    canonical_doc_type: params.canonicalDocType,
+                    tax_year: inferred.taxYear,
+                    client_stated_unverified: true,
+                },
+                triggeredBy: params.triggeredBy,
+            });
+            return { success: true, recordId, taxYear: inferred.taxYear };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[Dynamics CRM] Failed to record client-stated marker for contact ${params.contactId}:`, errMsg);
             return { success: false, taxYear: inferred.taxYear, error: errMsg };
         }
     }

@@ -1,5 +1,5 @@
 /**
- * Claude API pricing — USD per million tokens, current as of 2026-04.
+ * Claude API pricing — USD per million tokens, current as of 2026-06.
  * Update when Anthropic changes pricing. Cost is computed at insert time and
  * stored on each claude_usage row, so historical rows stay correct.
  *
@@ -15,8 +15,9 @@ interface PricingTier {
 
 // Per million tokens, USD.
 const PRICING: Record<string, PricingTier> = {
-    'claude-opus-4-7':   { input: 15.0, output: 75.0, cacheWrite: 18.75, cacheRead: 1.50 },
-    'claude-opus-4-6':   { input: 15.0, output: 75.0, cacheWrite: 18.75, cacheRead: 1.50 },
+    'claude-opus-4-8':   { input: 5.0,  output: 25.0, cacheWrite: 6.25,  cacheRead: 0.50 },
+    'claude-opus-4-7':   { input: 5.0,  output: 25.0, cacheWrite: 6.25,  cacheRead: 0.50 },
+    'claude-opus-4-6':   { input: 5.0,  output: 25.0, cacheWrite: 6.25,  cacheRead: 0.50 },
     'claude-sonnet-4-6': { input: 3.0,  output: 15.0, cacheWrite: 3.75,  cacheRead: 0.30 },
     'claude-haiku-4-5':  { input: 1.0,  output: 5.0,  cacheWrite: 1.25,  cacheRead: 0.10 },
 };

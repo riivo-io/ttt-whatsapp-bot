@@ -27,13 +27,22 @@ function getSender(): ServiceBusSender {
     return sender;
 }
 
-export async function enqueueCaseAutoClose(payload: CaseAutoCloseJobPayload): Promise<void> {
+export async function enqueueCaseAutoClose(
+    payload: CaseAutoCloseJobPayload,
+    opts?: { dedupId?: string },
+): Promise<void> {
     const msg: ServiceBusMessage = {
         body: payload,
         // messageId = autoclose-<caseId> guarantees at most one delayed close
         // per case even if the enqueue site is retried within the ASB dedup
         // window. The 10-min delay is comfortably under that window.
-        messageId: `autoclose-${payload.caseId}`,
+        //
+        // A re-engaged case needs a FRESH timer though: the original prompt's
+        // auto-close (still pending) now sees a client inbound since the prompt
+        // and skips, so it would never close the reopened case. The re-engage
+        // path passes a distinct dedupId so its auto-close isn't suppressed by
+        // the original's still-in-window messageId.
+        messageId: opts?.dedupId ?? `autoclose-${payload.caseId}`,
         scheduledEnqueueTimeUtc: new Date(Date.now() + CASE_AUTO_CLOSE_DELAY_MS),
     };
     await getSender().sendMessages(msg);
