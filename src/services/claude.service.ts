@@ -39,6 +39,13 @@ import {
 } from './taxFaq.service';
 import { buildReferralCodePayload } from './referral-window';
 import { buildClientRoleContext } from '../domain/clientRoleContext';
+import {
+    runTool,
+    deriveOfferedTools,
+    makeClientResolvers,
+    REGISTRY,
+    type ToolContext,
+} from './tools';
 
 dotenv.config();
 
@@ -1065,9 +1072,15 @@ What NOT to do:
                 { role: 'user', content: userMessage },
             ];
 
-            // Filter tools by role
-            const clientTools = ['get_my_details', 'get_client_invoices', 'get_client_cases', 'get_invoice_pdf', 'get_tax_number', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_office_contact', 'get_required_documents', 'list_tax_forms', 'send_tax_form', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'get_my_referral_code', 'save_document', 'upload_irp5', 'escalate_to_taxcrew'];
-            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_invoices', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field', 'refer_friend'];
+            // Filter tools by role.
+            // Tool registry (strangler migration): the read-only client Tools
+            // get_my_details / get_tax_number / get_client_invoices are no longer
+            // listed here — they are offered via deriveOfferedTools from the
+            // registry and unioned into the offered set below. The remaining
+            // (un-migrated) Tools are still produced by these legacy arrays.
+            // (get_office_contact is an un-migrated client Tool added on main.)
+            const clientTools = ['get_client_cases', 'get_invoice_pdf', 'get_outstanding_balance', 'request_consultant_callback', 'get_my_consultant', 'get_office_contact', 'get_required_documents', 'list_tax_forms', 'send_tax_form', 'get_refund_status', 'get_submission_status', 'get_received_documents', 'get_audit_status', 'opt_out_whatsapp', 'get_my_referral_code', 'save_document', 'upload_irp5', 'escalate_to_taxcrew'];
+            const staffTools = ['get_my_clients', 'get_my_leads', 'get_client_details', 'get_client_cases', 'get_case_by_name', 'get_outstanding_balance', 'search_contact_by_name', 'create_case', 'create_lead', 'create_contact', 'create_invoice', 'create_task', 'get_task_types', 'get_industries', 'search_lead_by_name', 'get_invoice_pdf', 'send_invoice_pdf', 'save_document', 'upload_letter_of_engagement', 'confirm_loe_upload', 'update_loe_field', 'refer_friend'];
             // State B leads (LoE done, OTP outstanding) get upload_irp5 so they
             // can fast-track. All other lead states stay at save_document only.
             const isStateBLead = entityType === 'lead'
@@ -1077,27 +1090,33 @@ What NOT to do:
             const leadTools = isStateBLead ? ['save_document', 'upload_irp5', 'escalate_to_taxcrew'] : ['save_document', 'escalate_to_taxcrew'];
             const unknownTools = ['verify_identity', 'escalate_to_taxcrew'];
 
-            let availableTools: typeof TOOLS | undefined;
+            // Build the offered-tool name set. The legacy arrays cover un-migrated
+            // Tools; deriveOfferedTools(...) adds the registry-migrated Tools for the
+            // role (gated exactly as before — clients need a contactId, staff need
+            // the matching permission). Filtering TOOLS by the set preserves the
+            // original declaration order.
+            const offeredNames = new Set<string>();
             if (contactId && entityType === 'client') {
-                availableTools = TOOLS.filter(t => clientTools.includes(t.name));
+                clientTools.forEach(n => offeredNames.add(n));
+                deriveOfferedTools('client', permittedToolKeys).forEach(n => offeredNames.add(n));
             } else if (entityType === 'user') {
                 // Staff: start from staffTools, then apply role-based filter using
                 // the permitted_tools list loaded from the session (role_tools table).
                 // If a tool isn't in STAFF_TOOL_PERMISSIONS it's not staff-gated and
                 // stays available. If it is, keep it only if its permission is permitted.
-                availableTools = TOOLS.filter(t => {
-                    const name = t.name;
-                    if (!staffTools.includes(name)) return false;
+                for (const name of staffTools) {
                     const perm = STAFF_TOOL_PERMISSIONS[name];
-                    if (!perm) return true;
-                    return permittedToolKeys.includes(perm);
-                });
+                    if (!perm || permittedToolKeys.includes(perm)) offeredNames.add(name);
+                }
+                deriveOfferedTools('user', permittedToolKeys).forEach(n => offeredNames.add(n));
             } else if (entityType === 'lead') {
-                availableTools = TOOLS.filter(t => leadTools.includes(t.name));
+                leadTools.forEach(n => offeredNames.add(n));
+                deriveOfferedTools('lead', permittedToolKeys).forEach(n => offeredNames.add(n));
             } else {
                 // Unknown users
-                availableTools = TOOLS.filter(t => unknownTools.includes(t.name));
+                unknownTools.forEach(n => offeredNames.add(n));
             }
+            let availableTools: typeof TOOLS | undefined = TOOLS.filter(t => offeredNames.has(t.name));
 
             // Restrict tool surface during the LOE upload flow. Two phases:
             //
@@ -1138,6 +1157,25 @@ What NOT to do:
             // When the caller is staff, restrict contact lookups to clients they own.
             // Scoped here so both the first-round and follow-up tool handlers can use it.
             const ownerFilter = entityType === 'user' ? contactId : undefined;
+
+            // Tool registry context — built once per turn and reused at both
+            // dispatch sites. Carries per-turn identity, the shared client resolvers,
+            // and the Dynamics Port (the real singleton satisfies it structurally).
+            // legacyDispatch is the strangler bridge: runTool is only consulted for
+            // registry-migrated Tools in this slice, so it is not yet exercised.
+            const toolResolvers = makeClientResolvers({ dynamics: dynamicsService }, ownerFilter);
+            const toolCtx: ToolContext = {
+                contactId: contactId ?? null,
+                phoneNumber: phoneNumber ?? null,
+                sessionId: sessionId ?? null,
+                entityType: entityType,
+                ownerFilter,
+                permittedToolKeys,
+                resolveClientId: toolResolvers.resolveClientId,
+                resolveClientDetailed: toolResolvers.resolveClientDetailed,
+                deps: { dynamics: dynamicsService },
+                legacyDispatch: async () => 'No data found.',
+            };
 
             // 1. First Call: Natural language or tool use
             // Three real cache breakpoints (PRD §3.3) — replaces the bogus
@@ -2092,41 +2130,13 @@ What NOT to do:
                     };
 
                     if (contactId) {
-                        if (functionName === 'get_my_details') {
-                            const details = await dynamicsService.getContactDetails(contactId);
-                            functionResponse = details ? JSON.stringify(details) : "I couldn't retrieve your details at this time.";
-                        } else if (functionName === 'get_client_invoices') {
+                        if (REGISTRY[functionName]) {
+                            // Tool registry (strangler): migrated read-only client
+                            // Tools (get_my_details, get_tax_number, get_client_invoices)
+                            // dispatch through runTool. Everything else falls through
+                            // to the legacy chain below, unchanged.
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                            if (entityType === 'user') {
-                                if (!args.client) {
-                                    functionResponse = "I need a client name or phone number to look up their invoices. Which client?";
-                                } else {
-                                    const r = await resolveClientDetailed(args.client);
-                                    if (r.status === 'found') {
-                                        const data = await dynamicsService.getClientInvoices(r.id);
-                                        functionResponse = JSON.stringify({ client_id: r.id, client_name: r.fullname, invoices: data });
-                                    } else if (r.status === 'ambiguous') {
-                                        functionResponse = JSON.stringify({
-                                            error: 'multiple_matches',
-                                            message: `Multiple clients match "${args.client}". Ask the user which one they mean.`,
-                                            candidates: r.candidates,
-                                        });
-                                    } else if (r.status === 'not_found') {
-                                        functionResponse = JSON.stringify({
-                                            error: 'not_found',
-                                            message: `No client found matching "${args.client}". Ask the user to provide the full name, or a phone number, or call get_my_clients to see the full list of their clients.`,
-                                        });
-                                    } else {
-                                        functionResponse = JSON.stringify({
-                                            error: 'lookup_failed',
-                                            message: `Client lookup failed: ${r.message}. Tell the user the CRM had an error.`,
-                                        });
-                                    }
-                                }
-                            } else {
-                                const data = await dynamicsService.getClientInvoices(contactId);
-                                functionResponse = JSON.stringify(data);
-                            }
+                            functionResponse = await runTool(functionName, args, toolCtx);
                         } else if (functionName === 'get_client_cases') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             if (entityType === 'user' && args.client) {
@@ -2182,9 +2192,6 @@ What NOT to do:
                                     pdfLink: `http://localhost:3001/api/pdf/invoice/${invoiceNum}`
                                 });
                             }
-                        } else if (functionName === 'get_tax_number') {
-                            const taxNumber = await dynamicsService.getContactTaxNumber(contactId);
-                            functionResponse = taxNumber ? `Your Tax Number is: ${taxNumber}` : "I could not find a tax number on your profile.";
                         } else if (functionName === 'request_consultant_callback') {
                             const args = JSON.parse((toolCall as any).function.arguments || '{}');
                             const reason = (args.reason || '').toString().trim();
@@ -2732,7 +2739,13 @@ What NOT to do:
                         console.log(`[Claude] Executing tool (round ${round + 2}): ${functionName}`);
 
                         if (contactId) {
-                            if (functionName === 'get_task_types') {
+                            if (REGISTRY[functionName]) {
+                                // Tool registry (strangler): same single dispatch
+                                // path as the first round. Migrated Tools run here;
+                                // un-migrated Tools fall through to the legacy chain.
+                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
+                                functionResponse = await runTool(functionName, args, toolCtx);
+                            } else if (functionName === 'get_task_types') {
                                 const taskTypes = await dynamicsService.getTaskTypes();
                                 functionResponse = taskTypes.length > 0
                                     ? JSON.stringify(taskTypes)
@@ -2809,29 +2822,6 @@ What NOT to do:
                                     functionResponse = details ? JSON.stringify(details) : "Client found but could not load details.";
                                 } else {
                                     functionResponse = "No client found matching that name or phone number.";
-                                }
-                            } else if (functionName === 'get_client_invoices') {
-                                const args = JSON.parse((toolCall as any).function.arguments || '{}');
-                                const clientInput = (args.client || '').trim();
-                                const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-                                let targetId: string | null = entityType === 'client' ? (contactId || null) : null;
-                                let targetName: string | undefined;
-                                if (entityType === 'user' && clientInput) {
-                                    if (guidRegex.test(clientInput)) targetId = clientInput;
-                                    else {
-                                        const byPhone = await dynamicsService.getContactByPhone(clientInput);
-                                        if (byPhone?.type === 'client') { targetId = byPhone.id; targetName = byPhone.fullname; }
-                                        else {
-                                            const byName = await dynamicsService.searchContactByName(clientInput, ownerFilter);
-                                            if (byName.length > 0) { targetId = byName[0].contactid; targetName = byName[0].fullname; }
-                                        }
-                                    }
-                                }
-                                if (!targetId) {
-                                    functionResponse = JSON.stringify({ error: 'not_found', message: `No client matched "${args.client}". Ask staff for a name, phone, or to call get_my_clients.` });
-                                } else {
-                                    const data = await dynamicsService.getClientInvoices(targetId);
-                                    functionResponse = JSON.stringify({ client_id: targetId, client_name: targetName, invoices: data });
                                 }
                             } else if (functionName === 'get_client_cases') {
                                 const args = JSON.parse((toolCall as any).function.arguments || '{}');

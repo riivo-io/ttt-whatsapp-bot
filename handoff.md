@@ -1,4 +1,4 @@
-# RALPH Handoff — document-collection journey
+# RALPH Handoff — Tool-registry migration
 
 > ⚠️ **This handoff MUST be updated at the end of every iteration.** Before you
 > finish, record what you did, move the completed issue out of "Next issues",
@@ -6,128 +6,107 @@
 > stale breaks the next agent's pickup. This requirement is itself part of the
 > definition of done for every issue.
 
-## Done this iteration: Issue 24 — Remove greeting IRP5 ask; make doc collection client-initiated
-PRD: `.scratch/document-journey/PRD.md` (§Entry, §Step 1) · ADR `docs/adr/0002-document-collection-journey.md`
+## Done this iteration: Issue 1 — Registry spine + read-only client Tools
+PRD: `docs/PRD-tool-registry.md` · ADR `docs/adr/0003-tool-registry-dispatch.md` · Glossary in
+`CONTEXT.md` (§Tool, §Tool registry, §ToolContext, §Port) · Issue file:
+`issues/01-tool-registry-spine-readonly-client-tools.md`.
+
+This is **slice 1** of the strangler migration that collapses the duplicated `if/else` tool
+dispatch in `claude.service.ts` into a single registry. It stands up the whole vertical seam and
+proves it on the three lowest-risk, read-only client Tools: `get_my_details`, `get_tax_number`,
+`get_client_invoices`.
 
 ### What changed
-- **NEW `src/domain/clientRoleContext.ts`** — pure builder
-  `buildClientRoleContext({ firstName, isFirstMessage })` owns the CLIENT
-  role-context block (matches the `decideCaseRouting` / `decideFeedbackReply`
-  pure-module seam). Exports `IRP5_ASK_COPY` (the verbatim protective +
-  multi-employer + "already sent to consultant" ask). Adds journey guidance:
-  launch on commitment / unprompted IRP5 upload; *offer* (not launch) on fuzzy
-  signals; no-IRP5 branch (explain why, fall back to `get_required_documents`);
-  season-timing branch (explain, prior-year proceeds normally). Greeting format
-  block unchanged in shape, now explicitly forbids asking for any doc.
-- **`src/services/claude.service.ts`** — deleted the first-message `irp5Hint`
-  lookup (the `isFirstMessage && contactId` block, 1-April gate, and
-  `getIrp5RecordsForClient` call) and the inline client `roleContext` literal;
-  replaced with one `buildClientRoleContext(...)` call. Added the import.
-  `getCurrentSaTaxYear` import stays (still used elsewhere, L1802).
-- **NEW `test/unit/clientRoleContext.test.ts`** — 6 characterisation tests:
-  greeting shape preserved, greeting carries NO IRP5/doc demand (no `IRP5
-  STATUS` hint), greeting omitted when not first message, launch-on-commitment /
-  offer-on-fuzzy, ask copy framings, no-IRP5 + season-timing explain-not-demand.
+- **NEW `src/services/tools/registry.ts`** — the spine. Exports `ToolContext`, the narrow
+  `DynamicsPort` (only the 5 methods these Tools + resolvers call), `ToolEntry`, `EntityType`,
+  `ClientResolveResult`, the `REGISTRY` table + `register(...)`, `entryAllowed`, `runTool`,
+  `makeClientResolvers`, the canned `DENIED` string, and the pure
+  `deriveOfferedTools(role, permittedKeys)`. `runTool(name, args, ctx)` gates (roles +
+  staff-only `requiredPerm`) then runs the handler; for an unmigrated name it falls back to
+  `ctx.legacyDispatch`. The shared client resolvers (`resolveClientId` / `resolveClientDetailed`)
+  are lifted here so staff Tools can resolve a named client.
+- **NEW `src/services/tools/clientTools.ts`** — the three migrated handlers, each
+  `handle(args, ctx) => Promise<string>` reaching Dynamics only through `ctx.deps`. Output
+  strings are byte-for-byte the first-round originals. `register(...)` runs on import.
+- **NEW `src/services/tools/index.ts`** — barrel; importing it guarantees `clientTools` has
+  registered before any `runTool` / `deriveOfferedTools` call.
+- **`src/services/claude.service.ts`** —
+  - imports the registry; builds a `ToolContext` (`toolCtx`) **once per turn** after
+    `ownerFilter`, carrying identity, the resolvers, `deps.dynamics = dynamicsService` (typed
+    assignment, no adapter), `permittedToolKeys`, and a `legacyDispatch` bridge.
+  - offered-tools list: the 3 migrated Tools are removed from the legacy `clientTools` /
+    `staffTools` arrays and re-added via `deriveOfferedTools(...)`, unioned into an
+    `offeredNames` set; `availableTools = TOOLS.filter(t => offeredNames.has(t.name))` preserves
+    the original declaration order, so the offered surface per role is unchanged.
+  - both dispatch sites (first round **and** the follow-up loop) gain `if (REGISTRY[functionName])
+    → runTool(...)` at the top of the `if (contactId)` block; the now-dead legacy branches for
+    the 3 Tools are deleted.
+- **NEW `test/unit/toolRegistry.test.ts`** — 17 tests (Node built-in runner, fake `DynamicsPort`,
+  no Anthropic client): `deriveOfferedTools` per role; `runTool` dispatch / denial (wrong role,
+  missing perm) / legacy fallback; each handler's success + not-found + (for invoices)
+  ambiguous + error paths.
+- **`docs/adr/0003-tool-registry-dispatch.md`** (NEW) records the decision. **`CONTEXT.md`**
+  defines Tool / Tool registry / ToolContext / Port.
+
+### One intentional unification (NOT a pure no-op)
+The follow-up loop's `get_client_invoices` previously used a *simpler* resolver (first-match, no
+ambiguous/error disambiguation, and it wrapped a client's own invoices as
+`{ client_id, client_name, invoices }`). The registry has **one** handler, so both sites now use
+the first-round contract: full `resolveClientDetailed` disambiguation, and a client's own
+invoices return as a **bare JSON array**. This converges a pre-existing inconsistency onto the
+canonical first-round behaviour (the follow-up path is only reached on a round-2+ tool call).
+Recorded in ADR 0003 §Consequences.
 
 ### Verification
-- `./node_modules/.bin/tsc --noEmit` → clean
-- `npm test` → 58/58 pass (52 prior + 6 new)
+- `./node_modules/.bin/tsc --noEmit` → clean (full working tree)
+- `npm test` → 97/97 pass (80 prior + 17 new)
 
-### Working-tree note (unchanged from prior iterations)
-`claude.service.ts` still carries **pre-existing, unrelated bad-debt + classifier
-hunks** (BadDebtDetail import, `CLASSIFIER_MODEL`, `badDebt?` param, etc.). This
-commit staged **only the Issue 24 hunks** (the import + the roleContext swap) via
-a filtered `git apply --cached`. The bad-debt hunks remain unstaged. Stage
-selectively.
+### Working-tree caution (READ THIS — the tree is heavily entangled)
+The working tree carries a large blob of **uncommitted, interdependent** work from the
+document-collection journey (Issues 25/26/27) **and** bad-debt collection, spanning
+`claude.service.ts`, `pendingUpload.service.ts`, `whatsappProcessor.ts`, `dynamics.service.ts`,
+`requiredDocuments.service.ts`, `taxFaq.service.ts`, `case.service.ts`, and more. None of it is
+in HEAD. These changes are interdependent (e.g. `pendingUpload` renamed `missingDocs` →
+`outstanding`, and `generateResponse` gained an 11th `badDebt` param) — reverting any one file in
+isolation breaks `tsc`.
 
-## Done this iteration: Issue 21 — Replace processor routing block with verdict + applier switch
+**This commit staged ONLY the Issue-1 hunks** in `claude.service.ts`. The method that worked:
+build the Issue-1-only version on top of a clean `git checkout HEAD -- claude.service.ts`,
+`git diff > issue1.patch`, restore the full working tree, then `git apply --cached issue1.patch`.
+Do NOT `git add` the whole file — you will sweep the journey/bad-debt work into your commit.
+`CONTEXT.md`, `docs/adr/0002-*`, `docs/PRD-*`, `issues/*`, and many others are still untracked.
 
-Commit: (this iteration) on branch `hotfix/topic-shift-relaxation`
-PRD: `.scratch/case-routing/PRD.md`
+## Next issues — Tool-registry migration (PRD `docs/PRD-tool-registry.md`)
+The spine is proven. Remaining strangler slices live as local issue files:
 
-### What changed
-- **`src/workers/whatsappProcessor.ts`** — the ~80-line inline routing conditional
-  (`qualifies` / `looksLikeFeedbackOrAck` / `withinContinuationWindow` / the
-  `if/else if` chain) is gone. The processor now:
-  - imports `decideCaseRouting` from `../domain/caseRouting`,
-  - calls it once: `decideCaseRouting(latestCase, { text: effectiveText, interactiveId, pendingCaseId: (session as any).pending_case_id ?? null }, Date.now())`,
-  - `switch (verdict.kind)` applies the I/O and sets the existing downstream locals.
-- The inline `TOPIC_SHIFT_MIN_GAP_MS` const and `withinContinuationWindow` calc
-  are deleted (now owned by the domain module).
-- The client/lead entity-type guard stays in the processor — `decideCaseRouting`
-  is only called for client/lead, never staff/unknown.
+- **`issues/02-tool-registry-remaining-readonly-client-tools.md`** — migrate the rest of the
+  read-only client Tools onto the registry (next; unblocked now that slice 1 is in).
+- **`issues/03-tool-registry-staff-lookup-tools-permission-gate.md`** — staff lookup Tools +
+  exercising the `requiredPerm` gate through `deriveOfferedTools` / `entryAllowed`.
 
-### Verdict → applier mapping (locked)
-| verdict | action | locals set |
-|---|---|---|
-| `topic-shift` | `markResolvedByBot(prior,'topic_shift')` in the existing try/catch **before** `createCase` | `newCaseId`, `respondingCaseId`, `crmRequestId` from new Case |
-| `fresh` | `createCase` | `newCaseId`, `respondingCaseId`, `crmRequestId` from new Case |
-| `continue` | none | `respondingCaseId = verdict.caseId`, `crmRequestId = verdict.crmRequestId` |
-| `reclassify` | none here (post-response block promotes to `respondingCaseId` on recovery) | `reclassifyCaseId = verdict.caseId`, `crmRequestId = verdict.crmRequestId` |
-| `none` | none | `crmRequestId = verdict.crmRequestId` (may be null) |
-
-Ordering preserved exactly: `topic-shift` resolves the prior Case (in the
-existing try/catch) before creating the new one.
-
-### Verification
-- `./node_modules/.bin/tsc --noEmit` → clean
-- `npm test` → 22/22 pass (unchanged — the rewrite is behaviour-preserving)
-
-## Issue 20 — Characterization table (confirmed done, not just unblocked)
-`test/unit/caseRouting.test.ts` covers every row in the Issue 20 coverage list:
-fresh / none(null) for emoji+noise+short / topic-shift outside window / continue
-inside window / continue on button tap / continue on wrap-up / continue on
-drafting-status ack / continue on pending-id free-text feedback / reclassify on
-escalated+qualify / reclassify on escalated+wrap-up / none-with-request-id on
-escalated+neither / window boundary.
-
-The issue text's "still-drafting (`open`) status" is informal naming — the actual
-DB status default is **`created`** (see `supabase/migrations/20260417100000_case_lifecycle.sql`:
-`created | classified | bot_responded | resolved_by_bot | resolved_by_bot_timeout | escalated`).
-There is no literal `open` status. The test covers the drafting case via both
-`created` and `classified`, so no extension was needed. Issue 20 is **closed**.
-
-## Previously done: Issue 19 — Extract `decideCaseRouting` pure domain module
-Commit: `9a1a11b`. New `src/domain/caseRouting.ts` (pure, no I/O) exports
-`TOPIC_SHIFT_MIN_GAP_MS`, the `CaseRouting` discriminated union, `RoutingCase`,
-`decideCaseRouting`, and the three predicates + button-id consts (re-exported by
-`case.service.ts` so existing importers compile unchanged).
+Each slice: move a handful of Tools into an audience-grouped module (`clientTools.ts` is done;
+`staffTools.ts` / `leadTools.ts` are still to be created), add their entries to `REGISTRY`,
+delete their legacy branches at both dispatch sites, add fake-Port handler tests. The legacy
+`if/else` chain and the `ctx.legacyDispatch` fallback are deleted in the **final** slice, once
+`REGISTRY` covers every Tool. `TOOLS` still supplies the Anthropic tool definitions + descriptions
+during the migration; it is derived from the registry only in that final slice.
 
 ## Environment note (read before running anything)
-This machine uses **pnpm with a shared global store**. If `node_modules` is
-missing:
+This machine uses **pnpm with a shared global store**. If `node_modules` is missing:
 
 ```
 pnpm install --shamefully-hoist
 ```
 
-`--shamefully-hoist` is **required**: without it, transitive `@types` aren't
-hoisted and `tsc --noEmit` fails with `TS2688 Cannot find type definition file`.
+`--shamefully-hoist` is **required**: without it, transitive `@types` aren't hoisted and
+`tsc --noEmit` fails with `TS2688 Cannot find type definition file`.
 
 Typecheck command (no `typecheck` npm script exists): `./node_modules/.bin/tsc --noEmit`
 Tests: `npm test`
 
-## Working-tree caution (still applies)
-The working tree carries **pre-existing, unrelated bad-debt changes** across
-several files (`src/workers/whatsappProcessor.ts` has bad-debt import + handler
-hunks; `src/services/case.service.ts`, `dynamics.service.ts`, `supabase.service.ts`,
-`pdf.service.ts`, etc.). This iteration's commit contains **only the Issue 21
-routing hunks** in `whatsappProcessor.ts` — the bad-debt hunks were deliberately
-left unstaged (staged via a filtered `git apply --cached`). Do not assume the
-dirty diff is all yours; stage selectively.
-
-## Next issues — document-collection journey (PRD `.scratch/document-journey/PRD.md`)
-Issue 24 is done (greeting + trigger). Remaining, in dependency order:
-- **Issue 25 — doc-recommendation pure module** (`issues/25-doc-recommendation-pure-module.md`):
-  the tailored, reason-annotated, form-supersedes-doc list builder. Until it
-  lands, the journey falls back to existing `get_required_documents`. Also drops
-  Bank Statements from `BASELINE_DOCS` (IRP5 stays, ID Document stays out).
-- **Issue 26 — IRP5 tailored single message** (`issues/26-irp5-tailored-single-message.md`):
-  present the tailored list once (not one-at-a-time drip). Depends on 25.
-- **Issue 27 — already-sent escape hatch** (`issues/27-already-sent-escape-hatch.md`):
-  unverified "client states provided" marker in Dynamics that suppresses re-ask
-  but is excluded from verified-received counts.
-
-### Prior context: case-routing extraction (Issues 19, 20, 21 — all done)
-The routing decision is a pure, tested domain module (`src/domain/caseRouting.ts`)
-and the processor is a thin applier. Scope complete.
+## Prior context (all complete)
+- **Document-collection journey** (Issues 24–27): stateless, client-initiated, list-once,
+  self-healing with an unverified escape hatch. PRD `.scratch/document-journey/PRD.md`, ADR 0002.
+  Issue 24 is committed (`c3621d2`); 25/26/27 live in the working tree (see caution above).
+- **Case-routing extraction** (Issues 19–21): the routing decision is a pure, tested domain
+  module (`src/domain/caseRouting.ts`); the processor is a thin applier. Committed.
