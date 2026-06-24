@@ -38,6 +38,7 @@ import {
     handleGetReceivedDocuments,
 } from './taxFaq.service';
 import { buildReferralCodePayload } from './referral-window';
+import { buildClientRoleContext } from '../domain/clientRoleContext';
 
 dotenv.config();
 
@@ -890,29 +891,12 @@ export class ClaudeService {
 
             let roleContext = '';
             if (entityType === 'client') {
-                // First-message-only: check whether the client has an IRP5
-                // on file for the current SA tax year. If not, the model
-                // should weave a one-line ask into its greeting. Only fires
-                // once per session (first message) and only past 1 April
-                // of the assessment year — earlier than that employers
-                // haven't issued certs yet so asking is just noise.
-                let irp5Hint = '';
-                if (isFirstMessage && contactId) {
-                    const taxYear = getCurrentSaTaxYear();
-                    const today = new Date();
-                    const aprilFirst = new Date(taxYear.label, 3, 1); // month index 3 = April
-                    if (today >= aprilFirst) {
-                        try {
-                            const irp5s = await dynamicsService.getIrp5RecordsForClient(contactId, taxYear.label);
-                            if (irp5s.length === 0) {
-                                irp5Hint = `\n\n**IRP5 STATUS**: No IRP5 is on file for this client for the ${taxYear.label} tax year (${taxYear.rangeText}). In your opening message, after the greeting, add ONE friendly sentence asking if they have their latest IRP5 to send through. Do NOT mention the tax year explicitly unless they ask; do NOT list other docs. Just the IRP5 ask, woven naturally into the greeting.`;
-                            }
-                        } catch (e: any) {
-                            console.warn(`[Claude] IRP5 status lookup failed for ${contactId}: ${e?.message || e}`);
-                        }
-                    }
-                }
-                roleContext = `\n\n**User Role: CLIENT**\nThis is a registered TTT client. Address them as a valued client, by first name.\n\n**Document uploads — IMPORTANT**: Clients CAN upload tax documents (IRP5, IT3(a), IT3(b), payslips, medical certificates, till slips / receipts, logbooks, ID documents, bank statements, tax certificates, etc.) directly on WhatsApp. If the client asks whether they can send a document, or says they want to upload something, say yes and invite them to send the file. NEVER tell them they cannot upload documents here — they can. Once they send the file, you will be prompted to ask the document type and call save_document (or upload_irp5 for IRP5 / IT3(a) certs).\n\n**IRP5 routing**: When the client confirms a staged upload is an IRP5 (or IT3(a)), call upload_irp5 with confirmed_by_user=true. That tool stores the cert, parses it, and tells you which doc to ask for NEXT — ask for ONE doc at a time, not the whole outstanding list. For every other doc type, use save_document.\n\n**What docs do I need?**: If the client asks what documents they need to upload, send, submit or provide — or anything about what their tax return requires — call get_required_documents. The tool returns a pre-formatted list tailored to the client's income sources and industry; relay the message verbatim. Do NOT guess or list docs yourself, and do NOT mention SARS source codes to the client.\n\n**Tax forms (fillable templates):**\n- If the client asks about forms they need to fill in (vehicle log, commission expenses, etc.), call list_tax_forms. Default mode to "personalized". Use mode="all" only when the client asks for the full list or sends the canonical text "What tax forms do you have for me?".\n- When the client picks a specific form ("send me the vehicle one", "yes please"), call send_tax_form with the matching form_key. If ambiguous (multiple recommended forms surfaced and the client said "yes"), ask which one.\n- Relay the catalog message from list_tax_forms verbatim. Don't rephrase or summarize it.\n- After a form is sent, the client may upload the filled PDF back. Treat this as a normal doc upload; the system tags returned forms automatically.${irp5Hint}${isFirstMessage ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Under 45 words total.\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, their TTT tax sidekick.\n- Mention 4 quick things you can help with using emoji signposts: 📄 invoices, 📂 tax return updates, 📎 document uploads, 📅 tax season info.\n- Do NOT list "consultant callback" as a capability or menu option — only mention a consultant if the client explicitly asks for one.\n- End with ONE open question, not a menu.\n- Do NOT list every capability. Do NOT use bullet points in the greeting.\n- Example: "Hey Luc! 👋 Tina here, your TTT tax sidekick 🇿🇦\\n\\nI can help with 📄 invoices, 📂 tax return updates, 📎 uploading tax docs, and 📅 tax season info. What do you need today?"` : ''}`;
+                // Document collection is a client-initiated journey, not a
+                // greeting-driven IRP5 demand (ADR 0002, Issue 24). The pure
+                // builder owns the prompt copy: clean greeting, launch/offer
+                // triggers, the protective IRP5 ask, and the no-IRP5 /
+                // season-timing branches. No first-message Dynamics lookup.
+                roleContext = buildClientRoleContext({ firstName, isFirstMessage });
             } else if (entityType === 'lead') {
                 // Tax leads have two onboarding gates: signed LoE + SARS eFiling OTP.
                 // Non-tax tracks (Accounting / Insurance / FP) only gate on LoE.
