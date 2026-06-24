@@ -20,7 +20,10 @@ import {
     detectFeedback as detectFeedbackImpl,
     CASE_FEEDBACK_BUTTON_YES as CASE_FEEDBACK_BUTTON_YES_DOMAIN,
     CASE_FEEDBACK_BUTTON_NO as CASE_FEEDBACK_BUTTON_NO_DOMAIN,
+    CASE_FEEDBACK_BUTTON_YES_PREFIX as CASE_FEEDBACK_BUTTON_YES_PREFIX_DOMAIN,
+    CASE_FEEDBACK_BUTTON_NO_PREFIX as CASE_FEEDBACK_BUTTON_NO_PREFIX_DOMAIN,
 } from '../domain/caseRouting';
+import { CASE_FEEDBACK_PROMPT_TEXT as CASE_FEEDBACK_PROMPT_TEXT_DOMAIN } from '../domain/feedbackReply';
 
 dotenv.config();
 
@@ -49,10 +52,16 @@ const CLASSIFIER_MODEL = 'claude-haiku-4-5-20251001';
 export const CASE_FEEDBACK_BUTTON_YES = CASE_FEEDBACK_BUTTON_YES_DOMAIN;
 export const CASE_FEEDBACK_BUTTON_NO = CASE_FEEDBACK_BUTTON_NO_DOMAIN;
 
-// Exact wording of the resolution prompt sent by feedbackPromptWorker. Shared
-// with the processor so the "previous bot turn was the prompt" gate can match
-// the last assistant message without drift.
-export const CASE_FEEDBACK_PROMPT_TEXT = 'Did that answer your question?';
+// Per-case feedback button id prefixes — re-exported so the feedback prompt
+// worker can build `${prefix}:${caseId}` ids without reaching into the domain
+// module directly.
+export const CASE_FEEDBACK_BUTTON_YES_PREFIX = CASE_FEEDBACK_BUTTON_YES_PREFIX_DOMAIN;
+export const CASE_FEEDBACK_BUTTON_NO_PREFIX = CASE_FEEDBACK_BUTTON_NO_PREFIX_DOMAIN;
+
+// The resolution-prompt text now lives in the pure feedback-reply domain
+// module (decideFeedbackReply gates on it); re-exported here so the feedback
+// prompt worker and any other importer compile unchanged.
+export const CASE_FEEDBACK_PROMPT_TEXT = CASE_FEEDBACK_PROMPT_TEXT_DOMAIN;
 
 export const L1_TOPICS = [
     // Tool-backed lookups the bot resolves directly
@@ -469,7 +478,11 @@ class CaseService {
      * "rejected"  → escalate ONLY the case identified by caseId. Dynamics
      *               case already exists; humans pick up from there.
      */
-    async handleFeedback(caseId: string, feedback: 'confirmed' | 'rejected'): Promise<WhatsAppCaseRow | null> {
+    async handleFeedback(
+        caseId: string,
+        feedback: 'confirmed' | 'rejected',
+        opts?: { clearEscalation?: boolean },
+    ): Promise<WhatsAppCaseRow | null> {
         const resolvedAt = new Date().toISOString();
         if (feedback === 'confirmed') {
             const anchor = await supabaseService.getCase(caseId);
@@ -478,9 +491,12 @@ class CaseService {
                 : [];
 
             const toClose = new Map<string, WhatsAppCaseRow>();
+            // An escalated anchor is normally left alone here, but a confirmed
+            // tap with clearEscalation means the client says it's sorted — close
+            // it and pull the consultant off too.
             if (anchor && anchor.status !== 'resolved_by_bot'
                 && anchor.status !== 'resolved_by_bot_timeout'
-                && anchor.status !== 'escalated') {
+                && (anchor.status !== 'escalated' || opts?.clearEscalation)) {
                 toClose.set(anchor.id, anchor);
             }
             for (const s of siblings) toClose.set(s.id, s);
@@ -493,13 +509,21 @@ class CaseService {
                 });
                 const crmId = row.crm_case_id;
                 if (crmId) {
-                    await dynamicsService.updateRequest(crmId, {
+                    const patch: Record<string, any> = {
                         statecode: REQUEST_STATE.INACTIVE,
                         statuscode: REQUEST_STATUSCODE.RESOLVED_BY_BOT,
                         riivo_clientfeedback: CLIENT_FEEDBACK.CONFIRMED,
                         riivo_resolvedon: resolvedAt,
                         riivo_resolutionmethod: RESOLUTION_METHOD.FEEDBACK_CONFIRMED,
-                    });
+                    };
+                    // Clear the escalation footprint for a case the client just
+                    // confirmed is resolved, so reporting doesn't leave it
+                    // flagged as escalated-then-closed.
+                    if (row.status === 'escalated') {
+                        patch.riivo_escalatedon = null;
+                        patch.riivo_escalationreason = null;
+                    }
+                    await dynamicsService.updateRequest(crmId, patch);
                 }
             }
 
@@ -524,6 +548,70 @@ class CaseService {
             }
         }
         return supabaseService.getCase(caseId);
+    }
+
+    /**
+     * Re-engage a case after the client tapped "Still need help" (or typed an
+     * equivalent). Pulls the case back to bot-owned so the client's follow-up
+     * routes through Claude for another attempt — the opposite of the old
+     * behaviour, which escalated to a human on a single tap.
+     *
+     * - Supabase: status → `bot_responded`, clear `resolved_at`, stamp
+     *   `feedback_received = 'rejected'` as a visibility signal (NOT an
+     *   escalation — the session is never flagged).
+     * - Dynamics: revert the request to the in-progress BOT_ANSWERED statuscode
+     *   (the prompt had set AWAITING_FEEDBACK). When `clearEscalation` is set
+     *   the case had a consultant on it — clear the escalation footprint and
+     *   keep the request Active so nobody is left holding a case Tina re-owns.
+     *
+     * Returns the refreshed row so the caller has the session id it needs to
+     * enqueue a fresh auto-close.
+     */
+    async reengageCase(
+        caseId: string,
+        clearEscalation: boolean,
+        crmRequestId?: string | null,
+    ): Promise<WhatsAppCaseRow | null> {
+        await supabaseService.updateCase(caseId, {
+            status: 'bot_responded',
+            feedback_received: 'rejected',
+            resolved_at: null,
+        });
+        const crmId = crmRequestId ?? await this.resolveCrmId(caseId);
+        if (crmId) {
+            const patch: Record<string, any> = {
+                statecode: REQUEST_STATE.ACTIVE,
+                statuscode: REQUEST_STATUSCODE.BOT_ANSWERED,
+                riivo_clientfeedback: CLIENT_FEEDBACK.REJECTED,
+            };
+            if (clearEscalation) {
+                patch.riivo_escalatedon = null;
+                patch.riivo_escalationreason = null;
+            }
+            await dynamicsService.updateRequest(crmId, patch);
+        }
+        console.log(`[CaseService] case ${caseId} re-engaged (clearEscalation=${clearEscalation})`);
+        return supabaseService.getCase(caseId);
+    }
+
+    /**
+     * Upgrade an auto-closed case (`resolved_by_bot_timeout`) to a genuine
+     * confirmation when the client belatedly taps "Yes, thanks". No reopen —
+     * the case stays closed; we just record that the answer actually worked
+     * rather than that the client went silent.
+     */
+    async confirmFeedbackUpgrade(caseId: string, crmRequestId?: string | null): Promise<void> {
+        const resolvedAt = new Date().toISOString();
+        await supabaseService.updateCase(caseId, { feedback_received: 'confirmed' });
+        const crmId = crmRequestId ?? await this.resolveCrmId(caseId);
+        if (crmId) {
+            await dynamicsService.updateRequest(crmId, {
+                riivo_clientfeedback: CLIENT_FEEDBACK.CONFIRMED,
+                riivo_resolvedon: resolvedAt,
+                riivo_resolutionmethod: RESOLUTION_METHOD.FEEDBACK_CONFIRMED,
+            });
+        }
+        console.log(`[CaseService] case ${caseId} feedback upgraded to confirmed (no reopen)`);
     }
 
     /**
@@ -685,8 +773,9 @@ class CaseService {
         if (!session) return;
 
         // Gate first, claim second — non-noteworthy sessions stay unclaimed so a
-        // later upload + close in the same session could still qualify.
-        if (!session.had_doc_upload && !session.had_escalation) return;
+        // later upload + close in the same session could still qualify. A
+        // bad-debt session is always noteworthy (PRD-bad-debt-collection.md §9).
+        if (!session.had_doc_upload && !session.had_escalation && !session.bad_debt) return;
         if (!session.crm_id) return;
         if (!(await supabaseService.claimCloseSummary(sessionId))) return;
 
@@ -727,10 +816,22 @@ class CaseService {
 
         const summary = await this.summariseConversation(history, clientLabel, session.had_doc_upload);
 
-        const recordLink = buildDynamicsRecordUrl(isClient ? 'contact' : 'new_lead', session.crm_id);
+        // Link the conversation's riivo_request when we have one (PRD §9),
+        // falling back to the contact/lead record otherwise.
+        const requestId = await supabaseService.getLatestCrmRequestForSession(sessionId);
+        const recordLink = (requestId && buildDynamicsRecordUrl('riivo_request', requestId))
+            || buildDynamicsRecordUrl(isClient ? 'contact' : 'new_lead', session.crm_id);
+
+        // Bad-debt sessions get a prepended ⚠️ warning line with the headline
+        // numbers so the consultant sees the arrears at a glance (PRD §9).
+        const bd = session.bad_debt ? session.bad_debt_detail : null;
+        const badDebtLine = bd
+            ? `⚠️ BAD DEBT — R${(bd.totalOutstanding || 0).toFixed(2)} outstanding across ${bd.openInvoiceCount} invoice(s); oldest ${bd.oldestAgeDays} days old.`
+            : null;
 
         const greeting = ownerName ? `${ownerName.split(/\s+/)[0]},` : 'Team,';
         const bodyLines = [
+            ...(badDebtLine ? [badDebtLine, ''] : []),
             greeting,
             '',
             `Tina wrapped up a WhatsApp conversation with ${clientLabel}. Quick summary:`,

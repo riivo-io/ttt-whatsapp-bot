@@ -8,6 +8,7 @@
     "dev:web": "npm run dev --prefix web",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:web\"",
     "build": "tsc",
+    "test": "node --import tsx --test \"test/unit/**/*.test.ts\"",
     "start": "node dist/server.js",
     "worker": "node dist/worker.js",
     "worker:dev": "tsx src/worker.ts",
@@ -16,7 +17,8 @@
     "sync:users": "tsx src/scripts/sync-users-from-dynamics.ts",
     "graph:bootstrap": "tsx src/scripts/create-graph-subscription.ts",
     "kb:ingest-test": "tsx src/scripts/ingest-test-doc.ts",
-    "sync:kb": "tsx src/scripts/sync-knowledge-base.ts"
+    "sync:kb": "tsx src/scripts/sync-knowledge-base.ts",
+    "report": "tsx src/scripts/build-june-report.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.88.0",

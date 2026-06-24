@@ -28,6 +28,32 @@ interface Session {
     had_doc_upload: boolean;
     had_escalation: boolean;
     close_summary_sent_at: string | null;
+    bad_debt_evaluated: boolean;
+    bad_debt: boolean;
+    bad_debt_detail: BadDebtDetail | null;
+    bad_debt_invoices_sent_at: string | null;
+}
+
+/**
+ * Cached bad-debt summary stamped on the session at first-inbound detection
+ * (PRD-bad-debt-collection.md §6.2). Drives the prompt state guidance, the
+ * deterministic invoice-PDF send, and the consultant close-summary BAD DEBT
+ * line — all without re-querying Dynamics on every inbound.
+ */
+export interface BadDebtInvoiceSummary {
+    invoiceId: string;          // ttt_invoiceid, the clean "INV…" number / payment reference
+    recordId: string;           // new_invoicesid GUID (for line-item + PDF lookup)
+    outstanding: number;        // ttt_outstanding — real amount still owed
+    total: number;              // riivo_totalinclvat — full invoice total
+    paymentReceived: number;    // ttt_paymentreceived — for partial-payment text
+    ageDays: number;            // calendar days since createdon
+}
+
+export interface BadDebtDetail {
+    totalOutstanding: number;
+    openInvoiceCount: number;   // overdue (>= 30 day) invoice count
+    oldestAgeDays: number;
+    invoices: BadDebtInvoiceSummary[];
 }
 
 export type CaseLevel = 'L1' | 'escalation';
@@ -1157,6 +1183,71 @@ class SupabaseService {
             return false;
         }
         return (data?.length || 0) > 0;
+    }
+
+    // -------------------------------------------------------------------------
+    // Bad-debt session markers (PRD-bad-debt-collection.md §6.2, §7.1, §9)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Stamp the first-inbound bad-debt detection result on the session so it's
+     * cached for the rest of the session (re-evaluated fresh next session).
+     * `bad_debt=true` also marks the session noteworthy for the consultant
+     * close-summary. Best-effort; a failure just means the next inbound re-runs
+     * detection (idempotent — same Dynamics read).
+     */
+    async setSessionBadDebt(
+        sessionId: string,
+        badDebt: boolean,
+        detail: BadDebtDetail | null
+    ): Promise<void> {
+        const { error } = await this.client
+            .from('sessions')
+            .update({ bad_debt_evaluated: true, bad_debt: badDebt, bad_debt_detail: detail })
+            .eq('id', sessionId);
+        if (error) console.warn('[Supabase] setSessionBadDebt error:', error.message);
+    }
+
+    /**
+     * Atomically claim the right to send this session's bad-debt invoice PDFs +
+     * payment ask. Sets bad_debt_invoices_sent_at only if it was NULL and returns
+     * true to exactly one caller, so the PDFs go out once per session rather than
+     * on every inbound (PRD §7.1). Fail-closed (returns false on error → no
+     * duplicate send).
+     */
+    async claimBadDebtInvoiceSend(sessionId: string): Promise<boolean> {
+        const { data, error } = await this.client
+            .from('sessions')
+            .update({ bad_debt_invoices_sent_at: new Date().toISOString() })
+            .eq('id', sessionId)
+            .is('bad_debt_invoices_sent_at', null)
+            .select('id');
+        if (error) {
+            console.warn('[Supabase] claimBadDebtInvoiceSend error:', error.message);
+            return false;
+        }
+        return (data?.length || 0) > 0;
+    }
+
+    /**
+     * Most recent case's Dynamics request id for the session, regardless of
+     * status. Used by the close-summary to deep-link the conversation's
+     * riivo_request (PRD §9), falling back to the contact record when null.
+     */
+    async getLatestCrmRequestForSession(sessionId: string): Promise<string | null> {
+        const { data, error } = await this.client
+            .from('whatsapp_cases')
+            .select('crm_case_id')
+            .eq('session_id', sessionId)
+            .not('crm_case_id', 'is', null)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+        if (error) {
+            console.warn('[Supabase] getLatestCrmRequestForSession error:', error.message);
+            return null;
+        }
+        return (data?.crm_case_id as string) || null;
     }
 
     // -------------------------------------------------------------------------

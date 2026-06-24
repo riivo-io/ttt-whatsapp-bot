@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit';
+import { Invoice } from '../domain/invoice';
 console.log('[boot] pdf.service: pdfkit loaded');
 
 export interface InvoiceData {
@@ -251,40 +252,43 @@ export class PDFService {
 export const pdfService = new PDFService();
 
 /**
- * Map a Dynamics invoice record (from getInvoiceByNumber) into the InvoiceData
- * shape the PDF renderer expects. Extracted here so the /api/pdf/invoice route
- * and the Claude tool handlers share one definition — otherwise adding a
- * rendered field means updating two places and one will inevitably drift.
+ * Map a domain Invoice (from getInvoiceByNumber) into the InvoiceData shape the
+ * PDF renderer expects. Extracted here so the /api/pdf/invoice route and the
+ * Claude tool handlers share one definition — otherwise adding a rendered field
+ * means updating two places and one will inevitably drift.
+ *
+ * The OData-specific extraction now lives in src/domain/invoice.ts; this is a
+ * pure rename from domain fields to renderer fields.
  */
-export function mapInvoiceToInvoiceData(invoice: any): InvoiceData {
+export function mapInvoiceToInvoiceData(invoice: Invoice): InvoiceData {
     return {
-        invoiceNumber: invoice.new_name,
-        invoiceDate: new Date(invoice.createdon).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }),
-        consultantName: invoice.riivo_consultantfullname || '',
-        customerFullname: invoice.riivo_customerfullname || '',
-        customerStreet: invoice.riivo_customerstreet || '',
-        customerSuburb: invoice.riivo_customersuburb || '',
-        customerProvince: invoice.riivo_customerprovince || '',
-        customerCity: invoice.riivo_customercity || '',
-        customerCountry: invoice.riivo_customercountry || '',
-        customerPostalCode: invoice.riivo_customerponumber || '',
-        customerVatNumber: invoice.riivo_customervatnumber || '',
-        consultantCompany: invoice.riivo_consultantcompany || '',
-        consultantStreet: invoice.riivo_consultantstreet || '',
-        consultantSuburb: invoice.riivo_consultantsuburb || '',
-        consultantProvince: invoice.riivo_consultantprovince || '',
-        consultantCity: invoice.riivo_consultantcity || '',
-        consultantCountry: invoice.riivo_consultantcountry || '',
-        consultantPostalCode: invoice.riivo_consultantponumber || '',
-        consultantVatNumber: invoice.riivo_consultantvatnumber || '',
-        sarsReimbursement: invoice.ttt_sarsreimbursement || 0,
-        subtotal: invoice.ttt_totalwithinterest || 0,
-        vatAmount: invoice.riivo_vattotal || 0,
-        totalInclVat: invoice.riivo_totalinclvat || 0,
-        accountHolderName: invoice.icon_accountholdername || '',
-        bankName: invoice.icon_bank || '',
-        accountNumber: invoice.icon_accountnumber || '',
-        accountType: invoice.icon_accounttype || '',
-        branchNumber: invoice.icon_branchnumber || '',
+        invoiceNumber: invoice.invoiceNumber,
+        invoiceDate: new Date(invoice.createdOn ?? '').toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }),
+        consultantName: invoice.consultant.fullName,
+        customerFullname: invoice.customer.fullName,
+        customerStreet: invoice.customer.street,
+        customerSuburb: invoice.customer.suburb,
+        customerProvince: invoice.customer.province,
+        customerCity: invoice.customer.city,
+        customerCountry: invoice.customer.country,
+        customerPostalCode: invoice.customer.poNumber,
+        customerVatNumber: invoice.customer.vatNumber,
+        consultantCompany: invoice.consultant.company,
+        consultantStreet: invoice.consultant.street,
+        consultantSuburb: invoice.consultant.suburb,
+        consultantProvince: invoice.consultant.province,
+        consultantCity: invoice.consultant.city,
+        consultantCountry: invoice.consultant.country,
+        consultantPostalCode: invoice.consultant.poNumber,
+        consultantVatNumber: invoice.consultant.vatNumber,
+        sarsReimbursement: invoice.totals.sarsReimbursement,
+        subtotal: invoice.totals.totalWithInterest,
+        vatAmount: invoice.totals.vatTotal,
+        totalInclVat: invoice.totals.totalInclVat,
+        accountHolderName: invoice.banking.accountHolder,
+        bankName: invoice.banking.bankName,
+        accountNumber: invoice.banking.accountNumber,
+        accountType: invoice.banking.accountType,
+        branchNumber: invoice.banking.branchNumber,
     };
 }

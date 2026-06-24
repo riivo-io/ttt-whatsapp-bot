@@ -1,17 +1,16 @@
 import { claudeService } from '../services/claude.service';
 import { metaWhatsAppService } from '../services/meta.service';
 import { dynamicsService, REQUEST_STATUSCODE } from '../services/dynamics.service';
-import { supabaseService } from '../services/supabase.service';
+import { supabaseService, BadDebtDetail } from '../services/supabase.service';
+import { invoiceGenService, buildInvoiceGenPayload } from '../services/invoiceGen.service';
 import { stagePendingUpload, peekPendingUpload, clearPendingUpload, saveClientDocumentDirect, processClientIrp5Upload } from '../services/pendingUpload.service';
 import { inferDocTypeFromFilename } from '../utils/docTypeMapping';
 import { pendingIrp5Service } from '../services/pendingIrp5.service';
-import {
-    caseService,
-    CASE_FEEDBACK_BUTTON_YES,
-    CASE_FEEDBACK_BUTTON_NO,
-    CASE_FEEDBACK_PROMPT_TEXT,
-} from '../services/case.service';
-import { decideCaseRouting } from '../domain/caseRouting';
+import { caseService } from '../services/case.service';
+import { decideCaseRouting, parseFeedbackButton } from '../domain/caseRouting';
+import { decideConversationCap } from '../domain/conversationCap';
+import { decideFeedbackReply } from '../domain/feedbackReply';
+import { buildIrp5ReceivedAck } from '../domain/irp5Reply';
 import { sharePointService } from '../services/sharepoint.service';
 import {
     matchFormByFilename,
@@ -26,6 +25,7 @@ import { graphMailService } from '../services/graphMail.service';
 import { messageContextStorage } from '../utils/messageContext';
 import { WhatsAppJobPayload } from '../queue/whatsappQueue';
 import { enqueueFeedbackPrompt } from '../queue/feedbackPromptQueue';
+import { enqueueCaseAutoClose } from '../queue/caseAutoCloseQueue';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
 import { postWhatsAppSignupNotification } from '../services/whatsappSignupNotifier';
 import {
@@ -101,14 +101,9 @@ const OTP_BUTTON_PAYLOAD = {
 
 const TAXCREW_EMAIL = 'taxcrew@ttt-tax.co.za';
 
-// Conversation caps. Apply to clients, leads, and unknown users — staff
-// (entityType === 'user') are exempt because their tool-driven workflows
-// legitimately rack up turns. Tune these once we have a few weeks of usage
-// data in claude_usage_daily.
-const CAP_MESSAGES_PER_SESSION = 50;
-const CAP_TOKENS_PER_SESSION = 200_000;
-const CAP_MESSAGES_PER_DAY = 100;
-
+// Conversation cap thresholds live in src/domain/conversationCap.ts (imported
+// above) alongside the pure decideConversationCap decision. The canned replies
+// below are presentation copy and stay in the processor's apply step.
 const CAP_HIT_REPLY = "You've reached the message limit for this conversation. ⏸️\n\nTo make sure you get the right help from here, a TTT consultant has been notified and will be in touch with you directly — there's nothing more you need to do.\n\nNo need to reply here; we'll reach out to you shortly.";
 const CAP_BLOCKED_REPLY = "You're still at the message limit for this conversation. A TTT consultant has already been notified and will be in touch with you directly — please hold tight, there's no need to reply here.";
 
@@ -564,6 +559,135 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
     );
 }
 
+// Max invoice PDFs attached per bad-debt session (PRD-bad-debt-collection.md
+// §7.1). Beyond this the remainder is surfaced in Tina's text reply (the prompt
+// guidance lists every overdue invoice number + total).
+const BAD_DEBT_PDF_CAP = 5;
+
+const zar = (v: number) => `R${(Number(v) || 0).toFixed(2)}`;
+
+/**
+ * Deterministic bad-debt side-effect (PRD-bad-debt-collection.md §7.1, §10):
+ * send up to BAD_DEBT_PDF_CAP overdue invoice PDFs via the invoice-gen API, and
+ * if NONE could be generated (API down / not configured) fall back to a text
+ * payment ask carrying the banking details + outstanding + invoice numbers so
+ * Tina never goes silent on the debt. Guarded once-per-session by the caller.
+ */
+async function sendBadDebtInvoices(
+    phoneNumber: string,
+    crmEntity: { id: string; fullname?: string },
+    detail: BadDebtDetail,
+): Promise<void> {
+    const firstName = (crmEntity.fullname || '').trim().split(/\s+/)[0] || '';
+    const toSend = detail.invoices.slice(0, BAD_DEBT_PDF_CAP);
+
+    let deliveredCount = 0;
+    let banking: any = null; // assembled banking block from the first invoice, for the fallback
+    for (const inv of toSend) {
+        try {
+            const [record, lineItems] = await Promise.all([
+                dynamicsService.getInvoiceById(inv.recordId),
+                dynamicsService.getInvoiceLineItems(inv.recordId),
+            ]);
+            if (!record) {
+                console.warn(`[BadDebt] invoice record not found for ${inv.invoiceId} (${inv.recordId})`);
+                continue;
+            }
+            // Tax invoices draw the bank account off the owning consultant.
+            const isTax = record.type === 'tax';
+            const consultantBanking = (isTax && record.ownerId)
+                ? await dynamicsService.getConsultantBanking(record.ownerId)
+                : null;
+            const payload = buildInvoiceGenPayload(record, lineItems, consultantBanking);
+            if (!banking) banking = payload.banking;
+
+            const pdf = await invoiceGenService.generateInvoicePdf(payload);
+            if (!pdf) continue; // logged inside the client; falls to text fallback below
+            const caption = `${firstName ? `Hi ${firstName}, ` : ''}here's your outstanding invoice ${inv.invoiceId} (${zar(inv.outstanding)} due). Please use ${inv.invoiceId} as your payment reference.`;
+            const sent = await metaWhatsAppService.sendDocument(phoneNumber, pdf, `${inv.invoiceId}.pdf`, caption);
+            if (sent.delivered || sent.dryRun) deliveredCount++;
+        } catch (e: any) {
+            console.warn(`[BadDebt] send failed for invoice ${inv.invoiceId}: ${e?.message || e}`);
+        }
+    }
+
+    console.log(`[BadDebt] phone=${phoneNumber} client=${crmEntity.id} overdue=${detail.invoices.length} pdfs_sent=${deliveredCount} total_outstanding=${detail.totalOutstanding}`);
+
+    // §10 fallback: invoice-gen produced nothing — send the payment ask in text
+    // with banking details so the debt still lands. The model's reply carries
+    // the conversational ask; this guarantees the payable details reach them.
+    if (deliveredCount === 0) {
+        const lines = detail.invoices
+            .map(i => `• ${i.invoiceId}: ${zar(i.outstanding)} outstanding${i.paymentReceived > 0 ? ` (${zar(i.paymentReceived)} of ${zar(i.total)} paid)` : ''}`)
+            .join('\n');
+        const bankLines: string[] = [];
+        if (banking) {
+            if (banking.account_holder) bankLines.push(`Account holder: ${banking.account_holder}`);
+            if (banking.bank_name) bankLines.push(`Bank: ${banking.bank_name}`);
+            if (banking.account_number) bankLines.push(`Account number: ${banking.account_number}`);
+            if (banking.account_type) bankLines.push(`Account type: ${banking.account_type}`);
+            if (banking.branch_code) bankLines.push(`Branch: ${banking.branch_code}`);
+        }
+        const msg = [
+            `${firstName ? `Hi ${firstName} — ` : ''}your account has an outstanding balance of *${zar(detail.totalOutstanding)}*:`,
+            '',
+            lines,
+            ...(bankLines.length ? ['', 'You can pay into:', ...bankLines] : []),
+            '',
+            '*Please use your invoice number as a reference when paying.*',
+        ].join('\n');
+        try {
+            await metaWhatsAppService.sendMessage(phoneNumber, msg);
+        } catch (e: any) {
+            console.warn(`[BadDebt] text fallback send failed: ${e?.message || e}`);
+        }
+    }
+}
+
+/**
+ * Evaluate (and cache) the client's bad-debt state for the session and fire the
+ * once-per-session deterministic side-effects. Detection runs on the first
+ * client inbound only (§6.2); the result is cached on the session for the rest
+ * of the session. Returns the state guidance payload for the model reply, or
+ * undefined when the client is in good standing (normal behaviour).
+ */
+async function evaluateBadDebt(
+    session: any,
+    crmEntity: { id: string; type: string; fullname?: string },
+    phoneNumber: string,
+): Promise<{ detail: BadDebtDetail; firstBadDebtTurn: boolean } | undefined> {
+    if (crmEntity.type !== 'client') return undefined; // leads/staff excluded (§5)
+
+    let detail: BadDebtDetail | null;
+    if (!session.bad_debt_evaluated) {
+        try {
+            detail = await dynamicsService.getBadDebtState(crmEntity.id);
+        } catch (e: any) {
+            console.warn(`[BadDebt] detection failed for ${crmEntity.id}: ${e?.message || e}`);
+            return undefined; // fail open — behave 100% normally
+        }
+        await supabaseService.setSessionBadDebt(session.id, !!detail, detail);
+        session.bad_debt_evaluated = true;
+        session.bad_debt = !!detail;
+        session.bad_debt_detail = detail;
+    } else {
+        detail = (session.bad_debt_detail as BadDebtDetail | null) || null;
+    }
+
+    if (!detail) return undefined;
+
+    // Once-per-session claim → send invoice PDFs (or text fallback). The claim
+    // also fixes "first bad-debt turn" so the model leads with the debt exactly
+    // once and doesn't nag on later turns.
+    let firstBadDebtTurn = false;
+    if (await supabaseService.claimBadDebtInvoiceSend(session.id)) {
+        firstBadDebtTurn = true;
+        await sendBadDebtInvoices(phoneNumber, crmEntity, detail);
+    }
+
+    return { detail, firstBadDebtTurn };
+}
+
 async function processMessage(incoming: IncomingMessage, outboundPrefix?: string): Promise<void> {
     const { from, text, interactiveId, document, flowResponse } = incoming;
 
@@ -784,6 +908,14 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         }
     }
 
+    // Bad-debt detection (PRD-bad-debt-collection.md §6.2). Runs on the first
+    // client inbound of the session, caches on the session, and fires the
+    // once-per-session invoice-PDF send. Placed before the doc-upload / menu /
+    // AI branches so the PDFs go out and the state guidance is available no
+    // matter which path this turn takes. Clients only — leads/staff are exempt.
+    const badDebt = await evaluateBadDebt(session, crmEntity, from);
+    const badDebtActive = !!badDebt;
+
     // Return-flow tagging for filled-in tax form templates. A client uploading
     // a PDF whose filename matches one of the catalog prefixes (or, as a 48h
     // context fallback, whose recent history shows we sent them a form)
@@ -865,13 +997,17 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             });
             if (result.status === 'error') {
                 ack = "Got your IRP5 but I hit a snag filing it. Please try resending in a few minutes — your consultant will follow up if it keeps failing.";
-            } else if (result.missingDocs.length === 0) {
-                docFiled = true;
-                ack = `Got your IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year ✅. Looks like that's everything we need — your consultant will be in touch if anything else comes up.`;
             } else {
+                // Receipt is confirmed ALWAYS (the cert is on file regardless of
+                // OCR), then the full tailored list once — never a drip, never a
+                // mention of any extraction failure (Issue 26).
                 docFiled = true;
-                const next = result.missingDocs[0];
-                ack = `Got your IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year ✅.${result.wrongYearWarning ? ` One thing — ${result.wrongYearWarning}` : ''} Next I'll need your ${next.label}${next.notes ? ` (${next.notes})` : ''}.`;
+                ack = buildIrp5ReceivedAck({
+                    employerName: result.employerName,
+                    assessmentYear: result.assessmentYear,
+                    outstanding: result.outstanding,
+                    wrongYearWarning: result.wrongYearWarning,
+                });
             }
         } else {
             const saved = await saveClientDocumentDirect({
@@ -887,6 +1023,12 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             ack = saved.success
                 ? `Got it — saved your ${label} ✅. Anything else I can help with?`
                 : "I got the file but hit a snag filing it. Please try resending shortly — your consultant will follow up if it keeps failing.";
+        }
+
+        // Bad-debt hold (§8): documents are still accepted and saved, but make
+        // clear nothing on a new return gets processed until the invoice is paid.
+        if (badDebtActive && docFiled) {
+            ack += " Just a heads-up: we've got an unpaid invoice on your profile, so we can't process anything on a new return until that's settled — but your document is safely on file.";
         }
 
         // Mark the session noteworthy so its close emails the consultant a summary.
@@ -938,6 +1080,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         crmEntity.type === 'client' &&
         !document &&
         !interactiveId &&
+        !badDebtActive &&
         looksLikeGreetingOnly(effectiveText)
     ) {
         const existingHistory = await supabaseService.getHistory(session.id);
@@ -966,39 +1109,54 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     // Conversation caps — short-circuit before invoking Claude for non-staff
     // users who've blown through the per-session or per-day limits. Staff are
     // exempt; their tool flows are bounded by permissions instead.
+    // The cap decision is pure (src/domain/conversationCap.ts): blocked / hit /
+    // ok. The staff exemption stays inline; the switch below applies the
+    // verdict's I/O (canned reply, marking the session blocked, escalating the
+    // open Case). Always fetch the daily count first so the decision has all
+    // its inputs.
     if (crmEntity.type !== 'user') {
-        if (session.cap_blocked_at) {
-            await supabaseService.saveMessage(session.id, 'user', effectiveText);
-            await supabaseService.saveMessage(session.id, 'assistant', CAP_BLOCKED_REPLY);
-            await metaWhatsAppService.sendMessage(from, CAP_BLOCKED_REPLY);
-            console.log(`[Processor] ${from} session ${session.id} cap-blocked — short-circuit`);
-            return;
-        }
-
         const sessionMessages = session.message_count || 0;
         const sessionTokens = session.token_count || 0;
-        const overSession = sessionMessages >= CAP_MESSAGES_PER_SESSION || sessionTokens >= CAP_TOKENS_PER_SESSION;
         const dailyCount = await supabaseService.countMessagesLast24h(from);
-        const overDaily = dailyCount >= CAP_MESSAGES_PER_DAY;
 
-        if (overSession || overDaily) {
-            await supabaseService.saveMessage(session.id, 'user', effectiveText);
-            await supabaseService.saveMessage(session.id, 'assistant', CAP_HIT_REPLY);
-            await metaWhatsAppService.sendMessage(from, CAP_HIT_REPLY);
-            await supabaseService.markSessionCapBlocked(session.id);
+        const cap = decideConversationCap(
+            {
+                capBlockedAt: session.cap_blocked_at ?? null,
+                messageCount: sessionMessages,
+                tokenCount: sessionTokens,
+            },
+            dailyCount,
+        );
 
-            const openCase = await supabaseService.findOpenCaseForSession(session.id);
-            if (openCase) {
-                const reason = overDaily ? 'Daily message cap reached' : 'Session message cap reached';
-                try {
-                    await caseService.markEscalated(openCase.id, reason, openCase.crm_case_id);
-                } catch (e) {
-                    console.warn('[Processor] cap-hit escalation failed:', (e as Error).message);
-                }
+        switch (cap.kind) {
+            case 'blocked': {
+                await supabaseService.saveMessage(session.id, 'user', effectiveText);
+                await supabaseService.saveMessage(session.id, 'assistant', CAP_BLOCKED_REPLY);
+                await metaWhatsAppService.sendMessage(from, CAP_BLOCKED_REPLY);
+                console.log(`[Processor] ${from} session ${session.id} cap-blocked — short-circuit`);
+                return;
             }
+            case 'hit': {
+                await supabaseService.saveMessage(session.id, 'user', effectiveText);
+                await supabaseService.saveMessage(session.id, 'assistant', CAP_HIT_REPLY);
+                await metaWhatsAppService.sendMessage(from, CAP_HIT_REPLY);
+                await supabaseService.markSessionCapBlocked(session.id);
 
-            console.log(`[Processor] ${from} hit cap — sessionMsgs=${sessionMessages} sessionTokens=${sessionTokens} dailyMsgs=${dailyCount} escalated=${openCase ? openCase.crm_case_id : 'none'}`);
-            return;
+                const openCase = await supabaseService.findOpenCaseForSession(session.id);
+                if (openCase) {
+                    const reason = cap.reason === 'daily' ? 'Daily message cap reached' : 'Session message cap reached';
+                    try {
+                        await caseService.markEscalated(openCase.id, reason, openCase.crm_case_id);
+                    } catch (e) {
+                        console.warn('[Processor] cap-hit escalation failed:', (e as Error).message);
+                    }
+                }
+
+                console.log(`[Processor] ${from} hit cap — sessionMsgs=${sessionMessages} sessionTokens=${sessionTokens} dailyMsgs=${dailyCount} escalated=${openCase ? openCase.crm_case_id : 'none'}`);
+                return;
+            }
+            case 'ok':
+                break;
         }
     }
 
@@ -1117,47 +1275,123 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
 
     // Feedback routing: if this session is waiting on feedback for a bot answer,
     // and the inbound looks like yes/no, close the loop without invoking the AI.
-    //
-    // Gate: free-text yes/no only counts as feedback when the PREVIOUS bot turn
-    // was the resolution prompt itself. Otherwise a casual "yes" mid-conversation
-    // (e.g. answering "want me to list typical docs?") would close the case
-    // instead of being routed through Claude. Explicit button taps bypass the
-    // gate — clicking the prompt's button is unambiguous.
+    // The whole gate (button-tap bypass, backward scan for the resolution
+    // prompt, detectFeedback) is the pure decideFeedbackReply decision
+    // (src/domain/feedbackReply.ts): feedback / clear-pending / none. The
+    // client guard stays inline; the switch below applies the verdict's I/O.
     const pendingCaseId = (session as any).pending_case_id || null;
-    if (crmEntity.type === 'client' && pendingCaseId) {
-        const isExplicitButtonTap =
-            interactiveId === CASE_FEEDBACK_BUTTON_YES ||
-            interactiveId === CASE_FEEDBACK_BUTTON_NO;
-        let previousWasPrompt = isExplicitButtonTap;
-        if (!isExplicitButtonTap) {
-            for (let i = historyWithoutCurrent.length - 1; i >= 0; i--) {
-                if (historyWithoutCurrent[i].role === 'assistant') {
-                    previousWasPrompt = historyWithoutCurrent[i].content.startsWith(CASE_FEEDBACK_PROMPT_TEXT);
-                    break;
-                }
-            }
-        }
+    if (crmEntity.type === 'client') {
+        // Resolve the case this turn refers to BEFORE deciding. A feedback
+        // button is self-identifying (its id carries the caseId), so a late tap
+        // resolves to its exact case even after pending_case_id was cleared or
+        // the session rolled over. Legacy bare ids (caseId null) and free-text
+        // replies fall back to the surviving pending pointer.
+        const parsedButton = parseFeedbackButton(interactiveId);
+        const tappedCaseId = parsedButton?.caseId ?? pendingCaseId;
+        const tappedCase = tappedCaseId ? await supabaseService.getCase(tappedCaseId) : null;
+        const belongsToActiveSession = !!tappedCase && tappedCase.session_id === session.id;
 
-        const feedback = previousWasPrompt ? caseService.detectFeedback(effectiveText) : null;
-        if (feedback) {
-            await caseService.handleFeedback(pendingCaseId, feedback);
-            await supabaseService.setSessionPendingCase(session.id, null);
+        const feedbackVerdict = decideFeedbackReply(
+            historyWithoutCurrent,
+            { text: effectiveText, interactiveId },
+            pendingCaseId,
+            tappedCase ? { id: tappedCase.id, status: tappedCase.status } : null,
+            belongsToActiveSession,
+        );
 
-            const ack = feedback === 'confirmed'
-                ? "Great, glad that helped. 🙌 Message me again any time."
-                : "Thanks for letting me know. I've flagged this for a consultant to follow up.";
-            await supabaseService.saveMessage(session.id, 'assistant', ack);
-            await metaWhatsAppService.sendMessage(from, ack);
+        const confirmedAck = "Great, glad that helped. 🙌 Message me again any time.";
+        const reengageCopy = "Sorry that didn't fully clear it up — tell me what's still confusing and I'll take another look.";
+
+        // Send + persist + Dynamics-log a canned bot reply. Threads the outgoing
+        // under the tapped case's request when we have it.
+        const sendBotText = async (text: string) => {
+            await supabaseService.saveMessage(session.id, 'assistant', text);
+            await metaWhatsAppService.sendMessage(from, text);
             try {
-                await dynamicsService.logMessage(crmEntity, ack, 'Outgoing', from, crmRequestId);
+                await dynamicsService.logMessage(crmEntity, text, 'Outgoing', from, tappedCase?.crm_case_id ?? crmRequestId);
             } catch (e) {
                 console.warn('[Processor] Outgoing log failed:', (e as Error).message);
             }
-            console.log(`[Processor] Case ${pendingCaseId} feedback=${feedback}`);
-            return;
+        };
+
+        switch (feedbackVerdict.kind) {
+            case 'confirm-close': {
+                // "Yes, thanks" on a live case — close confirmed; clearEscalation
+                // also pulls the consultant off an escalated case.
+                await caseService.handleFeedback(feedbackVerdict.caseId, 'confirmed', {
+                    clearEscalation: feedbackVerdict.clearEscalation,
+                });
+                await supabaseService.setSessionPendingCase(session.id, null);
+                await sendBotText(confirmedAck);
+                console.log(`[Processor] Case ${feedbackVerdict.caseId} confirm-close clearEscalation=${feedbackVerdict.clearEscalation}`);
+                return;
+            }
+            case 'confirm-upgrade': {
+                // "Yes, thanks" arrived after the case auto-closed — record the
+                // genuine confirmation without reopening.
+                await caseService.confirmFeedbackUpgrade(feedbackVerdict.caseId, tappedCase?.crm_case_id ?? null);
+                await supabaseService.setSessionPendingCase(session.id, null);
+                await sendBotText(confirmedAck);
+                console.log(`[Processor] Case ${feedbackVerdict.caseId} confirm-upgrade`);
+                return;
+            }
+            case 'reengage': {
+                // "Still need help" — pull the case back to bot-owned and ask
+                // what's unclear. Never escalates; the client's follow-up routes
+                // through Claude as a continuation of this same case.
+                const row = await caseService.reengageCase(
+                    feedbackVerdict.caseId,
+                    feedbackVerdict.clearEscalation,
+                    tappedCase?.crm_case_id ?? null,
+                );
+                await supabaseService.setSessionPendingCase(session.id, null);
+                await sendBotText(reengageCopy);
+                // Re-arm the short-tail auto-close so a reopened-but-ghosted case
+                // closes on the same 10-min timer rather than lingering to the
+                // 12h sweep. Distinct dedupId so the original prompt's pending
+                // auto-close (which now skips on the client inbound) doesn't
+                // suppress this one.
+                const promptSentAt = new Date().toISOString();
+                try {
+                    await enqueueCaseAutoClose(
+                        {
+                            caseId: feedbackVerdict.caseId,
+                            sessionId: session.id,
+                            crmRequestId: row?.crm_case_id ?? tappedCase?.crm_case_id ?? null,
+                            promptSentAt,
+                        },
+                        { dedupId: `autoclose-${feedbackVerdict.caseId}-reengage-${promptSentAt}` },
+                    );
+                } catch (e: any) {
+                    console.warn(`[Processor] reengage auto-close enqueue failed caseId=${feedbackVerdict.caseId} err=${e?.message || e}`);
+                }
+                console.log(`[Processor] Case ${feedbackVerdict.caseId} reengage clearEscalation=${feedbackVerdict.clearEscalation}`);
+                return;
+            }
+            case 'ack-only': {
+                // Cross-session "yes" or an already-confirmed case — friendly
+                // ack, no case surgery.
+                await sendBotText(confirmedAck);
+                console.log(`[Processor] feedback ack-only sessionId=${session.id}`);
+                return;
+            }
+            case 'reengage-stale': {
+                // Cross-session "still need help" — the session boundary is the
+                // staleness cutoff, so we don't resurrect the expired case. Send
+                // the re-engage message; the follow-up opens a fresh case.
+                await sendBotText(reengageCopy);
+                console.log(`[Processor] feedback reengage-stale sessionId=${session.id}`);
+                return;
+            }
+            case 'clear-pending': {
+                // Pending Case but not a feedback reply — clear the pointer and
+                // fall through to the normal answer path.
+                await supabaseService.setSessionPendingCase(session.id, null);
+                break;
+            }
+            case 'none':
+                break;
         }
-        // Not a feedback reply — treat as a new query and clear the pending pointer.
-        await supabaseService.setSessionPendingCase(session.id, null);
     }
 
     // Wrap-up short-circuit: an explicit "thanks"-style inbound closes every
@@ -1278,6 +1512,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             session.id,
             leadOnboarding,
             retrievedContext,
+            badDebt,
         ),
         classifyPromise,
         reclassifyPromise,
