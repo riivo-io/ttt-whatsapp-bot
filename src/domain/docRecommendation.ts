@@ -63,10 +63,15 @@ export type DocSpec = { label: string; reason: string };
  * are NOT baseline** — they apply only to specific clients and live in the
  * source-code / industry specs. **IRP5 stays** in baseline; **ID Document
  * stays out** entirely.
+ *
+ * Guide source of truth: `docs/document-requirements-guide.md` §Everyone
+ * (baseline). The investment-certificate item keeps the `IT3(b)` hint in
+ * parentheses so the received-doc loose-match still recognises an uploaded
+ * IT3(b) (Issue 03). Re-sync this table when that guide section changes.
  */
 export const BASELINE_DOCS: DocSpec[] = [
     { label: 'IRP5', reason: "your employer's tax certificate — the starting point for your return" },
-    { label: 'IT3(b) — interest earned', reason: 'declares the interest you earned from each bank or savings account' },
+    { label: 'Investment tax certificates (IT3(b)/IT3(c))', reason: 'declare the interest and investment income you earned from each bank, savings or investment account' },
     { label: 'Medical aid tax certificate', reason: 'lets us claim your medical aid contributions (only if you are on a scheme)' },
     { label: 'Retirement Annuity (RA) tax certificate', reason: 'lets us claim your RA contributions as a deduction (only if you contribute to one)' },
 ];
@@ -74,6 +79,14 @@ export const BASELINE_DOCS: DocSpec[] = [
 /**
  * Extra docs triggered by a specific SARS source code on the contact.
  * Keys are the 4-digit codes as strings. Every spec carries a reason.
+ *
+ * Guide source of truth for the vehicle/commission codes: `docs/document-
+ * requirements-guide.md` §3606 (commission) / §3701 (travel) / §3802 (company
+ * car), reconciled in Issue 02. Those three list only the loose docs neither the
+ * Vehicle Detail Sheet nor the Commission Earner Expenses List captures — the
+ * forms themselves come from `SOURCE_CODE_FORMS` and supersede the rest. The
+ * `{taxYearRange}` token in a reason is interpolated with `taxYear.rangeText` at
+ * build time (never hardcode the assessment period). Re-sync on guide edit.
  */
 export const SOURCE_CODE_DOCS: Record<string, DocSpec[]> = {
     '3601': [
@@ -81,20 +94,29 @@ export const SOURCE_CODE_DOCS: Record<string, DocSpec[]> = {
         { label: '12 payslips', reason: 'to verify your monthly earnings against your IRP5, covering the full tax year' },
     ],
     '3605': [], // Annual bonus — covered by IRP5
+    // 3606 (commission): both forms (Vehicle Detail Sheet + Commission Earner
+    // Expenses List) come from SOURCE_CODE_FORMS. These loose docs are the ones
+    // neither form captures, every one conditionally framed so the client
+    // self-selects (guide §3606). IRP5 comes from the baseline.
     '3606': [
-        { label: 'IRP5', reason: "your employer's tax certificate — the starting point for your return" },
-        { label: 'Logbook', reason: 'to back up the business travel you want to claim' },
-        { label: 'Till slips / receipts', reason: 'for the business expenses you want to claim against your commission' },
+        { label: 'Vehicle purchase agreement', reason: "only if you want to claim vehicle expenses against your own car — to establish your vehicle's value" },
+        { label: 'Vehicle finance statements', reason: 'only if you want to claim vehicle expenses against your own car — to claim the finance interest on the vehicle' },
+        { label: 'Vehicle insurance policy schedule', reason: 'only if you want to claim vehicle expenses against your own car — to claim the insurance you carry on the vehicle' },
+        { label: 'Bank statements (cheque / savings / credit card)', reason: "only if you want to claim commission / vehicle expenses — to back up the expenses you're claiming, for {taxYearRange}" },
     ],
     '3615': [
         { label: 'IRP5', reason: "your employer's tax certificate — the starting point for your return" },
         { label: '12 payslips', reason: 'to verify your monthly earnings against your IRP5, covering the full tax year' },
     ],
+    // 3701 (travel): the Vehicle Detail Sheet (from SOURCE_CODE_FORMS) captures
+    // the logbook, service records and leave dates. The purchase agreement is the
+    // one loose doc the form does NOT cover, so it survives (guide §3701). Service
+    // records / leave dates are listed here only to be folded into the form via
+    // supersession — with includeForms:false they resurface. IRP5 is baseline.
     '3701': [
-        { label: 'IRP5', reason: "your employer's tax certificate — the starting point for your return" },
-        { label: 'Logbook', reason: 'to back up your business travel claim, covering the full tax year' },
-        { label: 'Vehicle purchase / lease agreement', reason: "to work out your vehicle's value for the travel claim" },
-        { label: 'Fuel & maintenance slips', reason: 'to claim your actual vehicle running costs' },
+        { label: 'Vehicle purchase agreement', reason: "to establish your vehicle's value for the travel claim" },
+        { label: 'Service records', reason: 'captured by the Vehicle Detail Sheet' },
+        { label: 'Leave dates', reason: 'the dates you were away or not travelling for work' },
     ],
     '3702': [
         { label: 'IRP5', reason: "your employer's tax certificate — the starting point for your return" },
@@ -109,6 +131,14 @@ export const SOURCE_CODE_DOCS: Record<string, DocSpec[]> = {
     '3713': [
         { label: 'IRP5', reason: "your employer's tax certificate — the starting point for your return" },
         { label: 'Supporting receipts for allowances claimed', reason: 'to support the allowances shown on your IRP5' },
+    ],
+    // 3802 (company car / use-of-motor-vehicle fringe benefit): the Vehicle Detail
+    // Sheet (from SOURCE_CODE_FORMS) works out the business-use portion. The only
+    // genuinely new doc is the fringe-benefit letter — medical aid / RA /
+    // investment certificates are NOT duplicated here, they come from the baseline
+    // (guide §3802).
+    '3802': [
+        { label: 'Fringe-benefit letter from your employer', reason: 'confirms the company-car fringe benefit and its terms' },
     ],
     '3696': [],
     '3697': [],
@@ -137,13 +167,17 @@ export const INDUSTRY_DOCS: Array<{ match: RegExp; docs: DocSpec[] }> = [
         ],
     },
     {
+        // Guide source of truth: `docs/document-requirements-guide.md` §Rental
+        // income — the full rental document set (Issue 03). Re-sync on guide edit.
         match: /rental|landlord|property/i,
         docs: [
             { label: 'Lease agreement(s)', reason: 'to confirm the rent you charge your tenants' },
-            { label: 'Bank statement showing rent received', reason: 'to confirm the rental income you received, full tax year' },
-            { label: 'Bond statement', reason: 'to claim the interest on your bond as an expense' },
-            { label: 'Rates & levy invoices', reason: 'to claim rates and levies against your rental income' },
-            { label: 'Maintenance / repair receipts', reason: 'to claim the cost of keeping the property in shape' },
+            { label: 'Bank statement showing rent received', reason: 'to confirm the rental income you received, for the tax year' },
+            { label: 'Bond statement (including bond interest)', reason: 'to claim the interest on your bond as an expense' },
+            { label: 'Rates & levies', reason: 'to claim rates and levies against your rental income' },
+            { label: 'Maintenance & repairs receipts', reason: 'to claim the cost of keeping the property in shape' },
+            { label: 'Insurance', reason: 'to claim the cover you carry on the property' },
+            { label: 'Agency commission paid', reason: "to claim the letting agent's commission" },
         ],
     },
     {
@@ -181,6 +215,13 @@ export const INDUSTRY_DOCS: Array<{ match: RegExp; docs: DocSpec[] }> = [
  * your logbook" and "fill the vehicle form" for the same need. They may still
  * send their own version. `formKey` ties back to the `list_tax_forms` catalog
  * (`taxForms.service.ts`).
+ *
+ * Guide source of truth: `docs/document-requirements-guide.md` §3606 / §3701 /
+ * §3802 (Issue 02). The Vehicle Detail Sheet is the shared entry behind all three
+ * vehicle/commission scenarios — it captures the logbook, service records and
+ * leave dates, so those raw docs are superseded; the vehicle purchase agreement is
+ * NOT, since the guide asks for it as a loose doc alongside the form. Re-sync on
+ * guide edit.
  */
 export const SOURCE_CODE_FORMS: Array<{
     formKey: TaxFormKey;
@@ -192,13 +233,17 @@ export const SOURCE_CODE_FORMS: Array<{
     {
         formKey: 'vehicle_detail',
         label: 'Vehicle Detail Sheet',
-        reason: "you've got a travel allowance — fill this in and we can claim your business travel without you digging out a separate logbook",
-        sourceCodes: ['3701', '3702', '3703', '4015'],
+        // Generic reason: the form is shared across travel (3701), commission
+        // vehicle (3606) and company-car (3802) clients, so it can't lean on any
+        // single code's framing.
+        reason: 'fill this in and we can work out your vehicle claim straight from the form — no need to dig out a separate logbook, service records or travel dates',
+        sourceCodes: ['3701', '3702', '3703', '4015', '3606', '3802'],
         supersedesDocLabels: [
             'Logbook',
             'Fuel slips',
             'Fuel & maintenance slips',
-            'Vehicle purchase / lease agreement',
+            'Service records',
+            'Leave dates',
         ],
     },
     {
@@ -213,6 +258,51 @@ export const SOURCE_CODE_FORMS: Array<{
         ],
     },
 ];
+
+/**
+ * Non-code scenarios surfaced on **client disclosure** rather than read off an
+ * IRP5 (Issue 04). When the client tells Tina in chat that they earned foreign
+ * or rental income, `get_required_documents` is called with the matching
+ * `topic` and these specs are unioned into the recommendation, then
+ * deduped/diffed exactly like the code- and industry-driven specs.
+ *
+ * Guide source of truth: `docs/document-requirements-guide.md` §Foreign income /
+ * §Rental income. Re-sync this table when those guide sections change.
+ *
+ * `foreign_income` carries the 183-day / 60-consecutive-day test and the R1.25m
+ * exemption **inside the reason strings only** — never as a standalone advice
+ * item, and Tina never rules on whether the client qualifies. Its period
+ * reference uses the `{taxYearRange}` token, interpolated at build time.
+ *
+ * `rental_income` mirrors the rental `INDUSTRY_DOCS` entry (Issue 03's upgraded
+ * set) **by reference**, so a client who discloses rental income gets the same
+ * list as a landlord-by-industry — one list, not two.
+ */
+export type DocTopic = 'foreign_income' | 'rental_income';
+
+// The rental topic's specs ARE the rental industry specs — resolved from
+// INDUSTRY_DOCS at access time (via the same matcher) so the two can never
+// drift. No second rental list is maintained (guide §Rental income).
+const rentalIndustryDocs = (): DocSpec[] =>
+    INDUSTRY_DOCS.find(e => e.match.test('rental'))?.docs ?? [];
+
+export const TOPIC_DOCS: Record<DocTopic, DocSpec[]> = {
+    foreign_income: [
+        {
+            label: 'Proof of foreign income for the tax year (payslips / bank statements)',
+            reason: 'to confirm what you earned abroad for {taxYearRange}',
+        },
+        {
+            label: 'Passport showing exit and entry stamps',
+            reason: 'so we can check the days you spent outside South Africa for the foreign-income exemption (you must be out for more than 183 days in a 12-month period, 60 of them consecutive, with the first R1.25 million of qualifying foreign employment income exempt)',
+        },
+    ],
+    // Getter so the rental topic always reflects the live rental INDUSTRY_DOCS
+    // entry — one source of truth, no drift between topic and industry.
+    get rental_income(): DocSpec[] {
+        return rentalIndustryDocs();
+    },
+};
 
 /** One item in the tailored recommendation: a raw doc to send or a form to fill. */
 export type DocRecommendationItem = {
@@ -238,6 +328,13 @@ export type DocRecommendationInput = {
      * bucket, visibly distinct from `received`. Defaults to none.
      */
     clientStatedLabels?: string[];
+    /**
+     * Optional non-code scenario the client disclosed in chat — foreign or
+     * rental income (Issue 04). Surfaces the matching `TOPIC_DOCS` specs,
+     * unioned + deduped/diffed like the rest. Foreign income can only ever reach
+     * the kernel this way (it is never read off an IRP5). Defaults to none.
+     */
+    topic?: DocTopic;
     /** Injected clock for the tax-year calc. */
     today?: Date;
     /**
@@ -262,6 +359,8 @@ export type DocRecommendation = {
     clientStated: DocRecommendationItem[];
     matchedSourceCodes: string[];
     matchedIndustry: string | null;
+    /** The disclosed topic that contributed specs, or null (Issue 04). */
+    matchedTopic: DocTopic | null;
     hasPersonalisation: boolean;
 };
 
@@ -286,6 +385,12 @@ export function buildDocRecommendation(input: DocRecommendationInput): DocRecomm
     const clientStatedLabels = input.clientStatedLabels ?? [];
     const includeForms = input.includeForms !== false;
     const today = input.today ?? new Date();
+    const taxYear = getCurrentSaTaxYear(today);
+
+    // Reasons may reference the assessment period via the `{taxYearRange}` token
+    // rather than hardcoding a date range — interpolate it from the derived tax
+    // year so the period stays correct year-on-year (Issue 02 acceptance).
+    const interpolate = (reason: string) => reason.replace(/\{taxYearRange\}/g, taxYear.rangeText);
 
     // 1. Forms that apply, and the doc labels they supersede.
     const matchedForms = includeForms
@@ -319,6 +424,13 @@ export function buildDocRecommendation(input: DocRecommendationInput): DocRecomm
         }
     }
 
+    // 3b. Topic docs — a non-code scenario the client disclosed in chat
+    //     (foreign / rental income, Issue 04). Unioned in like the rest; the
+    //     dedupe in step 4 collapses any overlap with the industry set (a
+    //     landlord who also discloses rental income sees the rental docs once).
+    const matchedTopic: DocTopic | null = input.topic ?? null;
+    const topicDocs: DocSpec[] = matchedTopic ? TOPIC_DOCS[matchedTopic] : [];
+
     // 4. Assemble in priority order, de-duping by label and dropping any doc a
     //    form supersedes. Forms lead.
     const items: DocRecommendationItem[] = [];
@@ -328,17 +440,18 @@ export function buildDocRecommendation(input: DocRecommendationInput): DocRecomm
         const key = normaliseDocLabel(form.label);
         if (seen.has(key)) continue;
         seen.add(key);
-        items.push({ kind: 'form', label: form.label, reason: form.reason, formKey: form.formKey });
+        items.push({ kind: 'form', label: form.label, reason: interpolate(form.reason), formKey: form.formKey });
     }
 
     const pushDoc = (doc: DocSpec) => {
         const key = normaliseDocLabel(doc.label);
         if (seen.has(key) || supersededKeys.has(key)) return;
         seen.add(key);
-        items.push({ kind: 'doc', label: doc.label, reason: doc.reason });
+        items.push({ kind: 'doc', label: doc.label, reason: interpolate(doc.reason) });
     };
     sourceCodeDocs.forEach(pushDoc);
     industryDocs.forEach(pushDoc);
+    topicDocs.forEach(pushDoc);
     BASELINE_DOCS.forEach(pushDoc);
 
     // 5. Split into received (verified) / client-stated (unverified marker) /
@@ -359,13 +472,14 @@ export function buildDocRecommendation(input: DocRecommendationInput): DocRecomm
     }
 
     return {
-        taxYear: getCurrentSaTaxYear(today),
+        taxYear,
         outstanding,
         received,
         clientStated,
         matchedSourceCodes,
         matchedIndustry,
-        hasPersonalisation: matchedSourceCodes.length > 0 || matchedIndustry !== null,
+        matchedTopic,
+        hasPersonalisation: matchedSourceCodes.length > 0 || matchedIndustry !== null || matchedTopic !== null,
     };
 }
 

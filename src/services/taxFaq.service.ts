@@ -23,6 +23,7 @@
 import { dynamicsService, isClientStatedMarkerRow } from './dynamics.service';
 import { graphMailService } from './graphMail.service';
 import { computeRequiredDocuments } from './requiredDocuments.service';
+import type { DocTopic } from './requiredDocuments.service';
 import { getPersonalizedForms, formatTrailingLine } from './taxForms.service';
 import { summariseAuditDuration } from '../utils/workingDays';
 
@@ -361,11 +362,12 @@ function labelsMatch(required: string, uploaded: string): boolean {
 export async function handleGetRequiredDocuments(params: {
     contactId: string;
     taxYear?: number;
+    topic?: DocTopic;
 }): Promise<string> {
     const profile = await dynamicsService.getContactTaxProfile(params.contactId);
     const sourceCodes = profile?.sourceCodes || [];
     const industryName = profile?.industryName || null;
-    const expected = computeRequiredDocuments(sourceCodes, industryName);
+    const expected = computeRequiredDocuments(sourceCodes, industryName, new Date(), params.topic);
 
     // The target year for the upload cross-reference: caller-supplied if
     // given, otherwise the current SA tax year (which also matches the
@@ -380,7 +382,7 @@ export async function handleGetRequiredDocuments(params: {
     const uploadedLabels = uploadedRows.filter(r => !isClientStatedMarkerRow(r)).map(pickSubmissionDocLabel);
     const clientStatedLabels = uploadedRows.filter(r => isClientStatedMarkerRow(r)).map(pickSubmissionDocLabel);
 
-    const allExpected = [...expected.bySourceCode, ...expected.byIndustry, ...expected.baseline];
+    const allExpected = [...expected.bySourceCode, ...expected.byIndustry, ...expected.byTopic, ...expected.baseline];
     const seen = new Set<string>();
     const received: { label: string }[] = [];
     const clientStated: { label: string }[] = [];
