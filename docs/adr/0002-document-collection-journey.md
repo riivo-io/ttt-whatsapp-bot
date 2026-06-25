@@ -71,3 +71,27 @@ processor, matching the `decideCaseRouting` / `decideFeedbackReply` seam.
 - A future review should not re-propose a persisted journey state machine unless the journey
   grows branching that genuinely cannot be re-derived from documents on file (e.g. multi-year
   parallel returns with per-year sign-off). Reopen this ADR if so.
+
+## Addendum (2026-06-25) — the consultants' guide is the authoritative source
+
+PRD `docs/PRD-document-requirements-guide.md` encodes the consultants' SharePoint
+document-requirements guide into the existing pure kernel (`buildDocRecommendation()`). The
+architecture is **unchanged** — pure kernel, stateless re-derivation, never-assert-completeness,
+form-supersedes-doc — so this is an addendum, not a new ADR. Three points are recorded here:
+
+- **The guide is authoritative.** A verbatim snapshot lives at
+  `docs/document-requirements-guide.md`, dated for the 2026 tax year. Where the guide and the
+  kernel disagree, **the guide wins and the kernel is rewritten to match it.** The snapshot keeps
+  periods literal; the kernel keeps deriving live periods from the assessment year.
+
+- **New code/topic mappings this work introduces:** source codes **3606** (commission, conditionally
+  framed), **3701** (travel, rewritten to the guide list) and **3802** (company-car fringe benefit,
+  new — also added to the Vehicle Detail Sheet form trigger); and two client-stated document topics
+  **`foreign_income`** and **`rental_income`** surfaced via a new optional `topic` on
+  `get_required_documents`. The per-table code-comment pointers back to the snapshot are added by the
+  slices that touch each table.
+
+- **Manual sync point.** Keeping the kernel in step with the SharePoint guide is **manual** — the
+  same posture as the manually-applied Supabase migrations: there is no automated drift check. A
+  SharePoint guide edit obliges an engineer to re-sync the kernel (and refresh
+  `docs/document-requirements-guide.md`) before the change is reflected to clients.

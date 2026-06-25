@@ -248,7 +248,10 @@ export interface TaxFaqPort {
     getSubmissionStatus(params: { contactId: string; taxYear?: number }): Promise<string>;
     getAuditStatus(params: { contactId: string; taxYear?: number }): Promise<string>;
     getReceivedDocuments(params: { contactId: string; taxYear?: number }): Promise<string>;
-    getRequiredDocuments(params: { contactId: string; taxYear?: number }): Promise<string>;
+    // `topic` is the optional disclosed non-code scenario (foreign / rental
+    // income, Issue 04); the union is inlined to keep the registry free of a
+    // domain import. Mirrors `DocTopic` in `src/domain/docRecommendation.ts`.
+    getRequiredDocuments(params: { contactId: string; taxYear?: number; topic?: 'foreign_income' | 'rental_income' }): Promise<string>;
 }
 
 /**
