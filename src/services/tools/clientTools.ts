@@ -266,6 +266,11 @@ const parseTaxYear = (args: unknown): number | undefined => {
     return typeof a.tax_year === 'number' ? a.tax_year : undefined;
 };
 
+const parseDocTopic = (args: unknown): 'foreign_income' | 'rental_income' | undefined => {
+    const a = (args ?? {}) as { topic?: unknown };
+    return a.topic === 'foreign_income' || a.topic === 'rental_income' ? a.topic : undefined;
+};
+
 const taxYearSchema = {
     type: 'object',
     properties: {
@@ -276,11 +281,12 @@ const taxYearSchema = {
 
 const getRequiredDocuments: ToolEntry = {
     name: 'get_required_documents',
-    description: "Tell the client which tax documents are still outstanding. Use this whenever the client asks what documents they need to send, upload, submit, or provide — \"what do I need?\", \"what must I send for my tax return?\", \"what docs do you need from me?\", \"what's outstanding?\". The tool builds the expected list from the client's SARS source codes + industry (falling back to a typical-return baseline if none are on file), then cross-references the riivo_taxsubmissionsdocuments entity to mark what's already been uploaded and what's still missing. The returned message is already formatted — relay it verbatim; do NOT paraphrase it or mention SARS source codes.",
+    description: "Tell the client which tax documents are still outstanding. Use this whenever the client asks what documents they need to send, upload, submit, or provide — \"what do I need?\", \"what must I send for my tax return?\", \"what docs do you need from me?\", \"what's outstanding?\". The tool builds the expected list from the client's SARS source codes + industry (falling back to a typical-return baseline if none are on file), then cross-references the riivo_taxsubmissionsdocuments entity to mark what's already been uploaded and what's still missing. ALSO pass the optional `topic` argument when the client discloses in chat that they earned FOREIGN income (worked / earned money abroad or overseas) or RENTAL income (they let out / rent out property) — neither can be read off an IRP5, so the topic is the only way those extra documents get surfaced. The returned message is already formatted — relay it verbatim; do NOT paraphrase it or mention SARS source codes.",
     input_schema: {
         type: 'object',
         properties: {
             tax_year: { type: 'number', description: 'Optional 4-digit tax year (e.g. 2026) if the client specifies one. Omit to use the most recent preseason record.' },
+            topic: { type: 'string', enum: ['foreign_income', 'rental_income'], description: "Set to 'foreign_income' when the client says they earned income while working/living abroad, or 'rental_income' when they say they rent out / let property. Surfaces the extra documents for that scenario. Omit when neither was disclosed." },
         },
         required: [],
     },
@@ -289,6 +295,7 @@ const getRequiredDocuments: ToolEntry = {
         return ctx.deps.taxFaq.getRequiredDocuments({
             contactId: ctx.contactId as string,
             taxYear: parseTaxYear(args),
+            topic: parseDocTopic(args),
         });
     },
 };

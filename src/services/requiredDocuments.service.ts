@@ -3,10 +3,11 @@ import {
     BASELINE_DOCS,
     SOURCE_CODE_DOCS,
     INDUSTRY_DOCS,
+    TOPIC_DOCS,
     buildDocRecommendation,
     getCurrentSaTaxYear,
 } from '../domain/docRecommendation';
-import type { DocSpec, TaxYear, DocRecommendationItem } from '../domain/docRecommendation';
+import type { DocSpec, DocTopic, TaxYear, DocRecommendationItem } from '../domain/docRecommendation';
 
 /**
  * Dynamics-backed wrapper over the pure document-recommendation kernel in
@@ -23,34 +24,49 @@ import type { DocSpec, TaxYear, DocRecommendationItem } from '../domain/docRecom
 // Re-exported for the many existing importers that reach for these via the
 // service path (whatsappProcessor, pendingUpload, claude.service, taxFaq).
 export { getCurrentSaTaxYear, buildDocRecommendation };
-export type { DocSpec, TaxYear, DocRecommendationItem };
+export type { DocSpec, DocTopic, TaxYear, DocRecommendationItem };
 
 export type RequiredDocumentsResult = {
     taxYear: TaxYear;
     baseline: DocSpec[];
     bySourceCode: DocSpec[];
     byIndustry: DocSpec[];
+    /** Docs from a disclosed non-code topic (foreign / rental income, Issue 04). */
+    byTopic: DocSpec[];
     matchedSourceCodes: string[];
     matchedIndustry: string | null;
+    matchedTopic: DocTopic | null;
     hasPersonalisation: boolean;
 };
 
 /**
  * Compute the list of tax documents a specific client needs to upload,
- * based on their SARS source codes and industry. De-duplicates docs that
- * appear in multiple buckets (by label).
+ * based on their SARS source codes and industry — plus an optional disclosed
+ * `topic` (foreign / rental income, Issue 04) that can't be read off an IRP5.
+ * De-duplicates docs that appear in multiple buckets (by label).
+ *
+ * Reasons carrying the `{taxYearRange}` token are interpolated here against the
+ * `today`-derived tax year, so the live message never leaks the raw token (the
+ * kernel's `buildDocRecommendation` does the same for its own path).
  */
 export function computeRequiredDocuments(
     sourceCodes: string[],
     industryName: string | null,
-    today: Date = new Date()
+    today: Date = new Date(),
+    topic?: DocTopic,
 ): RequiredDocumentsResult {
+    const taxYear = getCurrentSaTaxYear(today);
+    const interpolate = (d: DocSpec): DocSpec =>
+        d.reason.includes('{taxYearRange}')
+            ? { ...d, reason: d.reason.replace(/\{taxYearRange\}/g, taxYear.rangeText) }
+            : d;
+
     const seen = new Set<string>();
     const pushUnique = (acc: DocSpec[], doc: DocSpec) => {
         const key = doc.label.toLowerCase();
         if (seen.has(key)) return;
         seen.add(key);
-        acc.push(doc);
+        acc.push(interpolate(doc));
     };
 
     const baseline: DocSpec[] = [];
@@ -77,14 +93,22 @@ export function computeRequiredDocuments(
         }
     }
 
+    const byTopic: DocSpec[] = [];
+    const matchedTopic: DocTopic | null = topic ?? null;
+    if (matchedTopic) {
+        TOPIC_DOCS[matchedTopic].forEach(d => pushUnique(byTopic, d));
+    }
+
     return {
-        taxYear: getCurrentSaTaxYear(today),
+        taxYear,
         baseline,
         bySourceCode,
         byIndustry,
+        byTopic,
         matchedSourceCodes,
         matchedIndustry,
-        hasPersonalisation: matchedSourceCodes.length > 0 || matchedIndustry !== null,
+        matchedTopic,
+        hasPersonalisation: matchedSourceCodes.length > 0 || matchedIndustry !== null || matchedTopic !== null,
     };
 }
 
@@ -108,6 +132,12 @@ export function formatRequiredDocumentsMessage(result: RequiredDocumentsResult):
         lines.push('');
         lines.push(`*Based on your industry${result.matchedIndustry ? ` (${result.matchedIndustry})` : ''}:*`);
         result.byIndustry.forEach(d => lines.push(renderDoc(d)));
+    }
+
+    if (result.byTopic.length > 0) {
+        lines.push('');
+        lines.push('*Based on what you told me:*');
+        result.byTopic.forEach(d => lines.push(renderDoc(d)));
     }
 
     lines.push('');
