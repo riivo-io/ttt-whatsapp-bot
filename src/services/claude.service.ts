@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 console.log('[boot] claude.service: before dynamics');
 import { dynamicsService, LEAD_TYPE_TAX } from './dynamics.service';
 console.log('[boot] claude.service: before pdf');
-import { pdfService, mapInvoiceToInvoiceData } from './pdf.service';
+import { generateOfficialInvoicePdf } from './invoicePdf.service';
 console.log('[boot] claude.service: before meta');
 import { metaWhatsAppService } from './meta.service';
 import { graphMailService } from './graphMail.service';
@@ -768,10 +768,10 @@ Rules for this state:
                     supabase: supabaseService,
                     forms: { resolveLatestFormFile },
                     irp5: { processClientIrp5Upload, processStateBLeadIrp5Upload },
-                    // Adapter closure: map the raw Dynamics invoice row to InvoiceData
-                    // then render it, so neither pdfkit nor the mapper enters the tool
-                    // module graph (see PdfPort). send_invoice_pdf (slice 5) uses this.
-                    pdf: { generateInvoicePdf: (row) => pdfService.generateInvoicePDF(mapInvoiceToInvoiceData(row)) },
+                    // Adapter closure: render the OFFICIAL invoice PDF via the external
+                    // invoice-gen function, keeping the orchestration out of the tool
+                    // module graph (see PdfPort). send_invoice_pdf uses this.
+                    pdf: { generateInvoicePdf: (recordId) => generateOfficialInvoicePdf(recordId) },
                     // LoE OCR/extraction pipeline (slice 6) — mistral for OCR,
                     // loe-extractor for field extraction, composed into one Port so
                     // neither service enters the tool module graph.

@@ -403,7 +403,7 @@ export class DynamicsService {
         const token = await this.getToken();
         const selectFields = [
             // Invoice header
-            'new_name', 'createdon',
+            'new_invoicesid', 'new_name', 'createdon',
             // Customer details
             'riivo_customerfullname', 'riivo_customerstreet', 'riivo_customerprovince',
             'riivo_customersuburb', 'riivo_customerponumber', 'riivo_customercity',

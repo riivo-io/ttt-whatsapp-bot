@@ -184,13 +184,15 @@ export interface MetaPort {
 }
 
 /**
- * Narrow Port over the invoice-PDF renderer (slice 5, used by send_invoice_pdf).
- * The wiring closure maps the raw Dynamics invoice row to InvoiceData then renders
- * it, so neither pdfkit nor the pure mapper enters the tool module graph — the same
- * seam discipline as FormsPort/Irp5Port. A test fakes the buffer directly.
+ * Narrow Port over the official invoice-PDF renderer (used by send_invoice_pdf).
+ * The wiring closure delegates to invoicePdf.service, which renders via the
+ * external invoice-gen Azure Function — so neither the orchestration nor any
+ * Dynamics/HTTP detail enters the tool module graph (same seam discipline as
+ * FormsPort/Irp5Port). Takes the invoice record GUID; returns null when the
+ * generator can't produce a PDF. A test fakes the buffer directly.
  */
 export interface PdfPort {
-    generateInvoicePdf(invoiceRow: any): Promise<Buffer>;
+    generateInvoicePdf(invoiceRecordId: string): Promise<Buffer | null>;
 }
 
 /** Narrow Port over the Graph mail service — only the send used by escalate_to_taxcrew. */
