@@ -370,7 +370,7 @@ const getAuditStatus: ToolEntry = {
 
 const getInvoicePdf: ToolEntry = {
     name: 'get_invoice_pdf',
-    description: "Use this when the user wants to VIEW or DOWNLOAD a PDF of a specific invoice for themselves. Returns a link. Do NOT use this to send an invoice to a client — use send_invoice_pdf for that.",
+    description: "Use this when the user wants a PDF of a specific invoice for themselves. The official invoice PDF is sent to them directly here on WhatsApp as a file attachment — there is no download link. Do NOT use this to send an invoice to a different client — use send_invoice_pdf for that.",
     input_schema: {
         type: 'object',
         properties: {
@@ -383,17 +383,39 @@ const getInvoicePdf: ToolEntry = {
     async handle(args: unknown, ctx: ToolContext): Promise<string> {
         const a = (args ?? {}) as { invoice_number?: string };
         const invoiceNum = a.invoice_number;
+        if (!ctx.phoneNumber) {
+            return JSON.stringify({ status: 'error', message: `Cannot send the PDF — no WhatsApp number is associated with this conversation.` });
+        }
         const invoice = await ctx.deps.dynamics.getInvoiceByNumber(invoiceNum as string);
-        if (!invoice) {
+        if (!invoice || !invoice.recordId) {
             return JSON.stringify({ status: 'error', message: `Invoice ${invoiceNum} not found.` });
         }
-        // Return a download link — the /api/pdf route regenerates the PDF on
-        // demand from the same source data.
-        console.log(`[PDF] Invoice ${invoiceNum} found, returning download link`);
+
+        // Render the OFFICIAL invoice PDF (external invoice-gen function) and
+        // send it straight to the caller as a WhatsApp document — no link.
+        let pdfBuffer: Buffer | null;
+        try {
+            pdfBuffer = await ctx.deps.pdf.generateInvoicePdf(invoice.recordId);
+        } catch (err: any) {
+            console.error(`[PDF] generation failed for ${invoiceNum}:`, err?.message || err);
+            pdfBuffer = null;
+        }
+        if (!pdfBuffer) {
+            return JSON.stringify({ status: 'error', message: `Sorry, I couldn't generate invoice ${invoiceNum} right now. Please try again shortly.` });
+        }
+
+        const caption = `Here's your invoice ${invoiceNum}.`;
+        const sendResult = await ctx.deps.meta.sendDocument(ctx.phoneNumber, pdfBuffer, `${invoiceNum}.pdf`, caption);
+        if (!sendResult.delivered && !sendResult.dryRun) {
+            return JSON.stringify({ status: 'error', message: `I generated invoice ${invoiceNum} but couldn't deliver it: ${sendResult.error || 'unknown error'}. Please try again shortly.` });
+        }
+
+        console.log(`[PDF] Invoice ${invoiceNum} sent to ${ctx.phoneNumber}${sendResult.dryRun ? ' (dry-run)' : ''}`);
         return JSON.stringify({
-            status: 'success',
-            message: `Here's your invoice: [📄 Download ${invoiceNum}.pdf](http://localhost:3001/api/pdf/invoice/${invoiceNum})`,
-            pdfLink: `http://localhost:3001/api/pdf/invoice/${invoiceNum}`,
+            status: 'sent',
+            // The PDF is delivered as a separate WhatsApp document message. Keep
+            // the text reply short and point the client at the attached file.
+            message: `Sent invoice ${invoiceNum} through as a PDF — check the attachment just above. Confirm to the user it's been sent; do NOT include any link.`,
         });
     },
 };

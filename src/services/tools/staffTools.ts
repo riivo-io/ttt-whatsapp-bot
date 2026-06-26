@@ -532,16 +532,20 @@ const sendInvoicePdf: ToolEntry = {
         }
         if (!clientFullname && details?.fullname) clientFullname = details.fullname;
 
-        // 3. Fetch the invoice and generate the PDF.
+        // 3. Fetch the invoice and render the OFFICIAL PDF via the external
+        //    invoice-gen function (same document the client gets at issue time).
         const invoice = await ctx.deps.dynamics.getInvoiceByNumber(invoiceNum);
-        if (!invoice) {
+        if (!invoice || !invoice.recordId) {
             return JSON.stringify({ status: 'invoice_not_found', message: `Invoice ${invoiceNum} could not be found in the CRM. Nothing was sent.` });
         }
-        let pdfBuffer: Buffer;
+        let pdfBuffer: Buffer | null;
         try {
-            pdfBuffer = await ctx.deps.pdf.generateInvoicePdf(invoice);
+            pdfBuffer = await ctx.deps.pdf.generateInvoicePdf(invoice.recordId);
         } catch (err: any) {
             console.error('[send_invoice_pdf] PDF generation failed:', err?.message || err);
+            pdfBuffer = null;
+        }
+        if (!pdfBuffer) {
             return JSON.stringify({ status: 'send_failed', message: `PDF generation failed for invoice ${invoiceNum}. Nothing was sent. Please try again.` });
         }
 
@@ -569,7 +573,6 @@ const sendInvoicePdf: ToolEntry = {
         // 6. Log the send to the client's Contact timeline.
         await ctx.deps.dynamics.logInvoiceSentToContact(clientId, invoiceNum, ctx.contactId);
 
-        const pdfPreviewUrl = `http://localhost:3001/api/pdf/invoice/${invoiceNum}`;
         return JSON.stringify({
             status: 'sent',
             invoice_number: invoiceNum,
@@ -577,9 +580,8 @@ const sendInvoicePdf: ToolEntry = {
             client_phone: clientPhone,
             whatsapp_caption: caption,
             dry_run: Boolean(sendResult.dryRun),
-            pdf_preview_url: pdfPreviewUrl,
             message: sendResult.dryRun
-                ? `TEST MODE — no real WhatsApp message was sent. Confirm to the staff that:\n- Invoice ${invoiceNum} has been "sent" to ${clientFullname || 'the client'}.\n- It would have been delivered to: ${clientPhone}\n- PDF preview link: ${pdfPreviewUrl}\n- The caption that would accompany the PDF reads: "${caption}"\nMention all four lines (client name + phone + preview link + caption) verbatim so the staff can verify targeting, content, and message wording.`
+                ? `TEST MODE — no real WhatsApp message was sent. Confirm to the staff that:\n- Invoice ${invoiceNum} has been "sent" to ${clientFullname || 'the client'}.\n- It would have been delivered to: ${clientPhone}\n- The caption that would accompany the PDF reads: "${caption}"\nMention all three lines (client name + phone + caption) verbatim so the staff can verify targeting and message wording.`
                 : `Invoice ${invoiceNum} has been sent to ${clientFullname || 'the client'} via WhatsApp.`,
         });
     },

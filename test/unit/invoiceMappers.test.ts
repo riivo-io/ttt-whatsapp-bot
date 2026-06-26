@@ -1,32 +1,23 @@
 /**
- * Characterization tests for the two invoice mappers that sit on the consumer
- * side of the Dynamics seam:
- *   - mapInvoiceToInvoiceData  (pdf.service)      — getInvoiceByNumber -> InvoiceData
+ * Characterization test for the invoice-gen payload mapper on the consumer side
+ * of the Dynamics seam:
  *   - buildInvoiceGenPayload   (invoiceGen.service) — getInvoiceById + line items -> API payload
  *
- * These lock the EXACT output of both mappers so the candidate-1 refactor
- * (raw OData rows -> domain Invoice type, mappers consume the domain type) can
- * be proven behaviour-preserving. The fixtures are representative raw OData
- * rows; the expected literals are the current production output.
+ * Locks the EXACT output so the raw OData row -> domain Invoice mapping stays
+ * behaviour-preserving. The fixtures are representative raw OData rows; the
+ * expected literals are the current production output.
  *
- * Post-refactor the inputs are routed through the pure raw->domain mappers in
- * src/domain/invoice.ts, but the expected literals stay byte-for-byte identical.
+ * Inputs are routed through the pure raw->domain mappers in
+ * src/domain/invoice.ts.
  *
  * Run: npm test
  */
 
-// Determinism: mapInvoiceToInvoiceData formats createdon via toLocaleDateString,
-// which is timezone-sensitive. Pin TZ before any Date use so the rendered date
-// is stable regardless of where the suite runs.
-process.env.TZ = 'Africa/Johannesburg';
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mapInvoiceToInvoiceData } from '../../src/services/pdf.service';
 import { buildInvoiceGenPayload } from '../../src/services/invoiceGen.service';
 import {
-    invoiceFromByNumberRow,
     invoiceFromByIdRow,
     lineItemFromRow,
 } from '../../src/domain/invoice';
@@ -34,69 +25,6 @@ import {
 // ---------------------------------------------------------------------------
 // Fixtures — representative RAW OData rows
 // ---------------------------------------------------------------------------
-
-// getInvoiceByNumber shape (no annotation header — icon_* are raw values).
-const rawByNumber = {
-    new_name: 'Jules Test - INV522385182',
-    createdon: '2026-06-11T12:00:00Z',
-    riivo_consultantfullname: 'Sarah Consultant',
-    riivo_customerfullname: 'Jules Customer',
-    riivo_customerstreet: '12 Main Rd',
-    riivo_customersuburb: 'Claremont',
-    riivo_customerprovince: 'Western Cape',
-    riivo_customercity: 'Cape Town',
-    riivo_customercountry: 'South Africa',
-    riivo_customerponumber: '7708',
-    riivo_customervatnumber: 'VAT123',
-    riivo_consultantcompany: 'TTT Financial Group',
-    riivo_consultantstreet: '1 Office Park',
-    riivo_consultantsuburb: 'Sandton',
-    riivo_consultantprovince: 'Gauteng',
-    riivo_consultantcity: 'Johannesburg',
-    riivo_consultantcountry: 'South Africa',
-    riivo_consultantponumber: '2196',
-    riivo_consultantvatnumber: 'VAT999',
-    ttt_sarsreimbursement: 1000,
-    ttt_totalwithinterest: 1150,
-    riivo_vattotal: 150,
-    riivo_totalinclvat: 1150,
-    icon_accountholdername: 'TTT Financial Group',
-    icon_bank: 100000001,
-    icon_accountnumber: '1234567890',
-    icon_accounttype: 100000002,
-    icon_branchnumber: '250655',
-};
-
-const expectedInvoiceData = {
-    invoiceNumber: 'Jules Test - INV522385182',
-    invoiceDate: '11 Jun 2026',
-    consultantName: 'Sarah Consultant',
-    customerFullname: 'Jules Customer',
-    customerStreet: '12 Main Rd',
-    customerSuburb: 'Claremont',
-    customerProvince: 'Western Cape',
-    customerCity: 'Cape Town',
-    customerCountry: 'South Africa',
-    customerPostalCode: '7708',
-    customerVatNumber: 'VAT123',
-    consultantCompany: 'TTT Financial Group',
-    consultantStreet: '1 Office Park',
-    consultantSuburb: 'Sandton',
-    consultantProvince: 'Gauteng',
-    consultantCity: 'Johannesburg',
-    consultantCountry: 'South Africa',
-    consultantPostalCode: '2196',
-    consultantVatNumber: 'VAT999',
-    sarsReimbursement: 1000,
-    subtotal: 1150,
-    vatAmount: 150,
-    totalInclVat: 1150,
-    accountHolderName: 'TTT Financial Group',
-    bankName: 100000001,
-    accountNumber: '1234567890',
-    accountType: 100000002,
-    branchNumber: '250655',
-};
 
 // getInvoiceById shape (annotation header on — option sets carry @FormattedValue).
 const rawByIdTax = {
@@ -199,11 +127,6 @@ const expectedAccountingBanking = {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-test('mapInvoiceToInvoiceData: raw byNumber row -> InvoiceData (via domain Invoice)', () => {
-    const out = mapInvoiceToInvoiceData(invoiceFromByNumberRow(rawByNumber));
-    assert.deepStrictEqual(out, expectedInvoiceData);
-});
 
 test('buildInvoiceGenPayload: tax invoice -> consultant banking + discounted totals', () => {
     const out = buildInvoiceGenPayload(

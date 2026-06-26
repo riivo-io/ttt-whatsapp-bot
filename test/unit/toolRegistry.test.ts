@@ -1000,12 +1000,40 @@ test('get_industries: no_match echoes "(no filter)" when called without a filter
 // get_invoice_pdf handler
 // ---------------------------------------------------------------------------
 
-test('get_invoice_pdf: returns a download link on success', async () => {
-    const ctx = buildCtx({ deps: { dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ invoicenumber: 'INV123' }) }) } });
+test('get_invoice_pdf: renders the official PDF and sends it to the caller as a WhatsApp document', async () => {
+    let sentTo: string | null = null;
+    let sentName: string | null = null;
+    let renderedRecordId: string | null = null;
+    const ctx = buildCtx({
+        phoneNumber: '+27820001234',
+        deps: {
+            dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }) }),
+            pdf: fakePdf({ generateInvoicePdf: async (recordId) => { renderedRecordId = recordId; return Buffer.from('pdf'); } }),
+            meta: fakeMeta({ sendDocument: async (to, _buf, name) => { sentTo = to; sentName = name; return { delivered: true, dryRun: false }; } }),
+        },
+    });
     const payload = JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV123' }, ctx));
-    assert.equal(payload.status, 'success');
-    assert.equal(payload.pdfLink, 'http://localhost:3001/api/pdf/invoice/INV123');
-    assert.ok(payload.message.includes("Here's your invoice:"));
+    assert.equal(payload.status, 'sent');
+    assert.equal(renderedRecordId, 'inv-guid-1');
+    assert.equal(sentTo, '+27820001234');
+    assert.equal(sentName, 'INV123.pdf');
+    // No link should ever be handed to the client.
+    assert.equal(payload.pdfLink, undefined);
+    assert.ok(!/http/.test(payload.message), `message must not contain a link: ${payload.message}`);
+});
+
+test('get_invoice_pdf: a failed generation returns an error and sends nothing', async () => {
+    let sent = false;
+    const ctx = buildCtx({
+        deps: {
+            dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }) }),
+            pdf: fakePdf({ generateInvoicePdf: async () => null }),
+            meta: fakeMeta({ sendDocument: async () => { sent = true; return { delivered: true, dryRun: false }; } }),
+        },
+    });
+    const payload = JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV123' }, ctx));
+    assert.equal(payload.status, 'error');
+    assert.equal(sent, false);
 });
 
 test('get_invoice_pdf: returns not-found error when the invoice is missing', async () => {
@@ -1021,9 +1049,9 @@ test('get_invoice_pdf: staff need the send_invoice_pdf permission', async () => 
         entityType: 'user',
         ownerFilter: 'staff-1',
         permittedToolKeys: ['send_invoice_pdf'],
-        deps: { dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ invoicenumber: 'INV1' }) }) },
+        deps: { dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV1' }) }) },
     });
-    assert.equal(JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV1' }, allowed)).status, 'success');
+    assert.equal(JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV1' }, allowed)).status, 'sent');
 });
 
 // ---------------------------------------------------------------------------
@@ -1517,12 +1545,12 @@ test('send_invoice_pdf: success resolves the client, renders + sends the PDF, an
         {
             searchContactByName: async () => [{ contactid: 'c-9', fullname: 'Jules Customer', mobilephone: '+27820001111' }],
             getContactDetails: async () => ({ mobilephone: '+27820001111', fullname: 'Jules Customer' }),
-            getInvoiceByNumber: async () => ({ invoicenumber: 'INV123' }),
+            getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }),
             logInvoiceSentToContact: async () => { logged = true; return { success: true }; },
         },
         {
             meta: fakeMeta({ sendDocument: async (to) => { sentTo = to; return { delivered: true, dryRun: false }; } }),
-            pdf: fakePdf({ generateInvoicePdf: async (row) => { renderedRow = row; return Buffer.from('pdf'); } }),
+            pdf: fakePdf({ generateInvoicePdf: async (recordId) => { renderedRow = recordId; return Buffer.from('pdf'); } }),
         },
     );
     const payload = JSON.parse(await runTool('send_invoice_pdf', { invoice_number: 'INV123', client: 'Jules' }, ctx));
@@ -1530,7 +1558,7 @@ test('send_invoice_pdf: success resolves the client, renders + sends the PDF, an
     assert.equal(payload.invoice_number, 'INV123');
     assert.equal(sentTo, '+27820001111');
     assert.equal(logged, true);
-    assert.deepStrictEqual(renderedRow, { invoicenumber: 'INV123' });
+    assert.equal(renderedRow, 'inv-guid-1');
     assert.ok(payload.whatsapp_caption.includes('Sam Staff from TTT'));
 });
 
@@ -1541,7 +1569,7 @@ test('send_invoice_pdf: dry-run reports TEST MODE and still logs the audit trail
         {
             searchContactByName: async () => [{ contactid: 'c-9', fullname: 'Jules', mobilephone: '+27820001111' }],
             getContactDetails: async () => ({ mobilephone: '+27820001111', fullname: 'Jules' }),
-            getInvoiceByNumber: async () => ({ invoicenumber: 'INV123' }),
+            getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }),
             logInvoiceSentToContact: async () => { logged = true; return { success: true }; },
         },
         { meta: fakeMeta({ sendDocument: async () => ({ delivered: false, dryRun: true }) }) },

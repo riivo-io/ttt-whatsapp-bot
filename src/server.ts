@@ -3,7 +3,6 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { handleIncomingMessage, verifyWebhook } from './controllers/webhook.controller';
-import pdfRoute from './routes/pdf.route';
 import cronRoute from './routes/cron.route';
 import emailRoute from './routes/email.route';
 import loeSignedRoute from './routes/loeSigned.route';
@@ -34,7 +33,6 @@ app.get('/health', (req, res) => {
 app.get('/webhook', verifyWebhook);
 app.post('/webhook', handleIncomingMessage);
 
-app.use('/api/pdf', pdfRoute);
 app.use('/api/cron', cronRoute);
 app.use('/admin', adminRoute);
 app.use('/webhook/email', emailRoute);
@@ -42,7 +40,6 @@ app.use('/webhook/email', emailRoute);
 const server = app.listen(PORT, () => {
     console.log(`🚀 TTT WhatsApp Tax Bot server running on port ${PORT}`);
     console.log(`📱 Webhook endpoint: http://localhost:${PORT}/webhook`);
-    console.log(`📄 PDF downloads:   http://localhost:${PORT}/api/pdf`);
     console.log(`📧 Email webhook:   http://localhost:${PORT}/webhook/email`);
 });
 

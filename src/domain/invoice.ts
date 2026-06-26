@@ -6,8 +6,8 @@
  * integers (riivo_invoicetype === 100000000), `_value` lookup fields
  * (_ownerid_value), and `@OData.Community.Display.V1.FormattedValue`
  * annotations — are resolved inside the pure mappers below, so consumers
- * (pdf.service, invoiceGen.service, whatsappProcessor) never see a raw field
- * name.
+ * (invoiceGen.service, invoicePdf.service, whatsappProcessor) never see a raw
+ * field name.
  *
  * This module has NO side-effecting imports (no axios / msal / env), so the
  * mappers are unit-testable in isolation.
@@ -61,7 +61,7 @@ export interface InvoiceLineItem {
 }
 
 export interface Invoice {
-    recordId: string;            // new_invoicesid (byId path only)
+    recordId: string;            // new_invoicesid (byId + byNumber paths)
     invoiceNumber: string;       // new_name
     invoiceId: string;           // ttt_invoiceid (byId path only)
     createdOn: string | null;    // createdon
@@ -103,13 +103,12 @@ const EMPTY_TERMS: InvoiceInterestTerms = { days30: '', days60: '', days90: '' }
 
 /**
  * Map a getInvoiceByNumber row (no annotation header — icon_* are raw values)
- * into a domain Invoice. Preserves the exact `|| ''` / `|| 0` defaulting the
- * old pdf.service mapper applied, including keeping raw numeric option-set
- * values on the banking block.
+ * into a domain Invoice. Keeps the `|| ''` / `|| 0` defaulting and the raw
+ * numeric option-set values on the banking block.
  */
 export function invoiceFromByNumberRow(row: any): Invoice {
     return {
-        recordId: '',
+        recordId: str(row.new_invoicesid),
         invoiceNumber: row.new_name,
         invoiceId: '',
         createdOn: row.createdon ?? null,
