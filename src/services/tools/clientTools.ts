@@ -773,7 +773,10 @@ const saveDocument: ToolEntry = {
         },
         required: ['doc_type'],
     },
-    roles: ['client', 'user', 'lead'],
+    // Clients never reach this tool: their uploads are filed deterministically in
+    // the processor (whatsappProcessor.ts), which clears the staged file before the
+    // LLM runs (ADR 0002). Only staff and leads classify-then-save via the LLM.
+    roles: ['user', 'lead'],
     async handle(args: unknown, ctx: ToolContext): Promise<string> {
         const a = (args ?? {}) as { doc_type?: string; client?: string; notes?: string };
         if (!ctx.pendingUpload.has()) {
@@ -816,7 +819,10 @@ const uploadIrp5: ToolEntry = {
         },
         required: ['confirmed_by_user'],
     },
-    roles: ['client', 'lead'],
+    // Client IRP5 uploads are handled deterministically in the processor
+    // (processClientIrp5Upload), which files the cert and clears the staged file
+    // before the LLM runs (ADR 0002). Only State-B leads fast-track an IRP5 here.
+    roles: ['lead'],
     async handle(args: unknown, ctx: ToolContext): Promise<string> {
         const a = (args ?? {}) as { confirmed_by_user?: boolean };
         const phone = ctx.phoneNumber || undefined;

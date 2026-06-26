@@ -213,11 +213,13 @@ test('deriveOfferedTools: client gets every read-only client tool, ungated by pe
             'mark_document_already_sent',
             'opt_out_whatsapp',
             'request_consultant_callback',
-            'save_document',
             'send_tax_form',
-            'upload_irp5',
         ],
     );
+    // save_document and upload_irp5 are deliberately NOT offered to clients:
+    // client uploads are filed deterministically in the processor (ADR 0002),
+    // which clears the staged file before the LLM runs, so a client can never
+    // usefully classify-then-save via a tool. Staff and leads still get them.
 });
 
 test('deriveOfferedTools: staff get only the permission-matched registry tools', () => {
@@ -1215,24 +1217,30 @@ test('opt_out_whatsapp: failure returns an error', async () => {
 // ---------------------------------------------------------------------------
 
 test('save_document: no pending upload returns an error', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => false }) });
+    const ctx = buildCtx({ entityType: 'lead', pendingUpload: fakePendingUpload({ has: () => false }) });
     const payload = JSON.parse(await runTool('save_document', { doc_type: 'IRP5' }, ctx));
     assert.equal(payload.status, 'error');
     assert.ok(payload.message.includes('No pending document upload found'));
 });
 
-test('save_document: client saves to their own profile and flags the session', async () => {
+test('save_document: a client is denied — uploads are auto-filed in the processor (ADR 0002)', async () => {
+    // Clients are not in save_document's roles. Their uploads are filed
+    // deterministically in the processor, which clears the staged file before the
+    // LLM runs, so the dispatch gate denies any client attempt to classify-then-save.
+    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => true }) });
+    assert.equal(await runTool('save_document', { doc_type: 'Payslip' }, ctx), DENIED);
+});
+
+test('save_document: a lead saves to their own lead record', async () => {
     let savedEntity: any = null;
-    let flagged = false;
     const ctx = buildCtx({
+        entityType: 'lead',
         pendingUpload: fakePendingUpload({ has: () => true, save: async (_d, e) => { savedEntity = e; return { success: true, fileName: 'f.pdf' }; } }),
-        deps: { supabase: fakeSupabase({ flagSessionDocUpload: async () => { flagged = true; } }) },
     });
     const payload = JSON.parse(await runTool('save_document', { doc_type: 'Payslip' }, ctx));
     assert.equal(payload.status, 'success');
     assert.equal(payload.message, 'Your payslip has been saved to your profile.');
-    assert.deepStrictEqual(savedEntity, { id: 'contact-1', type: 'client' });
-    assert.equal(flagged, true);
+    assert.deepStrictEqual(savedEntity, { id: 'contact-1', type: 'lead' });
 });
 
 test('save_document: staff with no resolvable client returns the could-not-determine error', async () => {
@@ -1248,7 +1256,7 @@ test('save_document: staff with no resolvable client returns the could-not-deter
 });
 
 test('save_document: save failure returns the retry error', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => true, save: async () => ({ success: false }) }) });
+    const ctx = buildCtx({ entityType: 'lead', pendingUpload: fakePendingUpload({ has: () => true, save: async () => ({ success: false }) }) });
     const payload = JSON.parse(await runTool('save_document', { doc_type: 'Logbook' }, ctx));
     assert.equal(payload.status, 'error');
     assert.ok(payload.message.includes('Failed to save the document'));
@@ -1259,51 +1267,25 @@ test('save_document: save failure returns the retry error', async () => {
 // ---------------------------------------------------------------------------
 
 test('upload_irp5: not confirmed returns not_confirmed', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => true }) });
+    const ctx = buildCtx({ entityType: 'lead', isStateBLeadUpload: true, pendingUpload: fakePendingUpload({ has: () => true }) });
     const payload = JSON.parse(await runTool('upload_irp5', { confirmed_by_user: false }, ctx));
     assert.equal(payload.error, 'not_confirmed');
 });
 
 test('upload_irp5: no staged file returns no_pending_upload', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ peek: () => null }) });
+    const ctx = buildCtx({ entityType: 'lead', isStateBLeadUpload: true, pendingUpload: fakePendingUpload({ peek: () => null }) });
     const payload = JSON.parse(await runTool('upload_irp5', { confirmed_by_user: true }, ctx));
     assert.equal(payload.error, 'no_pending_upload');
 });
 
-test('upload_irp5: client success clears the upload, flags the session, and renders the list', async () => {
-    let cleared = false;
-    let flagged = false;
+test('upload_irp5: a client is denied — IRP5 uploads are auto-processed in the processor (ADR 0002)', async () => {
+    // Client IRP5 uploads are handled deterministically (processClientIrp5Upload)
+    // in the processor before the LLM runs, so a client is not in upload_irp5's
+    // roles and the dispatch gate denies the call. Only State-B leads fast-track here.
     const ctx = buildCtx({
-        pendingUpload: fakePendingUpload({
-            peek: () => ({ fileName: 'irp5.pdf', mimeType: 'application/pdf', buffer: Buffer.from('x') }),
-            clear: () => { cleared = true; },
-        }),
-        deps: {
-            dynamics: fakeDynamics({ getContactDetails: async () => ({ fullname: 'Jules Customer' }) }),
-            supabase: fakeSupabase({ flagSessionDocUpload: async () => { flagged = true; } }),
-            irp5: fakeIrp5({
-                processClientIrp5Upload: async () => ({
-                    status: 'irp5_processed',
-                    employerName: 'Acme',
-                    assessmentYear: 2026,
-                    certificateNumber: 'C1',
-                    sourceCodes: ['3601'],
-                    irp5RecordId: 'r1',
-                    irp5Updated: false,
-                    taxsubmissionsdocumentId: 't1',
-                    sharepointUrl: 'http://sp',
-                    wrongYearWarning: undefined,
-                    outstanding: [],
-                }),
-            }),
-        },
+        pendingUpload: fakePendingUpload({ peek: () => ({ fileName: 'irp5.pdf', mimeType: 'application/pdf', buffer: Buffer.from('x') }) }),
     });
-    const payload = JSON.parse(await runTool('upload_irp5', { confirmed_by_user: true }, ctx));
-    assert.equal(payload.status, 'irp5_processed');
-    assert.equal(payload.employer_name, 'Acme');
-    assert.ok(payload.message.includes('Acme'));
-    assert.equal(cleared, true);
-    assert.equal(flagged, true);
+    assert.equal(await runTool('upload_irp5', { confirmed_by_user: true }, ctx), DENIED);
 });
 
 test('upload_irp5: State-B lead routes to the lead pipeline (no contact lookup)', async () => {
