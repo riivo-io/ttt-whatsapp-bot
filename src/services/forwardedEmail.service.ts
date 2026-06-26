@@ -11,13 +11,22 @@ export interface ParsedForwardedEmail {
     subject: string | null;
 }
 
-// Markers that signal "the forwarded content starts here." The earliest
-// occurrence in the body wins. Patterns are tolerant — Outlook, Gmail, Apple
+// Banner-style markers that signal "the forwarded content starts here." These
+// sit ABOVE the forwarded headers, so once one matches we slice PAST it to get
+// at the "From:" line beneath. Patterns are tolerant — Outlook, Gmail, Apple
 // Mail, and Office 365 web all wrap forwards differently.
-const FORWARD_MARKERS: RegExp[] = [
+const BANNER_MARKERS: RegExp[] = [
     /^[ \t>]*-{2,}\s*Forwarded message\s*-{2,}/im,
     /^[ \t>]*Begin forwarded message\s*:?\s*$/im,
     /^[ \t>]*-{2,}\s*Original Message\s*-{2,}/im,
+];
+
+// "From:"-style markers. These ARE the original sender's header line — when one
+// of these is the earliest marker (no banner above it, which is how Outlook
+// inline-forwards look) we must slice from the START of the match, not past it.
+// Slicing past it would land the extractor on the NEXT "From:" line down the
+// thread — i.e. the consultant's own reply — and relay to the wrong person.
+const FROM_MARKERS: RegExp[] = [
     /^[ \t>]*From\s*:\s*.+?\s*<[^>]+@[^>]+>\s*$/im,
     /^[ \t>]*De\s*:\s*.+?\s*<[^>]+@[^>]+>\s*$/im,
     /^[ \t>]*Van\s*:\s*.+?\s*<[^>]+@[^>]+>\s*$/im,
@@ -78,6 +87,31 @@ function findFirstMarkerIndex(text: string, markers: RegExp[]): { index: number;
 }
 
 /**
+ * Locate the start of the forwarded region. Whichever of the two marker
+ * families matches earliest wins:
+ *   - A banner marker ("----- Forwarded message -----") sits above the headers,
+ *     so we slice PAST it (`matchEnd`) to reach the "From:" line beneath.
+ *   - A "From:" marker IS the original sender's header, so we slice from its
+ *     START (`index`) so the From-line extractor reads that very line — not the
+ *     next message down the thread.
+ * Returns -1 if neither family matches.
+ */
+function findForwardedRegionStart(body: string): number {
+    const banner = findFirstMarkerIndex(body, BANNER_MARKERS);
+    const from = findFirstMarkerIndex(body, FROM_MARKERS);
+
+    if (banner.index === -1 && from.index === -1) return -1;
+
+    // Banner wins only if it's strictly above the first From: line. (When a
+    // banner precedes the headers, the From: line lives inside the banner's
+    // trailing region anyway, so slicing past the banner still finds it.)
+    const bannerWins =
+        banner.index !== -1 && (from.index === -1 || banner.index < from.index);
+
+    return bannerWins ? banner.matchEnd : from.index;
+}
+
+/**
  * Parse a Microsoft Graph message that should be a forwarded email.
  * Returns null if we can't extract the original sender's email — caller
  * is expected to handle that by emailing the forwarder asking for the
@@ -106,8 +140,8 @@ export function parseForwarded(message: GraphMessage): ParsedForwardedEmail | nu
     // Locate the forwarded section. If we don't find any marker, treat the
     // whole body as the original message (rare — usually means the staff
     // member typed something that looked like a forward but technically isn't).
-    const marker = findFirstMarkerIndex(body, FORWARD_MARKERS);
-    const forwardedRegion = marker.index >= 0 ? body.slice(marker.matchEnd) : body;
+    const regionStart = findForwardedRegionStart(body);
+    const forwardedRegion = regionStart >= 0 ? body.slice(regionStart) : body;
 
     // Inside the forwarded region, find the From: line. The first match wins.
     const fromMatch = FROM_LINE_REGEX.exec(forwardedRegion);
@@ -170,4 +204,76 @@ function buildResult(
         forwarderName,
         subject: resolvedSubject,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Forwarder round-trip: parsing a consultant's reply for the client's details
+// ---------------------------------------------------------------------------
+
+const EMAIL_REGEX = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
+// Loose phone matcher: a run starting with an optional + then 9+ digits, with
+// spaces / dots / dashes / parens allowed between them. Trimmed and validated
+// by digit-count afterwards.
+const PHONE_REGEX = /\+?\d[\d\s().-]{7,}\d/g;
+
+export interface ForwarderReplyIdentifiers {
+    emails: string[];
+    phones: string[];
+}
+
+/**
+ * Return just the consultant's freshly-typed text from a reply — everything
+ * ABOVE the first quoted-thread marker. We only want what they wrote back to
+ * us ("her number is 082..."), not the email addresses littered through the
+ * quoted history below.
+ */
+export function freshReplyText(message: GraphMessage): string {
+    let body = message.body?.content || '';
+    if (message.body?.contentType === 'html') {
+        body = stripHtml(body);
+    }
+    const cutoffs = [
+        findForwardedRegionStart(body),
+        findFirstMarkerIndex(body, REPLY_QUOTE_MARKERS).index,
+    ].filter(i => i >= 0);
+    if (cutoffs.length === 0) return body;
+    return body.slice(0, Math.min(...cutoffs));
+}
+
+/**
+ * Pull candidate client identifiers (emails and phone numbers) out of a
+ * consultant's reply. `exclude` is a list of addresses to ignore — the
+ * forwarder's own address and tina-bot's mailbox — so we don't treat the
+ * consultant's signature email as the client's. Phones are normalised to
+ * digits (leading + preserved) so the CRM phone lookup can match its variants.
+ */
+export function extractForwarderReplyIdentifiers(
+    message: GraphMessage,
+    exclude: string[] = []
+): ForwarderReplyIdentifiers {
+    const text = freshReplyText(message);
+    const excludeSet = new Set(exclude.map(e => e.toLowerCase().trim()).filter(Boolean));
+
+    const emails = Array.from(
+        new Set((text.match(EMAIL_REGEX) || []).map(e => e.toLowerCase().trim()))
+    ).filter(e => !excludeSet.has(e));
+
+    const phones = Array.from(
+        new Set(
+            (text.match(PHONE_REGEX) || [])
+                .map(raw => {
+                    const hasPlus = raw.trim().startsWith('+');
+                    const digits = raw.replace(/\D/g, '');
+                    return hasPlus ? '+' + digits : digits;
+                })
+                // SA numbers land in 9–13 digits once normalised; this also
+                // filters out stray years / reference numbers in signatures.
+                .filter(p => {
+                    const d = p.replace(/\D/g, '');
+                    return d.length >= 9 && d.length <= 13;
+                })
+        )
+    );
+
+    return { emails, phones };
 }
