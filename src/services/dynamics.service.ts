@@ -639,13 +639,15 @@ export class DynamicsService {
     }
 
     /**
-     * Look up by email across contacts, leads, and systemusers — used by the
-     * email-relay flow (TTT staff forwards a client email to tina-bot@; we
-     * need to find that client's WhatsApp number).
+     * Look up by email across contacts and leads — used by the email-relay
+     * flow (TTT staff forwards a client email to tina-bot@; we need to find
+     * that client's WhatsApp number).
      *
-     * Same priority as getContactByPhone: user > client > lead. Returns the
-     * mobile number alongside the entity so the caller doesn't need a second
-     * round-trip. Returns null if no match.
+     * Deliberately does NOT search systemusers: the relay must never resolve a
+     * forwarded thread to a staff member and WhatsApp the consultant instead of
+     * the client. Priority: client > lead. Returns the mobile number alongside
+     * the entity so the caller doesn't need a second round-trip. Null if no
+     * match.
      */
     async getEntityByEmail(email: string): Promise<any | null> {
         const normalized = email.trim().toLowerCase();
@@ -655,9 +657,7 @@ export class DynamicsService {
         // but `eq` on string columns is already case-insensitive — so a plain
         // equality match handles "Foo@bar.com" vs. "foo@bar.com" correctly.
         const odataEmail = normalized.replace(/'/g, "''");
-        // Staff resolution gated behind STAFF_MODE_ENABLED — see getContactByPhone.
-        const staffModeEnabled = process.env.STAFF_MODE_ENABLED === 'true';
-        const [contact, lead, user] = await Promise.all([
+        const [contact, lead] = await Promise.all([
             this.searchEntity(
                 'contacts',
                 `emailaddress1 eq '${odataEmail}' and statecode eq 0`,
@@ -668,29 +668,13 @@ export class DynamicsService {
                 `ttt_email eq '${odataEmail}' and statecode eq 0`,
                 ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             ),
-            staffModeEnabled
-                ? this.searchEntity(
-                    'systemusers',
-                    `internalemailaddress eq '${odataEmail}' and isdisabled eq false`,
-                    ['systemuserid', 'fullname', 'mobilephone', 'internalemailaddress']
-                )
-                : Promise.resolve(null),
         ]);
 
-        const matches = [contact ? 'client' : null, lead ? 'lead' : null, user ? 'user' : null].filter(Boolean);
+        const matches = [contact ? 'client' : null, lead ? 'lead' : null].filter(Boolean);
         if (matches.length > 1) {
-            console.warn(`[Dynamics CRM] Email ${normalized} found in MULTIPLE tables: ${matches.join(', ')}. Using priority: user > client > lead.`);
+            console.warn(`[Dynamics CRM] Email ${normalized} found in MULTIPLE tables: ${matches.join(', ')}. Using priority: client > lead.`);
         }
 
-        if (user) {
-            return {
-                id: user.systemuserid,
-                type: 'user',
-                fullname: user.fullname,
-                email: user.internalemailaddress || normalized,
-                mobilephone: user.mobilephone || null,
-            };
-        }
         if (contact) {
             return {
                 id: contact.contactid,
@@ -708,6 +692,61 @@ export class DynamicsService {
                 fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
                 email: lead.ttt_email || normalized,
                 mobilephone: lead.ttt_mobilephone || null,
+                loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
+                otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
+                leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
+            };
+        }
+
+        return null;
+    }
+
+    /**
+     * Look up by mobile number across contacts and leads — the phone-based twin
+     * of getEntityByEmail, used by the email-relay round-trip when a consultant
+     * replies with the client's number rather than their email. Like
+     * getEntityByEmail it deliberately skips systemusers so a staff number can
+     * never be relayed to. Priority: client > lead. Null if no match.
+     */
+    async getEntityByPhone(phoneNumber: string): Promise<any | null> {
+        const trimmed = (phoneNumber || '').trim();
+        if (!trimmed) return null;
+
+        const [contact, lead] = await Promise.all([
+            this.searchEntity(
+                'contacts',
+                `(${this.phoneOrFilter('mobilephone', trimmed)}) and statecode eq 0`,
+                ['contactid', 'fullname', 'mobilephone', 'emailaddress1', 'riivo_whatsappoptinout']
+            ),
+            this.searchEntity(
+                'new_leads',
+                `(${this.phoneOrFilter('ttt_mobilephone', trimmed)}) and statecode eq 0`,
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+            ),
+        ]);
+
+        const matches = [contact ? 'client' : null, lead ? 'lead' : null].filter(Boolean);
+        if (matches.length > 1) {
+            console.warn(`[Dynamics CRM] Phone ${trimmed} found in MULTIPLE tables: ${matches.join(', ')}. Using priority: client > lead.`);
+        }
+
+        if (contact) {
+            return {
+                id: contact.contactid,
+                type: 'client',
+                fullname: contact.fullname,
+                email: contact.emailaddress1 || null,
+                mobilephone: contact.mobilephone || trimmed,
+                optIn: contact.riivo_whatsappoptinout,
+            };
+        }
+        if (lead) {
+            return {
+                id: lead.new_leadid,
+                type: 'lead',
+                fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                email: lead.ttt_email || null,
+                mobilephone: lead.ttt_mobilephone || trimmed,
                 loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                 otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                 leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,

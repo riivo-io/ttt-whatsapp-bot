@@ -18,6 +18,7 @@ export interface GraphMessageAddress {
 
 export interface GraphMessage {
     id: string;
+    conversationId: string | null;
     subject: string | null;
     from: GraphMessageAddress;
     toRecipients: GraphMessageAddress[];
@@ -112,7 +113,7 @@ class GraphMailService {
         try {
             const headers = await this.authedHeaders({ Prefer: 'outlook.body-content-type="text"' });
             const select = [
-                'id', 'subject', 'from', 'toRecipients', 'receivedDateTime',
+                'id', 'conversationId', 'subject', 'from', 'toRecipients', 'receivedDateTime',
                 'bodyPreview', 'body', 'internetMessageHeaders', 'hasAttachments',
             ].join(',');
             const url = `${GRAPH_BASE}${this.mailboxPath()}/messages/${encodeURIComponent(messageId)}?$select=${select}`;

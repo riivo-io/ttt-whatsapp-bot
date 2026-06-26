@@ -104,6 +104,7 @@ interface Message {
 export interface EmailRelayPendingRow {
     id: string;
     graph_message_id: string;
+    conversation_id: string | null;
     client_phone: string;
     client_crm_id: string | null;
     client_crm_type: 'client' | 'lead' | 'user' | null;
@@ -112,7 +113,7 @@ export interface EmailRelayPendingRow {
     original_sender_email: string;
     subject: string | null;
     relay_body: string;
-    status: 'awaiting_consent' | 'accepted' | 'declined' | 'expired' | 'no_match' | 'superseded';
+    status: 'awaiting_consent' | 'awaiting_forwarder' | 'accepted' | 'declined' | 'expired' | 'no_match' | 'superseded';
     template_sent_at: string | null;
     responded_at: string | null;
     expires_at: string;
@@ -1278,6 +1279,7 @@ class SupabaseService {
 
     async createEmailRelayPending(params: {
         graphMessageId: string;
+        conversationId?: string | null;
         clientPhone: string;
         clientCrmId: string | null;
         clientCrmType: 'client' | 'lead' | 'user' | null;
@@ -1286,13 +1288,15 @@ class SupabaseService {
         originalSenderEmail: string;
         subject: string | null;
         relayBody: string;
-        status?: 'awaiting_consent' | 'no_match';
+        status?: 'awaiting_consent' | 'awaiting_forwarder' | 'no_match';
         expiresAt: Date;
     }): Promise<EmailRelayPendingRow | null> {
+        const status = params.status || 'awaiting_consent';
         const { data, error } = await this.client
             .from('email_relay_pending')
             .insert({
                 graph_message_id: params.graphMessageId,
+                conversation_id: params.conversationId ?? null,
                 client_phone: params.clientPhone,
                 client_crm_id: params.clientCrmId,
                 client_crm_type: params.clientCrmType,
@@ -1301,8 +1305,11 @@ class SupabaseService {
                 original_sender_email: params.originalSenderEmail,
                 subject: params.subject,
                 relay_body: params.relayBody,
-                status: params.status || 'awaiting_consent',
-                template_sent_at: params.status === 'no_match' ? null : new Date().toISOString(),
+                status,
+                // Only the consent template counts as "sent to the client" —
+                // parked (awaiting_forwarder) and no_match rows haven't messaged
+                // anyone on WhatsApp yet.
+                template_sent_at: status === 'awaiting_consent' ? new Date().toISOString() : null,
                 expires_at: params.expiresAt.toISOString(),
             })
             .select('*')
@@ -1318,8 +1325,70 @@ class SupabaseService {
             console.error('[Supabase] Failed to insert email_relay_pending:', error.message);
             return null;
         }
-        console.log(`[Supabase] Created email_relay_pending ${data.id} for ${params.clientPhone} (${params.status || 'awaiting_consent'})`);
+        console.log(`[Supabase] Created email_relay_pending ${data.id} for ${params.clientPhone || '(no phone yet)'} (${status})`);
         return data as EmailRelayPendingRow;
+    }
+
+    /**
+     * Idempotency guard for the inbound email handler: returns the existing row
+     * for a Graph message id if we've already acted on it, regardless of status.
+     * Graph redelivers notifications, and a forwarder's reply gets its own id —
+     * so checking this up front stops us re-emailing or re-sending.
+     */
+    async getRelayByGraphMessageId(graphMessageId: string): Promise<EmailRelayPendingRow | null> {
+        const { data, error } = await this.client
+            .from('email_relay_pending')
+            .select('*')
+            .eq('graph_message_id', graphMessageId)
+            .maybeSingle();
+
+        if (error) {
+            console.error('[Supabase] getRelayByGraphMessageId error:', error.message);
+            return null;
+        }
+        return (data as EmailRelayPendingRow) || null;
+    }
+
+    /**
+     * Find the open parked request (status=awaiting_forwarder) for an email
+     * thread, so a consultant's reply can be matched back to the forward that
+     * asked them for the client's details. Most-recent wins.
+     */
+    async findOpenForwarderRequest(conversationId: string): Promise<EmailRelayPendingRow | null> {
+        if (!conversationId) return null;
+        const { data, error } = await this.client
+            .from('email_relay_pending')
+            .select('*')
+            .eq('conversation_id', conversationId)
+            .eq('status', 'awaiting_forwarder')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (error) {
+            console.error('[Supabase] findOpenForwarderRequest error:', error.message);
+            return null;
+        }
+        return (data as EmailRelayPendingRow) || null;
+    }
+
+    /**
+     * Close a parked (awaiting_forwarder) request once its thread has been
+     * resolved — either we sent the relay off the reply ('superseded') or we
+     * gave up after failing to resolve the details the consultant supplied
+     * ('no_match').
+     */
+    async closeForwarderRequest(id: string, status: 'superseded' | 'no_match'): Promise<boolean> {
+        const { error } = await this.client
+            .from('email_relay_pending')
+            .update({ status, responded_at: new Date().toISOString() })
+            .eq('id', id);
+
+        if (error) {
+            console.error(`[Supabase] Failed to close forwarder request ${id} as ${status}:`, error.message);
+            return false;
+        }
+        return true;
     }
 
     /**
