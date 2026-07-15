@@ -84,6 +84,38 @@ const CLIENT_MENU_CANONICAL_TEXT: Record<string, string> = {
 
 const CLIENT_MENU_OTHER_ACK = "Sure — what's on your mind?";
 
+// "Meet Tina" launch-campaign quick-reply buttons. A client may tap one of
+// these a day (or more) after the broadcast — long after the 30-minute session
+// and its seeded history have expired — so we cannot rely on conversation
+// memory to carry the campaign context. Instead we route on the tap itself,
+// rewriting it into a self-contained question exactly like the client menu
+// above. Keyed by the button payload when the broadcast sets one, with a
+// lowercased-title fallback for when it leaves payloads blank (Meta then
+// returns the button text as the payload).
+const CAMPAIGN_CANONICAL_TEXT: Record<string, string> = {
+    'campaign:tina-launch:tax-season':
+        'When does tax season open and close this year, and when should I get my documents to TTT?',
+    'campaign:tina-launch:ask-question': "I have a tax question I'd like to ask.",
+    'campaign:tina-launch:referral':
+        "I'm asking about TTT's refer-a-friend offer — please explain how it works and share my referral link.",
+    // Title fallbacks (match the campaign's button labels, lowercased).
+    "when's tax season":
+        'When does tax season open and close this year, and when should I get my documents to TTT?',
+    'ask tax question': "I have a tax question I'd like to ask.",
+    'ask about referral':
+        "I'm asking about TTT's refer-a-friend offer — please explain how it works and share my referral link.",
+};
+
+// Resolve a campaign quick-reply tap to its canonical question. Tries the button
+// payload first, then the (lowercased) button title. Returns null for anything
+// that isn't a known campaign button.
+function campaignCanonicalText(interactiveId?: string, text?: string): string | null {
+    const byPayload = interactiveId ? CAMPAIGN_CANONICAL_TEXT[interactiveId] : undefined;
+    if (byPayload) return byPayload;
+    const byTitle = text ? CAMPAIGN_CANONICAL_TEXT[text.trim().toLowerCase()] : undefined;
+    return byTitle || null;
+}
+
 const LOE_BUTTON_PAYLOAD = {
     SIGNED: 'loe:signed',
     LATER: 'loe:later',
@@ -794,6 +826,16 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         console.log(`[Processor] ${from} tapped ${interactiveId} → "${effectiveText}"`);
     }
 
+    // Launch-campaign quick-reply taps. These can arrive days after the
+    // broadcast, once the session + seeded history have expired, so we route on
+    // the tap rather than on conversation memory. The rewritten text then flows
+    // through the normal AI + tools + KB path, grounding the answer in context.
+    const campaignText = campaignCanonicalText(interactiveId, text);
+    if (campaignText) {
+        effectiveText = campaignText;
+        console.log(`[Processor] ${from} tapped campaign button (${interactiveId || text}) → "${effectiveText}"`);
+    }
+
     const { crmEntity, staffRoleId: initialStaffRoleId, permittedTools: initialTools } = await resolveSender(from);
 
     if (!crmEntity) {
@@ -998,14 +1040,15 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             if (result.status === 'error') {
                 ack = "Got your IRP5 but I hit a snag filing it. Please try resending in a few minutes — your consultant will follow up if it keeps failing.";
             } else {
-                // Receipt is confirmed ALWAYS (the cert is on file regardless of
-                // OCR), then the full tailored list once — never a drip, never a
-                // mention of any extraction failure (Issue 26).
+                // Receipt of the cert they just sent is confirmed ALWAYS (it's
+                // on file regardless of OCR), then the full associated-docs
+                // advice list once — never a drip, never a mention of any
+                // extraction failure (Issue 26, ADR 0004).
                 docFiled = true;
                 ack = buildIrp5ReceivedAck({
                     employerName: result.employerName,
                     assessmentYear: result.assessmentYear,
-                    outstanding: result.outstanding,
+                    associatedDocs: result.associatedDocs,
                     wrongYearWarning: result.wrongYearWarning,
                 });
             }

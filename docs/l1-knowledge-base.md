@@ -21,22 +21,20 @@ Tina handles each category directly — no proactive consultant callbacks. Hando
 
 **Definition.** Generic timing questions — when does tax season open, when does it close, when is the provisional deadline, can I still submit my [year] return.
 
-**Client self-service.** Tina answers from the evergreen cadence below. SARS publishes the exact dates in a media release each May/June; TTT refreshes this section then.
+**Client self-service.** The 2026 SARS filing dates are confirmed. Tina states them plainly — she does NOT hedge with "usually", "typically", or "SARS will confirm the exact dates soon". The answer depends on taxpayer category:
 
-| Window | Audience | Typical SARS cadence |
+| Window | Audience | 2026 dates |
 |---|---|---|
-| Auto-assessment season | Salaried, non-provisional | Early–mid July, ~3 weeks |
-| Non-provisional filing | Salaried (not auto-assessed) | ~15 July → ~20 October |
-| Provisional filing | Provisional taxpayers | ~15 July → ~20 January |
-| 1st provisional return (IRP6/01) | Provisional | by 31 August |
-| 2nd provisional return (IRP6/02) | Provisional | by 28/29 February |
-| Trust filing | Trusts | later than non-provisional; exact date varies |
-
-For 2026 specifically, defer to the dated PRDs (e.g. [PRD-delayed-feedback-prompt.md](./PRD-delayed-feedback-prompt.md)) and the SARS media release before quoting absolute dates.
+| Basic / non-provisional returns | Salaried, simple affairs | 1 July → 12 July 2026 |
+| Complex returns | Non-provisional, complex affairs | 13 July → 23 October 2026 |
+| Provisional filing | Provisional taxpayers | 13 July 2026 → 22 January 2027 |
+| 1st provisional return (IRP6/01) | Provisional | by 31 August 2026 |
+| 2nd provisional return (IRP6/02) | Provisional | by 28 February 2027 |
+| Trust filing | Trusts | follows the provisional deadline; confirm exact date if asked |
 
 **Handoff trigger.** Client asks about *their own* status against the deadline → Tina pivots to case status (§2). Client mentions an extension request, dispute, or already-missed deadline with a penalty notice → consultant.
 
-**Source of truth.** This doc. Refresh annually after SARS publishes the new season dates.
+**Source of truth.** The dedicated "When does tax season start" doc in the SharePoint KB is authoritative for the dates above — mirror it here, don't contradict it. Refresh annually after SARS publishes the new season dates.
 
 ---
 
@@ -208,7 +206,6 @@ Never output the Dynamics case GUID to the client (existing prompt rule).
 
 ## Open items for TTT to confirm
 
-- **Tax season dates** — when SARS publishes the 2026 season dates (typically May/June), refresh §1 with absolute dates if you want absolute answers vs. evergreen.
 - **Trust filing deadline** — TTT-specific guidance on the standard line.
 - **Home office CGT line** — confirm Tina should surface the primary-residence-exclusion warning at L1, or hand off whenever CGT comes up.
 - **Medical aid credit values** — confirm current tax year rand values for §5.

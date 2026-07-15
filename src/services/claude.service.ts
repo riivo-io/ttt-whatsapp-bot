@@ -16,8 +16,6 @@ import { irp5ExtractorService, inferSourceCodesFromIrp5Row } from './irp5-extrac
 import { supabaseService, BadDebtDetail } from './supabase.service';
 import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload, processClientIrp5Upload, processStateBLeadIrp5Upload } from './pendingUpload.service';
 import { sharePointService } from './sharepoint.service';
-import { computeRequiredDocuments, formatRequiredDocumentsMessage, computeMissingDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
-import { renderOutstandingDocsList } from '../domain/irp5Reply';
 import {
     TAX_FORMS,
     getAllForms,
@@ -35,7 +33,6 @@ import {
     handleGetSubmissionStatus,
     handleGetAuditStatus,
     handleGetRequiredDocuments,
-    handleGetReceivedDocuments,
 } from './taxFaq.service';
 import { buildClientRoleContext } from '../domain/clientRoleContext';
 import {
@@ -760,7 +757,6 @@ Rules for this state:
                         getRefundStatus: handleGetRefundStatus,
                         getSubmissionStatus: handleGetSubmissionStatus,
                         getAuditStatus: handleGetAuditStatus,
-                        getReceivedDocuments: handleGetReceivedDocuments,
                         getRequiredDocuments: handleGetRequiredDocuments,
                     },
                     meta: metaWhatsAppService,

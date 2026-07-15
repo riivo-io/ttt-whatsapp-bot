@@ -1,4 +1,4 @@
-import { dynamicsService, isClientStatedMarkerRow } from './dynamics.service';
+import { dynamicsService } from './dynamics.service';
 import {
     BASELINE_DOCS,
     SOURCE_CODE_DOCS,
@@ -12,9 +12,14 @@ import type { DocSpec, DocTopic, TaxYear, DocRecommendationItem } from '../domai
 /**
  * Dynamics-backed wrapper over the pure document-recommendation kernel in
  * `src/domain/docRecommendation.ts`. The kernel owns the source-code / industry
- * tables, reasons, form supersession and the diff logic (ADR 0002 deletion
- * test); this module supplies the Dynamics reads and the legacy grouped/render
- * shapes the existing tools still expect.
+ * tables, reasons and form supersession; this module supplies the Dynamics
+ * profile reads (source codes + industry) and the grouped/render shapes the
+ * tools expect.
+ *
+ * ADR 0004 (advice-only): this module reads the client's PROFILE to personalise
+ * the associated-docs list, but never reads their upload records and never
+ * diffs. Tina gives advice on what's associated with the return, never a
+ * report of what the client has or hasn't sent.
  *
  * The SA tax year runs 1 March – 28/29 February, labelled by its END year
  * (e.g. "2026 tax year" = 1 Mar 2025 – 28 Feb 2026). To revise the doc tables,
@@ -153,77 +158,60 @@ export function formatRequiredDocumentsMessage(result: RequiredDocumentsResult):
     return lines.join('\n');
 }
 
-export type MissingDocsResult = {
+export type AssociatedDocsResult = {
     taxYear: TaxYear;
-    /** Items the client still needs to send, in priority order (source-code, industry, baseline). */
-    outstanding: DocRecommendationItem[];
-    /** Items VERIFIED on file for the year — surfaced so the caller can acknowledge them. */
-    received: DocRecommendationItem[];
     /**
-     * Items the client *stated* they already sent to their consultant (Issue 27
-     * escape hatch) — suppressed from `outstanding` but NOT a verified receipt.
+     * Documents associated with the client's return, in priority order
+     * (forms, source-code, industry, baseline). Pure advice (ADR 0004) — NOT a
+     * diff against what's on file. Callers must never present it as
+     * "outstanding" or as what the client still owes.
      */
-    clientStated: DocRecommendationItem[];
+    documents: DocRecommendationItem[];
     matchedSourceCodes: string[];
     matchedIndustry: string | null;
 };
 
 /**
- * Compute the docs a specific client still owes us, given the SARS source
- * codes we've inferred for them (e.g. from a freshly-OCR'd IRP5 unioned
- * with prior IRP5s for the same year). Fetches the contact's industry and
- * the rows already in `riivo_taxsubmissionsdocuments` for the target year,
- * then delegates the expand/diff/dedupe to the pure `buildDocRecommendation`
- * kernel. Used by the IRP5 upload tool to drive the follow-up message.
+ * Compute the documents associated with a specific client's return, given the
+ * SARS source codes we've inferred for them (e.g. from a freshly-OCR'd IRP5
+ * unioned with prior IRP5s for the same year). Fetches the contact's industry
+ * to personalise, then delegates the expand/dedupe to the pure
+ * `buildDocRecommendation` kernel. Used by the IRP5 upload flow to drive the
+ * follow-up advice message.
  *
- * Forms are INCLUDED (`includeForms: true`, Issue 26): after an IRP5 upload
- * Tina presents the full tailored list once — reasons + form-supersedes-doc —
- * rather than dripping one raw doc at a time.
+ * ADR 0004 (advice-only): this does NOT read the client's upload records
+ * (`riivo_taxsubmissionsdocuments`) and does NOT diff. TTT's upload data is
+ * unreliable, so Tina gives advice on what's associated with the return and
+ * never tells the client what they have or haven't sent.
+ *
+ * Forms are INCLUDED (`includeForms: true`, Issue 26): Tina presents the full
+ * tailored list once — reasons + form-supersedes-doc — rather than dripping one
+ * raw doc at a time.
  */
-export async function computeMissingDocsForClient(
+export async function computeAssociatedDocsForClient(
     contactId: string,
     sourceCodes: string[],
     today: Date = new Date(),
-): Promise<MissingDocsResult> {
+): Promise<AssociatedDocsResult> {
     const profile = await dynamicsService.getContactTaxProfile(contactId);
     const industryName = profile?.industryName || null;
 
     // Union the caller-supplied source codes with whatever's on the contact
     // profile, so an IRP5 that doesn't redundantly carry every code already
     // flagged on the contact (e.g. retirement-only codes the consultant
-    // entered manually) still drives the correct doc asks.
+    // entered manually) still drives the correct doc advice.
     const allCodes = Array.from(new Set([...sourceCodes, ...(profile?.sourceCodes || [])]));
-
-    const taxYear = getCurrentSaTaxYear(today);
-    const uploadedRows = await dynamicsService.getTaxSubmissionDocsByClient(contactId, taxYear.label);
-
-    // Split verified uploads from the Issue 27 unverified "client states
-    // provided" markers. Verified rows count as received; markers only
-    // suppress the re-ask without being surfaced as received.
-    const rowLabel = (r: any) => (r?.riivo_taxsubmissionsdocument as string | undefined) || '';
-    const receivedLabels: string[] = uploadedRows
-        .filter((r: any) => !isClientStatedMarkerRow(r))
-        .map(rowLabel)
-        .filter((s: string) => s.length > 0);
-    const clientStatedLabels: string[] = uploadedRows
-        .filter((r: any) => isClientStatedMarkerRow(r))
-        .map(rowLabel)
-        .filter((s: string) => s.length > 0);
 
     const rec = buildDocRecommendation({
         sourceCodes: allCodes,
         industryName,
-        receivedLabels,
-        clientStatedLabels,
         today,
         includeForms: true,
     });
 
     return {
         taxYear: rec.taxYear,
-        outstanding: rec.outstanding,
-        received: rec.received,
-        clientStated: rec.clientStated,
+        documents: rec.documents,
         matchedSourceCodes: rec.matchedSourceCodes,
         matchedIndustry: rec.matchedIndustry,
     };

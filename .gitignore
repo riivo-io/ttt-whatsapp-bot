@@ -16,6 +16,8 @@ issues/done/
 
 # Agent scratch / harness state
 .agents/
+.claude/
+.scratch/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 ralph/

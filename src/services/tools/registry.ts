@@ -53,7 +53,6 @@ export interface DynamicsPort {
     createCallbackRequest(entity: { id: string; type: 'client' | 'lead' | 'user'; fullname: string } | null, phoneNumber: string, reason?: string): Promise<boolean>;
     getContactTaxProfile(contactId: string): Promise<{ sourceCodes: string[]; industryName: string | null } | null>;
     logTaxFormSentToContact(contactId: string, formLabel: string, year: number, filename: string, triggeredBy: string): Promise<{ success: boolean; annotationId?: string; error?: string }>;
-    markDocumentClientStated(params: { contactId: string; canonicalDocType: string; triggeredBy: string }): Promise<{ success: boolean; recordId?: string; taxYear: number; error?: string }>;
     // Staff write methods (slice 5).
     createCase(contactId: string, caseType: string, description: string, priority: string): Promise<any | null>;
     createLead(params: {
@@ -249,7 +248,6 @@ export interface TaxFaqPort {
     getRefundStatus(params: { contactId: string; clientName: string; clientPhone: string | null; taxYear?: number }): Promise<string>;
     getSubmissionStatus(params: { contactId: string; taxYear?: number }): Promise<string>;
     getAuditStatus(params: { contactId: string; taxYear?: number }): Promise<string>;
-    getReceivedDocuments(params: { contactId: string; taxYear?: number }): Promise<string>;
     // `topic` is the optional disclosed non-code scenario (foreign / rental
     // income, Issue 04); the union is inlined to keep the registry free of a
     // domain import. Mirrors `DocTopic` in `src/domain/docRecommendation.ts`.

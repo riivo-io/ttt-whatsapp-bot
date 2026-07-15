@@ -2285,7 +2285,7 @@ export class DynamicsService {
      * row per employer is the expected pattern — multi-job filers will have
      * several. Used by the IRP5 upload flow to (a) dedupe re-sends by
      * certificate number and (b) union source codes across all of a client's
-     * IRP5s before computing the outstanding-doc list.
+     * IRP5s before computing the associated-docs advice list.
      */
     async getIrp5RecordsForClient(contactId: string, assessmentYear: number): Promise<any[]> {
         const token = await this.getToken();

@@ -1,8 +1,15 @@
 # TTT WhatsApp Tax Bot — Architecture
 
-_Last reviewed: 2026-06-05_
+_Last reviewed: 2026-06-26_
 
-This document describes the runtime architecture of the TTT WhatsApp Tax Bot end-to-end: the HTTP surface, the queue/worker split, identity resolution, AI orchestration, the knowledge-base RAG layer, data stores, CRM mirroring, the Microsoft Graph integrations (mail relay + SharePoint), and the supporting background jobs. It is written for engineers who need to change the system; it is not a product pitch.
+This document describes the runtime architecture of the TTT WhatsApp Tax Bot end-to-end: the HTTP surface, the queue/worker split, identity resolution, AI orchestration (now a Tool registry + a pure `decide*`/`build*` domain layer), the knowledge-base RAG layer, the stateless document-collection journey, data stores, CRM mirroring, the Microsoft Graph integrations (mail relay + SharePoint), and the supporting background jobs. It is written for engineers who need to change the system; it is not a product pitch.
+
+> **What changed since 2026-06-05** (see [docs/adr/](./adr/)):
+> - **Tool dispatch is now a registry** (`src/services/tools/`, ADR 0003): one `runTool` site, 40 tools each defined once, dependencies injected through narrow Ports, and the Anthropic `TOOLS` array derived from the registry. The old ~2,000-line `if/else` dispatch in `claude.service.ts` is gone.
+> - **Per-turn decisions are pure modules** (`src/domain/`, ADR 0001): `decideCaseRouting`, `decideConversationCap`, `decideFeedbackReply`, and `buildDocRecommendation` are pure kernels the processor applies.
+> - **Document guidance is advice-only** (ADR 0004, superseding parts of ADR 0002): the old greeting-driven IRP5 ask is gone and Tina no longer reads a client's upload records or reports received / outstanding status — TTT's upload data is unreliable. She personalises *which* documents are associated with a return from the client's profile (SARS source codes + industry) and relays that as advice on what to gather; uploads still work, they're just never read back to the client.
+> - **Staff (internal "user") mode is gated behind `STAFF_MODE_ENABLED`** (default off): with it off the bot is client/lead-only and skips all `systemusers` lookups.
+> - New flows: **bad-debt** overdue-invoice nudge, **"Meet Tina" campaign** stateless button routing.
 
 ---
 
@@ -26,11 +33,13 @@ The bot is split into **two long-lived Node processes** that share a Supabase (P
         │                              │  case-auto-close      │
         │                              └───────────┬───────────┘
         │                                          │ consume
-        │                          ┌───────────────▼───────────────┐    Tool calls   ┌──────────────────┐
-        └──────────────────────────│  WORKER  (worker.ts)          │ ───────────────▶│  Anthropic       │
-                                    │  processMessage()             │ ◀───────────────│  opus-4-7 (main) │
-                                    └───┬──────┬──────┬──────┬──────┘                 │  haiku-4-5 (aux) │
-                                        │      │      │      │                        └──────────────────┘
+        │                          ┌───────────────▼────────────────────┐  runTool()  ┌──────────────────┐
+        └──────────────────────────│  WORKER  (worker.ts)               │ ───────────▶│  Anthropic       │
+                                    │  processMessage()                  │ ◀───────────│  opus-4-7 (main) │
+                                    │  ├─ domain/  pure decide*/build*   │             │  haiku-4-5 (aux) │
+                                    │  └─ services/tools/  REGISTRY      │             └──────────────────┘
+                                    └───┬──────┬──────┬──────┬───────────┘
+                                        │      │      │      │     (handlers reach services via ctx.deps Ports)
                             Supabase ◀──┘      │      │      └──▶ Microsoft Graph (mail + SharePoint)
                             (Postgres+pgvector)│      │
                                                │      └──▶ Mistral OCR (LOE/IRP5 PDFs)
@@ -52,8 +61,8 @@ The bot is split into **two long-lived Node processes** that share a Supabase (P
 - Azure Service Bus (`@azure/service-bus`) — the inbound work queue plus two delayed-job queues. See `src/queue/connection.ts`.
 - Microsoft Dynamics 365 Web API v9.2 — authoritative CRM. Auth via MSAL client credentials.
 - Anthropic Claude via `@anthropic-ai/sdk`:
-  - `claude-opus-4-7` (`CLAUDE_MODEL` in `claude.service.ts:601`) — main assistant + tool loop + intent classifier.
-  - `claude-haiku-4-5-20251001` — the case L1/escalation classifier (`CLASSIFIER_MODEL` in `case.service.ts:36`), the LOE field extractor (`loe-extractor.service.ts:45`), the IRP5 field extractor (`irp5-extractor.service.ts:49`), and the consultant close-summary.
+  - `claude-opus-4-7` (`CLAUDE_MODEL` in `claude.service.ts`) — main assistant + tool loop + intent classifier.
+  - `claude-haiku-4-5` / `claude-haiku-4-5-20251001` — the case L1/escalation classifier (`CLASSIFIER_MODEL` in `case.service.ts`), the LOE field extractor (`loe-extractor.service.ts`), the IRP5 field extractor (`irp5-extractor.service.ts`), and the consultant close-summary.
 - Mistral OCR (`mistral-ocr-latest`) — turns signed LOE / IRP5 PDFs into markdown.
 - OpenAI `text-embedding-3-small` (1536-dim) — embeds knowledge-base chunks for pgvector retrieval (`embeddings.service.ts:3`).
 - Microsoft Graph — (a) the `tina-bot@ttt-group.co.za` shared mailbox for the email-relay flow and outbound consultant emails, and (b) SharePoint for the knowledge-base corpus and tax-form templates.
@@ -67,6 +76,14 @@ The bot is split into **two long-lived Node processes** that share a Supabase (P
 src/
 ├── server.ts                          # WEB process: Express ingester (verify + ACK + enqueue)
 ├── worker.ts                          # WORKER process: starts the three queue consumers
+├── domain/                            # PURE per-turn decision modules (no I/O, no clock) — ADR 0001/0002
+│   ├── caseRouting.ts                 # decideCaseRouting() verdict
+│   ├── conversationCap.ts             # decideConversationCap() — blocked|hit|ok
+│   ├── feedbackReply.ts               # decideFeedbackReply() — Yes/No tap + history gate
+│   ├── docRecommendation.ts           # buildDocRecommendation() + BASELINE_DOCS (stateless doc journey)
+│   ├── clientRoleContext.ts           # buildClientRoleContext() prompt fragment
+│   ├── irp5Reply.ts                   # IRP5 received-ack + associated-docs advice rendering
+│   └── invoice.ts                     # mapInvoiceToInvoiceData (shared PDF mapper)
 ├── controllers/
 │   ├── webhook.controller.ts          # Meta webhook verify + thin inbound dispatch (enqueue only)
 │   └── emailRelay.controller.ts       # tina-bot mailbox → WhatsApp relay (consent flow)
@@ -88,15 +105,21 @@ src/
 │   ├── outboundNotify.route.ts        # POST /webhook/outbound-notify (HMAC) — seed outbound templates
 │   └── admin.route.ts                 # POST /admin/* (template cache refresh; CRON_SECRET auth)
 ├── services/
+│   ├── tools/                         # Tool REGISTRY — one entry per Claude tool (ADR 0003)
+│   │   ├── registry.ts               # ToolEntry type, REGISTRY map, runTool(), deriveOfferedTools(), entryAllowed(), Ports
+│   │   ├── clientTools.ts            # client/lead-facing read + action tools
+│   │   ├── staffTools.ts             # staff write/read tools (role 'user', requiredPerm gates)
+│   │   ├── leadTools.ts              # verify_identity (role 'unknown') + lead-only tools
+│   │   └── index.ts                  # assembles REGISTRY from the three modules
 │   ├── meta.service.ts                # Meta Cloud API client
-│   ├── claude.service.ts              # LLM orchestration, tool registry/dispatch, RAG injection, intent classifier
+│   ├── claude.service.ts              # LLM orchestration: builds ToolContext, single runTool dispatch, RAG injection, intent classifier (TOOLS derived from REGISTRY)
 │   ├── dynamics.service.ts            # Dynamics Web API client + all CRM writes/reads
 │   ├── supabase.service.ts            # Sessions, messages, cases, pending LOE/IRP5, audit, staff lookup, session signals
 │   ├── case.service.ts               # Case lifecycle + classifier + consultant close-summary
 │   ├── idempotency.service.ts         # Webhook dedup claim + DLQ writes + LOE-activation mutex
 │   ├── pendingUpload.service.ts       # In-memory staged WhatsApp uploads (10-min TTL)
 │   ├── requiredDocuments.service.ts   # Per-client required-docs computation (SARS codes + industry)
-│   ├── taxFaq.service.ts              # Refund / submission / audit / received-docs status (Dynamics-backed)
+│   ├── taxFaq.service.ts              # Refund / submission / audit status + required-docs advice (Dynamics-backed)
 │   ├── taxForms.service.ts            # Tax-form catalog + latest-version resolution
 │   ├── sharepoint.service.ts          # Microsoft Graph SharePoint client (KB corpus + forms + client docs)
 │   ├── knowledgeBase.service.ts       # KB ingest + pgvector retrieval (match_kb_chunks)
@@ -184,19 +207,20 @@ Deliberately thin:
 3. **Auto-reply / greeting guards.** `looksLikeAutoReply` drops out-of-office bounces (one clarification per 24h); `looksLikeGreetingOnly` is used to gate the welcome menu.
 4. **Document/image ingestion.** `downloadMedia` → buffer staged via `pendingUploadService` (10-min TTL). IRP5 uploads route to the IRP5 OCR flow (§10.2); other docs are filed to the client/lead record. A successful client doc-file sets the session's `had_doc_upload` flag (§6.7) and marks the doc case answered so the timeout sweep closes it.
 5. **Email-relay consent replies.** A `relay_yes`/`relay_no` tap is handled by `emailRelay.handleClientRelayResponse` before the AI path (§11.1).
-6. **Client menu canonicalisation** of interactive taps into canonical questions.
-7. **Identity resolution** via `resolveSender(phone)` → `{ crmEntity, staffRoleId, permittedTools }` (staff table → cached session → live Dynamics lookup; see §7).
+6. **Menu + campaign canonicalisation.** Client menu taps and the **"Meet Tina" launch-campaign quick-reply buttons** (`campaign:tina-launch:*`) are mapped to canonical questions. Campaign taps are routed **statelessly** on the tap itself (payload id or button title) — no session memory is needed, so a tap that arrives days after the broadcast still routes correctly (`campaignCanonicalText`).
+7. **Identity resolution** via `resolveSender(phone)` → `{ crmEntity, staffRoleId, permittedTools }` (cached session → live Dynamics lookup; see §7). **Staff resolution is gated behind `STAFF_MODE_ENABLED`** (default off): when off, the staff table and `systemusers` lookups are skipped entirely and every sender resolves as client / lead / unknown.
 8. **Unknown sender → sign-up** (Flow if configured, else plain link).
 9. **Session create/resume** (`getOrCreateSession`, 30-min inactivity window; backfills role/permitted_tools on resume).
-10. **Knowledge-base retrieval.** For client/lead turns, embed the message and query `match_kb_chunks` (pgvector, cosine ≥ 0.42); pass the top chunks to `claudeService.generateResponse` as `retrievedContext` (§8).
-11. **Case threading.** Resolve/create the Dynamics `riivo_request` for the turn (open request for session, or a new one if `qualifyMessage` passes).
-12. **Log incoming** to Dynamics (`logMessage`) before saving to Supabase.
-13. **Conversation cap check** (non-staff). Per-session/per-phone counters short-circuit to a warm consultant-handoff line if a cap fires. See [usage-tracking-and-caps.md](./usage-tracking-and-caps.md).
-14. **AI generation.** `generateResponse(...)` (§5), in parallel with `classifyCase` when a new case was created.
-15. **Send & persist.** Save to Supabase, send via Meta, mirror to Dynamics (`logMessage('Outgoing', …)`).
-16. **Post-answer case bookkeeping.** `L1` → `recordBotResponse` and **enqueue a delayed feedback-prompt** (§6.4). `escalation` → `markEscalated` (sets the session `had_escalation` flag).
-17. **Intent classification (fire-and-forget)** → `sessions.current_intent`, analytics only.
-18. **Natural wrap-up close** if `detectWrapUp(text)` matches an open request with no new case this turn.
+10. **Bad-debt evaluation (clients only).** On the first turn of a session `evaluateBadDebt` calls `getBadDebtState` (Dynamics), caches the verdict on the session (`bad_debt_evaluated`/`bad_debt`/`bad_debt_detail`), and — claimed atomically via `claimBadDebtInvoiceSend` — sends the overdue invoice PDFs once. Fail-open: any detection error behaves 100% normally.
+11. **Knowledge-base retrieval.** For client/lead turns, embed the message and query `match_kb_chunks` (pgvector, cosine ≥ 0.42); pass the top chunks to `claudeService.generateResponse` as `retrievedContext` (§8).
+12. **Case threading.** Resolve/create the Dynamics `riivo_request` for the turn (open request for session, or a new one if `qualifyMessage` passes; `decideCaseRouting` in `src/domain/caseRouting.ts` is the pure verdict the processor applies). A topic shift within 30 min continues the open case rather than opening a new one.
+13. **Log incoming** to Dynamics (`logMessage`) before saving to Supabase.
+14. **Conversation cap check** (non-staff). `decideConversationCap` (`src/domain/conversationCap.ts`) returns `blocked | hit | ok` from session counts + the day count; a fired cap short-circuits to a warm consultant-handoff line. See [usage-tracking-and-caps.md](./usage-tracking-and-caps.md).
+15. **AI generation.** `generateResponse(...)` (§5), in parallel with `classifyCase` when a new case was created.
+16. **Send & persist.** Save to Supabase, send via Meta, mirror to Dynamics (`logMessage('Outgoing', …)`).
+17. **Post-answer case bookkeeping.** `L1` → `recordBotResponse` and **enqueue a delayed feedback-prompt** (§6.4). `escalation` → `markEscalated` (sets the session `had_escalation` flag).
+18. **Intent classification (fire-and-forget)** → `sessions.current_intent`, analytics only.
+19. **Natural wrap-up close** if `detectWrapUp(text)` matches an open request with no new case this turn.
 
 ### 4.3 Gotchas
 
@@ -228,15 +252,22 @@ Anthropic does not honour a top-level `cache_control`; the service sets **conten
 - **Knowledge-base block** appended only when `retrievedContext` has results (formats excerpts with title + heading path, instructs the model to cite or ignore, never fabricate). Most turns don't retrieve, so the cache stays warm.
 - `"Current Date: …"` prepended for tax-season reasoning.
 
-### 5.3 Tool registry — 39 tools
+### 5.3 Tool registry — 40 tools, one definition each (ADR 0003)
 
-`TOOLS` now holds **39 definitions** (up from 31). New since the last review: `escalate_to_taxcrew`, the tax-forms pair (`list_tax_forms`, `send_tax_form`), the tax-status reads (`get_refund_status`, `get_submission_status`, `get_received_documents`, `get_audit_status`), and the IRP5 fast-track (`upload_irp5`).
+Tool dispatch is a **registry**, not a hand-written `if/else` chain. Each tool is one `ToolEntry` in `src/services/tools/` carrying `{ name, description, input_schema, roles, requiredPerm?, handle }` — its Anthropic schema, description, role visibility, permission gate, and handler are **one thing in one place**. `REGISTRY` is assembled from `clientTools.ts`, `staffTools.ts`, and `leadTools.ts` (`index.ts`); the 40-entry count is `Object.values(REGISTRY).length`.
 
-### 5.4 Tool filtering — three layers
+- **Single dispatch site.** `runTool(name, args, ctx)` is called identically in the first Claude round and the follow-up tool-use loop. An unknown tool name is a hard error (the old `legacyDispatch` fallback is deleted).
+- **`TOOLS` is derived from `REGISTRY`** — `Object.values(REGISTRY).map(e => ({ name, description, input_schema }))` — so the Anthropic tool definitions can't drift from the handlers.
+- **Dependencies are injected through narrow Ports.** Handlers reach services only via `ctx.deps` (`DynamicsPort`, `MetaPort`, `GraphMailPort`, `SupabasePort`, `FormsPort`, `Irp5Port`, `PdfPort`, `LoeOcrPort`, …) — each exposing only the methods tools actually call. A real service singleton satisfies a Port structurally; a test passes a fake. This is the seam that makes tools unit-testable with no Anthropic client mocked (`test/unit/toolRegistry.test.ts`).
+- **`ToolContext`** is built once per turn in `claude.service.ts`: per-turn identity (`contactId`, `phoneNumber`, `sessionId`, `entityType`, `ownerFilter`), the shared client resolvers, the permitted keys, the per-turn staged-upload buffer (`ctx.pendingUpload`) and LoE review row (`ctx.pendingLoe`), and `deps`.
 
-1. **Role filter** — `clientTools` (~20), `staffTools` (~23), `lead` (`save_document`, `escalate_to_taxcrew`, plus `upload_irp5` for State-B leads), unknown (`verify_identity`, `escalate_to_taxcrew`).
-2. **Staff permission filter** — `STAFF_TOOL_PERMISSIONS` maps each staff-gated tool to a permission key; kept only if the key is in the session's cached `permittedToolKeys`. Unmapped tools are unrestricted within the role.
-3. **Flow restriction** — a pending file (LOE phase 1) or pending LOE review (phase 2) narrows the surface to just that flow's tools.
+The current tool set spans client reads (`get_my_details`, `get_tax_number`, `get_client_invoices`, `get_refund_status`, `get_submission_status`, `get_audit_status`, **`get_required_documents`** — advice-only, no upload-record read per ADR 0004), client actions (`save_document`, `upload_irp5`, `request_consultant_callback`, `escalate_to_taxcrew`, `opt_out_whatsapp`, `list_tax_forms`, `send_tax_form`, `get_invoice_pdf`, `refer_friend`, `get_my_referral_code`, `get_my_consultant`, `get_office_contact`), staff writes (`create_case`/`_lead`/`_contact`/`_invoice`/`_task`, `send_invoice_pdf`, `search_contact_by_name`, `search_lead_by_name`, `get_my_clients`/`_leads`, …), the LoE flow (`upload_letter_of_engagement`, `update_loe_field`, `confirm_loe_upload`), and `verify_identity` for unknown callers.
+
+### 5.4 Tool filtering — three layers, all derived from the registry
+
+1. **Role filter** — `deriveOfferedTools(role)` is a pure function over each entry's `roles`. Roles are `client`, `lead`, `user` (staff), and `unknown` (a phone not in the system — offered only `verify_identity`). No second hand-maintained per-role list exists.
+2. **Staff permission gate** — `entryAllowed` keeps a staff-gated entry only if its `requiredPerm` is in the session's cached `permittedToolKeys`. Enforced once, inside `runTool` (the old duplicate `STAFF_TOOL_PERMISSIONS` re-check is deleted).
+3. **Per-turn narrowing** — `claude.service` deletes a few entries that role+permission can't express: a pending file (LOE phase 1) or pending LOE review (phase 2) narrows to that flow; `upload_irp5` is offered to all leads by role then removed for non-State-B leads.
 
 ### 5.5 Classifiers
 
@@ -296,15 +327,20 @@ When a **noteworthy** session closes, Tina emails the client's owning consultant
 
 ## 7. Identity and permissions
 
-Largely unchanged from the prior architecture; the key additions are **lead onboarding state** and the **owner-inheritance** of requests.
+Key additions since the last review: **staff mode is gated behind a flag**, plus **lead onboarding state** and the **owner-inheritance** of requests.
 
-### 7.1 Three identity classes
+### 7.0 Staff mode is gated behind `STAFF_MODE_ENABLED` (default off)
+
+The staff (internal "user") experience is currently **dormant in production**. With `STAFF_MODE_ENABLED` unset/`false`, `getContactByPhone` / the email resolver **skip the `systemusers` lookup entirely** and `processMessage` never enters the colleague/CRM-tools path — every sender resolves as `client`, `lead`, or `unknown`. Flip `STAFF_MODE_ENABLED=true` to restore staff resolution and the staff tool surface. The registry still carries the staff tools (§5.3); they're simply never offered while the flag is off.
+
+### 7.1 Identity classes
 
 | `crmEntity.type` | Source                                          | Effect                                                                 |
 | ---------------- | ----------------------------------------------- | ---------------------------------------------------------------------- |
 | `client`         | Dynamics `contacts` or cached session           | Full Tina client experience; interactive welcome menu on first message |
 | `lead`           | Dynamics `new_leads`                            | Onboarding-only; gated by LOE + OTP state (below)                      |
-| `user` (staff)   | Supabase `users` (synced from `systemuser`)     | Staff experience; tool surface filtered by role                        |
+| `user` (staff)   | Supabase `users` (synced from `systemuser`)     | Staff experience; tool surface filtered by role. **Only when `STAFF_MODE_ENABLED=true`.** |
+| `unknown`        | phone not found in any of the above             | Offered only `verify_identity`; otherwise pushed to sign-up            |
 
 ### 7.2 Lead onboarding gates
 
@@ -312,7 +348,7 @@ Tax leads have two gates read fresh on each inbound: `riivo_loereceived` and `ri
 
 ### 7.3 Role-based access (Supabase)
 
-`roles` / `users` / `role_tools` as before. Permission keys: `create_lead, create_contact, create_task, create_case, create_invoice, lookup_client, lookup_lead, view_open_cases, view_outstanding_invoices, send_invoice_pdf, upload_letter_of_engagement`. `claude.service.STAFF_TOOL_PERMISSIONS` is the authoritative tool→key map.
+`roles` / `users` / `role_tools` as before. Permission keys: `create_lead, create_contact, create_task, create_case, create_invoice, lookup_client, lookup_lead, view_open_cases, view_outstanding_invoices, send_invoice_pdf, upload_letter_of_engagement`. The tool→key map is no longer a separate `STAFF_TOOL_PERMISSIONS` table — each tool's `requiredPerm` lives on its registry entry (§5.3/§5.4) and `entryAllowed` is the single enforcement point.
 
 ### 7.4 Session caching, phone variants, staff source-of-truth
 
@@ -341,7 +377,7 @@ Single class wrapping the Web API. Patterns unchanged (MSAL client-credentials w
 
 - **`contacts`** / **`new_leads`** / **`systemusers`** as before, plus owner-id reads (`getContactOwnerId`, `getLeadOwnerId`) for the close-summary.
 - **`riivo_irp5s`** — IRP5 certificate records (`createIrp5Record`, cert-number dedupe).
-- **`riivo_taxsubmissionsdocuments`** — per-submission document rows; read by the tax-FAQ "received documents" tool, written by the IRP5 drain.
+- **`riivo_taxsubmissionsdocuments`** — per-submission document rows; written by the IRP5 drain and uploads. No longer read back to clients (ADR 0004 — Tina never reports upload status).
 - **Tax-status reads** (`taxFaq.service`): `riivo_potentialrefund`, `icon_casestage`, `riivo_dateplacedonaudit` feed the refund/submission/audit-status tools.
 - **`riivo_requests`** / **`riivo_whatsappcommunicationses`** / **`new_invoiceses`** / **`new_cases`** / tasks / annotations as before.
 
@@ -350,6 +386,17 @@ Option-set enum maps (`REQUEST_STATE`, `REQUEST_STATUSCODE`, `RESOLUTION_METHOD`
 ---
 
 ## 10. Media and document flows
+
+### 10.0 Document-collection journey — stateless, client-initiated (ADR 0002)
+
+Document collection used to be **greeting-driven**: an IRP5 ask was injected into the system prompt on every session's first message. Because sessions reset after 30 min, "first message" fired constantly and the ask landed regardless of the client's actual question. That is gone.
+
+It is now a **journey the client initiates** ("I want to start my tax return"), and "where the client is" is **re-derived statelessly** from Dynamics (`riivo_irp5s` + `riivo_taxsubmissionsdocuments`) on every turn — there is **no persisted journey state machine**.
+
+- **The recommendation is a pure kernel (advice-only, ADR 0004).** `buildDocRecommendation(input)` (`src/domain/docRecommendation.ts`) takes `(source codes, industry, optional topic, forms catalog)` and returns a single ordered, reason-annotated `documents` list with form-supersedes-doc dedupe applied — no received/outstanding diff. `requiredDocuments.service` does the Dynamics **profile** I/O around it (source codes + industry only, never upload rows); the `get_required_documents` tool exposes it (with an optional `topic` for `foreign_income` / `rental_income`).
+- **Never report upload status (ADR 0004).** Tina frames the list purely as advice ("here's what typically helps"), never "you've sent X / you still owe Y / we have everything". She does not read `riivo_taxsubmissionsdocuments` for guidance because that data is unreliable across TTT; making no status claim is safer than a confidently-wrong one. The IRP5 upload flow still confirms receipt of the file the client just sent — local knowledge from the upload itself, not a record lookup.
+- **Baseline list.** `BASELINE_DOCS` keeps IRP5, drops Bank Statements (now source-code/industry-driven only); ID Document stays out. The consultants' SharePoint guide is authoritative — a verbatim snapshot lives at [document-requirements-guide.md](./document-requirements-guide.md), and the kernel is **manually** kept in step with it (new code mappings: source codes 3606/3701/3802). See [PRD-document-requirements-guide.md](./PRD-document-requirements-guide.md).
+- Proactive completion-chasing (reminding clients who abandon mid-journey) is **out of scope** — it would need an Azure-side scheduler. Tina stays reactive.
 
 ### 10.1 Inbound documents / images
 
@@ -428,6 +475,12 @@ Per-phone state. Columns as before (`id`, `phone_number`, `crm_id`/`crm_type`, `
 | `had_doc_upload`          | boolean     | Client filed a document this session (close-summary gate).   |
 | `had_escalation`          | boolean     | An escalation fired this session (close-summary gate).       |
 | `close_summary_sent_at`   | timestamptz | Atomic claim — set once by the first close (dedup).          |
+| `bad_debt_evaluated`      | boolean     | First-inbound bad-debt detection has run this session.       |
+| `bad_debt`                | boolean     | Detection result: client is in bad debt.                     |
+| `bad_debt_detail`         | jsonb       | Cached overdue-invoice summary (prompt guidance + send).     |
+| `bad_debt_invoices_sent_at` | timestamptz | Atomic claim — overdue invoice PDFs sent once (§4.2 step 10). |
+
+(close-summary columns: migration `20260604120000`; bad-debt columns: `20260611120000_session_bad_debt.sql`.)
 
 ### 13.2 `messages`
 
@@ -526,18 +579,21 @@ No external APM/error tracker is wired up.
 
 ## 17. Known rough edges
 
-1. **`claude.service.ts` is a ~3,000-line god-file** (tool handlers, definitions, prompt assembly, completion loop). Tool-per-file extraction is still pending.
+1. **`claude.service.ts` is still large** (~1,800 lines: prompt assembly, the completion/tool loop, `ToolContext` wiring, classifiers). Tool **dispatch** is no longer in it — that's the registry (§5.3, ADR 0003) — but prompt assembly and the loop still warrant extraction.
 2. **Stale BullMQ/Redis references.** `webhook.controller.ts` comments and `docs/queue-and-worker.md` still describe the old Redis/BullMQ queue; the live implementation is Azure Service Bus. Clean up to avoid confusion.
 3. **Classifiers run separately from the main completion**, doubling billable calls on new-case turns (now cheaper since they use Haiku).
 4. **Dead Vercel crons.** `vercel.json` crons don't fire on Azure — the case-timeout sweep and Graph subscription renewal must be scheduled externally.
 5. **Ingester enqueue-after-200 gap.** If enqueue fails after the idempotency row lands, a Meta retry is dropped as a duplicate (§4.3) — alert-worthy, not auto-recovered.
 6. **No retries on Meta outbound failures** — a 4xx/5xx is logged, not retried.
-7. **Stale `user`-typed sessions** — revoked staff keep cached permissions until the session expires (30 min) or `npm run sync:users` is re-run.
+7. **Stale `user`-typed sessions** — revoked staff keep cached permissions until the session expires (30 min) or `npm run sync:users` is re-run. (Moot while `STAFF_MODE_ENABLED` is off — §7.0.)
+8. **Doc-kernel ↔ SharePoint guide drift is manual** — there's no automated check that `buildDocRecommendation` matches the consultants' guide; a guide edit obliges a manual kernel re-sync (§10.0).
 
 ---
 
 ## 18. Related documents
 
+- **Architecture decision records:** [adr/0001-per-turn-decision-extraction-scope.md](./adr/0001-per-turn-decision-extraction-scope.md), [adr/0002-document-collection-journey.md](./adr/0002-document-collection-journey.md), [adr/0003-tool-registry-dispatch.md](./adr/0003-tool-registry-dispatch.md).
+- **Tool registry / doc journey PRDs:** [PRD-tool-registry.md](./PRD-tool-registry.md), [PRD-document-requirements-guide.md](./PRD-document-requirements-guide.md), [document-requirements-guide.md](./document-requirements-guide.md).
 - [bot-personality.md](./bot-personality.md), [bot-overview.md](./bot-overview.md), [bot-capabilities-spec.md](./bot-capabilities-spec.md)
 - [queue-and-worker.md](./queue-and-worker.md) — queue/worker design (note: references the older Redis impl).
 - [usage-tracking-and-caps.md](./usage-tracking-and-caps.md), [scope-guardrail.md](./scope-guardrail.md)
@@ -548,5 +604,3 @@ No external APM/error tracker is wired up.
 - [onboarding-loe-and-otp.md](./onboarding-loe-and-otp.md), [leads-and-contacts.md](./leads-and-contacts.md)
 - [meta-templates.md](./meta-templates.md), [whatsapp-flow-signup.md](./whatsapp-flow-signup.md), [request-lifecycle.md](./request-lifecycle.md)
 - [azure-migration.md](./azure-migration.md) — the Vercel → Azure move.
-</content>
-</invoke>
