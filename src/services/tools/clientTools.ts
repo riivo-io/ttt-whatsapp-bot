@@ -18,7 +18,7 @@ import {
     formatCatalogMessage,
     formatSendCaption,
 } from '../taxForms.service';
-import { renderOutstandingDocsList } from '../../domain/irp5Reply';
+import { renderAssociatedDocsList } from '../../domain/irp5Reply';
 import { pickBranchForLocation, formatBranch, formatAllBranches } from '../../utils/officeContacts';
 
 const getMyDetails: ToolEntry = {
@@ -281,11 +281,11 @@ const taxYearSchema = {
 
 const getRequiredDocuments: ToolEntry = {
     name: 'get_required_documents',
-    description: "Tell the client which tax documents are still outstanding. Use this whenever the client asks what documents they need to send, upload, submit, or provide — \"what do I need?\", \"what must I send for my tax return?\", \"what docs do you need from me?\", \"what's outstanding?\". The tool builds the expected list from the client's SARS source codes + industry (falling back to a typical-return baseline if none are on file), then cross-references the riivo_taxsubmissionsdocuments entity to mark what's already been uploaded and what's still missing. ALSO pass the optional `topic` argument when the client discloses in chat that they earned FOREIGN income (worked / earned money abroad or overseas) or RENTAL income (they let out / rent out property) — neither can be read off an IRP5, so the topic is the only way those extra documents get surfaced. The returned message is already formatted — relay it verbatim; do NOT paraphrase it or mention SARS source codes.",
+    description: "Advise the client which tax documents are typically associated with their return. Use this whenever the client asks what documents they need to send, upload, submit, or provide — \"what do I need?\", \"what must I send for my tax return?\", \"what docs do you need from me?\". The tool builds the list from the client's SARS source codes + industry (falling back to a typical-return baseline if none are on file). It is pure ADVICE — it does NOT look at what the client has already sent and does NOT know what's outstanding, so NEVER tell the client they have or haven't uploaded something, or that a doc is 'still missing'/'received'. Just relay the list as guidance on what to gather. ALSO pass the optional `topic` argument when the client discloses in chat that they earned FOREIGN income (worked / earned money abroad or overseas) or RENTAL income (they let out / rent out property) — neither can be read off an IRP5, so the topic is the only way those extra documents get surfaced. The returned message is already formatted — relay it verbatim; do NOT paraphrase it or mention SARS source codes.",
     input_schema: {
         type: 'object',
         properties: {
-            tax_year: { type: 'number', description: 'Optional 4-digit tax year (e.g. 2026) if the client specifies one. Omit to use the most recent preseason record.' },
+            tax_year: { type: 'number', description: 'Optional 4-digit tax year (e.g. 2026) if the client specifies one. Omit to use the current tax year.' },
             topic: { type: 'string', enum: ['foreign_income', 'rental_income'], description: "Set to 'foreign_income' when the client says they earned income while working/living abroad, or 'rental_income' when they say they rent out / let property. Surfaces the extra documents for that scenario. Omit when neither was disclosed." },
         },
         required: [],
@@ -328,19 +328,6 @@ const getSubmissionStatus: ToolEntry = {
     roles: ['client'],
     async handle(args: unknown, ctx: ToolContext): Promise<string> {
         return ctx.deps.taxFaq.getSubmissionStatus({
-            contactId: ctx.contactId as string,
-            taxYear: parseTaxYear(args),
-        });
-    },
-};
-
-const getReceivedDocuments: ToolEntry = {
-    name: 'get_received_documents',
-    description: "Answer 'have you received my docs?' / 'what have you got from me so far?'. Reads every active row from riivo_taxsubmissionsdocuments linked to the client (single source of truth — covers both WhatsApp uploads and Power Automate emailed-doc rows) and returns a flat list of document types received. When relaying to the client, ALWAYS use the phrase \"tax return\" — never \"case\". Use whenever the client wants to confirm what TTT has received from them.",
-    input_schema: taxYearSchema,
-    roles: ['client'],
-    async handle(args: unknown, ctx: ToolContext): Promise<string> {
-        return ctx.deps.taxFaq.getReceivedDocuments({
             contactId: ctx.contactId as string,
             taxYear: parseTaxYear(args),
         });
@@ -870,11 +857,12 @@ const uploadIrp5: ToolEntry = {
         ctx.pendingUpload.clear();
         if (ctx.sessionId) await ctx.deps.supabase.flagSessionDocUpload(ctx.sessionId);
 
-        // List-once (Issue 26): present the FULL tailored list in one message —
-        // reasons + forms — never the old one-at-a-time drip. Receipt is
-        // confirmed regardless of OCR; we never tell the client we couldn't read
-        // the cert.
-        const renderedList = renderOutstandingDocsList(result.outstanding).join('\n');
+        // List-once (Issue 26, ADR 0004): present the FULL tailored advice list
+        // in one message — reasons + forms — never the old one-at-a-time drip.
+        // Receipt of the cert they just sent is confirmed regardless of OCR; we
+        // never tell the client we couldn't read it, and we never report what
+        // they have or haven't sent — this is advice on what helps.
+        const renderedList = renderAssociatedDocsList(result.associatedDocs).join('\n');
         return JSON.stringify({
             status: 'irp5_processed',
             employer_name: result.employerName,
@@ -886,59 +874,10 @@ const uploadIrp5: ToolEntry = {
             taxsubmissionsdocument_id: result.taxsubmissionsdocumentId,
             sharepoint_url: result.sharepointUrl,
             wrong_year_warning: result.wrongYearWarning,
-            outstanding_docs: result.outstanding,
-            message: result.outstanding.length === 0
-                ? `IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year is on file. Compose a short warm reply that thanks the client, confirms receipt (✅), names the employer + year, and lets them know that's everything we need for now — their consultant will be in touch if anything else comes up.${result.wrongYearWarning ? ' Also mention: ' + result.wrongYearWarning : ''}`
-                : `IRP5${result.employerName ? ` from ${result.employerName}` : ''} for the ${result.assessmentYear} tax year is on file. Compose ONE warm message that (a) thanks the client and confirms receipt (✅), (b) names the employer + year, (c) presents the FULL tailored list below in one go — keep each item's reason — framed "send whatever you have, in any order, no rush". Do NOT drip one doc at a time. For any item marked as a form, tell them you can send it to fill in (they can ask, or use list_tax_forms / send_tax_form). The list:\n${renderedList}${result.wrongYearWarning ? '\n\nAlso gently mention: ' + result.wrongYearWarning : ''}`,
-        });
-    },
-};
-
-const markDocumentAlreadySent: ToolEntry = {
-    name: 'mark_document_already_sent',
-    description: "Use ONLY when the client says they have ALREADY sent a document straight to their consultant or accountant — e.g. \"I already emailed my IRP5 to my consultant\", \"my accountant has my bank statements already\", \"I sent that to [name] last week\". Records a clearly-UNVERIFIED \"client states provided\" note in the CRM so we stop re-asking for that doc — durably, even after the chat resets — WITHOUT claiming TTT has received or verified it. This is NOT a receipt: do NOT use it for files the client uploads here (those go through save_document / upload_irp5), and after calling it NEVER tell the client we've \"received\" or \"got\" the doc — only that you've NOTED their consultant has it. Acknowledge warmly and stop asking for those docs.",
-    input_schema: {
-        type: 'object',
-        properties: {
-            doc_types: {
-                type: 'array',
-                items: { type: 'string' },
-                description: "The document(s) the client says they already sent, one entry per distinct doc. Use the label from the outstanding list where you can (e.g. 'IRP5', 'Bank statement', 'Logbook', '12 payslips', 'Medical aid tax certificate', 'IT3(b)').",
-            },
-        },
-        required: ['doc_types'],
-    },
-    roles: ['client'],
-    async handle(args: unknown, ctx: ToolContext): Promise<string> {
-        const a = (args ?? {}) as { doc_types?: unknown };
-        if (ctx.entityType !== 'client' || !ctx.contactId) {
-            return JSON.stringify({ status: 'error', error: 'wrong_role', message: 'The already-sent note is for known clients only.' });
-        }
-        const docTypes: string[] = Array.isArray(a.doc_types)
-            ? a.doc_types.map((d: any) => String(d ?? '').trim()).filter((d: string) => d.length > 0)
-            : [];
-        if (docTypes.length === 0) {
-            return JSON.stringify({ status: 'error', error: 'no_doc_types', message: 'Ask the client which document(s) they already sent, then call again with doc_types.' });
-        }
-        const recorded: string[] = [];
-        const failed: string[] = [];
-        for (const docType of docTypes) {
-            const res = await ctx.deps.dynamics.markDocumentClientStated({
-                contactId: ctx.contactId,
-                canonicalDocType: docType,
-                triggeredBy: ctx.contactId,
-            });
-            (res.success ? recorded : failed).push(docType);
-        }
-        if (recorded.length === 0) {
-            return JSON.stringify({ status: 'error', error: 'write_failed', message: "I couldn't note that just now. Tell the client you'll flag it with their consultant directly, and stay engaged." });
-        }
-        const one = recorded.length === 1;
-        return JSON.stringify({
-            status: 'noted_unverified',
-            recorded,
-            failed,
-            message: `Noted as CLIENT-STATED / UNVERIFIED (not received by TTT): ${recorded.join(', ')}. Reply warmly that you've made a note their consultant already has ${one ? 'it' : 'these'} and you won't keep asking. Do NOT say TTT has "received", "got" or "verified" ${one ? 'it' : 'them'} — only that it's noted as already sent to their consultant.`,
+            associated_docs: result.associatedDocs,
+            message: result.associatedDocs.length === 0
+                ? `The IRP5${result.employerName ? ` from ${result.employerName}` : ''} they just sent for the ${result.assessmentYear} tax year is on file. Compose a short warm reply that thanks the client, confirms you've got that IRP5 (✅), names the employer + year, and lets them know their consultant will be in touch if anything else is needed. Do NOT claim to know their full document history — only that you've got this file.${result.wrongYearWarning ? ' Also mention: ' + result.wrongYearWarning : ''}`
+                : `The IRP5${result.employerName ? ` from ${result.employerName}` : ''} they just sent for the ${result.assessmentYear} tax year is on file. Compose ONE warm message that (a) thanks the client and confirms you've got that IRP5 (✅), (b) names the employer + year, (c) presents the FULL list below in one go as ADVICE on what typically helps with the return — keep each item's reason — framed "send whatever applies to you, in any order, no rush". Do NOT drip one doc at a time and do NOT imply you're tracking what they have or haven't already sent. For any item marked as a form, tell them you can send it to fill in (they can ask, or use list_tax_forms / send_tax_form). The list:\n${renderedList}${result.wrongYearWarning ? '\n\nAlso gently mention: ' + result.wrongYearWarning : ''}`,
         });
     },
 };
@@ -955,7 +894,6 @@ export const clientToolEntries: ToolEntry[] = [
     getRequiredDocuments,
     getRefundStatus,
     getSubmissionStatus,
-    getReceivedDocuments,
     getAuditStatus,
     getInvoicePdf,
     requestConsultantCallback,
@@ -965,7 +903,6 @@ export const clientToolEntries: ToolEntry[] = [
     optOutWhatsapp,
     saveDocument,
     uploadIrp5,
-    markDocumentAlreadySent,
 ];
 
 register(clientToolEntries);

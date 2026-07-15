@@ -2,7 +2,7 @@ import { dynamicsService } from './dynamics.service';
 import { sharePointService } from './sharepoint.service';
 import { mistralService } from './mistral.service';
 import { irp5ExtractorService, inferSourceCodesFromIrp5Row } from './irp5-extractor.service';
-import { computeMissingDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
+import { computeAssociatedDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
 import { supabaseService } from './supabase.service';
 import type { DocRecommendationItem } from '../domain/docRecommendation';
 import { mapDocTypeToCanonical } from '../utils/docTypeMapping';
@@ -196,10 +196,12 @@ export type ClientIrp5Result =
         sharepointUrl: string | null;
         wrongYearWarning?: string;
         /**
-         * Full tailored outstanding list (forms + docs, reason-annotated,
-         * IRP5 itself filtered out) for the list-once presentation (Issue 26).
+         * Full tailored list of documents associated with the return (forms +
+         * docs, reason-annotated, the just-uploaded IRP5 filtered out) for the
+         * list-once presentation (Issue 26). Pure ADVICE (ADR 0004) — NOT a diff
+         * against what's on file.
          */
-        outstanding: DocRecommendationItem[];
+        associatedDocs: DocRecommendationItem[];
         /**
          * True when OCR/extraction yielded no source codes off the cert, so the
          * list degraded to the generic profile/baseline fallback. INTERNAL ONLY
@@ -212,7 +214,7 @@ export type ClientIrp5Result =
  * Full IRP5 ingestion for a client-uploaded cert: SharePoint file →
  * riivo_taxsubmissionsdocuments row → OCR → structured extraction →
  * riivo_irp5s row (cert-number deduped) → source-code union across the
- * client's other IRP5s for the year → outstanding-docs computation.
+ * client's other IRP5s for the year → associated-docs advice computation.
  *
  * Returns structured data; callers build their own user-facing message
  * (the Claude tool path composes one reply, the deterministic WhatsApp path
@@ -317,17 +319,19 @@ export async function processClientIrp5Upload(params: {
     // Graceful OCR/extraction failure (Issue 26): no source codes off this cert
     // means we couldn't read it (or it carried none). The file is already on
     // file, so we still confirm receipt and fall back to the generic
-    // profile/baseline list inside computeMissingDocsForClient — we NEVER tell
-    // the client we couldn't read it. Log it so staff can follow up.
+    // profile/baseline list inside computeAssociatedDocsForClient — we NEVER
+    // tell the client we couldn't read it. Log it so staff can follow up.
     const extractionDegraded = extracted.sourceCodes.length === 0;
     if (extractionDegraded) {
         console.warn(`[IRP5] No source codes extracted from ${fileName} for ${contactId} — degrading to generic profile/baseline doc list. Cert is on file at ${webUrl}.`);
     }
 
-    // Step 7: compute the full tailored outstanding list (forms + docs),
-    // minus the IRP5 they just sent.
-    const missing = await computeMissingDocsForClient(contactId, allCodes, new Date());
-    const outstandingForClient = missing.outstanding.filter(d => !/^irp5\b/i.test(d.label));
+    // Step 7: compute the full associated-docs advice list (forms + docs),
+    // minus the IRP5 they just sent this turn. ADR 0004 (advice-only): this is
+    // NOT a diff against on-file records — we just drop the cert we know they
+    // sent in THIS upload from the "what else helps" advice.
+    const associated = await computeAssociatedDocsForClient(contactId, allCodes, new Date());
+    const associatedForClient = associated.documents.filter(d => !/^irp5\b/i.test(d.label));
 
     return {
         status: 'irp5_processed',
@@ -340,7 +344,7 @@ export async function processClientIrp5Upload(params: {
         taxsubmissionsdocumentId: tsdResult.recordId || null,
         sharepointUrl: webUrl || null,
         wrongYearWarning,
-        outstanding: outstandingForClient,
+        associatedDocs: associatedForClient,
         extractionDegraded,
     };
 }

@@ -1040,14 +1040,15 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             if (result.status === 'error') {
                 ack = "Got your IRP5 but I hit a snag filing it. Please try resending in a few minutes — your consultant will follow up if it keeps failing.";
             } else {
-                // Receipt is confirmed ALWAYS (the cert is on file regardless of
-                // OCR), then the full tailored list once — never a drip, never a
-                // mention of any extraction failure (Issue 26).
+                // Receipt of the cert they just sent is confirmed ALWAYS (it's
+                // on file regardless of OCR), then the full associated-docs
+                // advice list once — never a drip, never a mention of any
+                // extraction failure (Issue 26, ADR 0004).
                 docFiled = true;
                 ack = buildIrp5ReceivedAck({
                     employerName: result.employerName,
                     assessmentYear: result.assessmentYear,
-                    outstanding: result.outstanding,
+                    associatedDocs: result.associatedDocs,
                     wrongYearWarning: result.wrongYearWarning,
                 });
             }

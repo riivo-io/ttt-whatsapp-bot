@@ -16,8 +16,6 @@ import { irp5ExtractorService, inferSourceCodesFromIrp5Row } from './irp5-extrac
 import { supabaseService, BadDebtDetail } from './supabase.service';
 import { hasPendingUpload, savePendingUpload, peekPendingUpload, clearPendingUpload, processClientIrp5Upload, processStateBLeadIrp5Upload } from './pendingUpload.service';
 import { sharePointService } from './sharepoint.service';
-import { computeRequiredDocuments, formatRequiredDocumentsMessage, computeMissingDocsForClient, getCurrentSaTaxYear } from './requiredDocuments.service';
-import { renderOutstandingDocsList } from '../domain/irp5Reply';
 import {
     TAX_FORMS,
     getAllForms,
@@ -35,7 +33,6 @@ import {
     handleGetSubmissionStatus,
     handleGetAuditStatus,
     handleGetRequiredDocuments,
-    handleGetReceivedDocuments,
 } from './taxFaq.service';
 import { buildClientRoleContext } from '../domain/clientRoleContext';
 import {
@@ -582,7 +579,7 @@ Rules for this state:
                     // document (goes to a Client as an annotation). Ask which.
                     roleContext += `\n\n**PENDING DOCUMENT — IMPORTANT**: The staff member has just uploaded a file. Ask them what type of document this is:\n\n1. **Signed Letter of Engagement (LOE)** — if they say LOE, letter of engagement, or similar:\n   - Ask which LEAD it's for (use search_lead_by_name, NOT search_contact_by_name).\n   - Call upload_letter_of_engagement with the resolved lead_id.\n\n2. **Other document** (IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, etc.) — if they say anything else:\n   - Ask which CLIENT it's for (use search_contact_by_name).\n   - Ask what type of document it is.\n   - Call save_document with the doc_type and client.\n\nDo NOT assume it's an LOE. Ask first.`;
                 } else {
-                    roleContext += `\n\n**PENDING DOCUMENT**: The client has uploaded a file. Ask them what type of document it is: IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, or Other. Accept clear synonyms (e.g. "tax certificate from my employer" → IRP5, "slip" or "receipt" → Till Slip / Receipt) instead of making the client pick from the exact list.\n\n**Routing rules — IMPORTANT**:\n- If the client confirms it is an **IRP5 or IT3(a)** (employee tax certificate from their employer), call **upload_irp5** with confirmed_by_user=true. The tool stores the file, parses it, files the cert in CRM, and returns the FULL tailored list of what else helps — relay that whole list in ONE message (reasons included), framed "send whatever you have, in any order". Do NOT drip one doc at a time. The tool's 'message' field is already shaped for this — base your reply on it.\n- For every other doc type, call **save_document** with the canonical doc_type as before.\n- If a non-IRP5 doc arrives BEFORE the client has sent their IRP5 for the year, still accept and save it via save_document, then politely add that we still need the IRP5 as well.`;
+                    roleContext += `\n\n**PENDING DOCUMENT**: The client has uploaded a file. Ask them what type of document it is: IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, or Other. Accept clear synonyms (e.g. "tax certificate from my employer" → IRP5, "slip" or "receipt" → Till Slip / Receipt) instead of making the client pick from the exact list.\n\n**Routing rules — IMPORTANT**:\n- If the client confirms it is an **IRP5 or IT3(a)** (employee tax certificate from their employer), call **upload_irp5** with confirmed_by_user=true. The tool stores the file, parses it, files the cert in CRM, and returns the FULL tailored list of what else typically helps — relay that whole list in ONE message (reasons included) as ADVICE, framed "send whatever applies to you, in any order". Do NOT drip one doc at a time, and do NOT tell the client what they've already sent or what's outstanding — you can't see that. The tool's 'message' field is already shaped for this — base your reply on it.\n- For every other doc type, call **save_document** with the canonical doc_type as before.\n- Accept and save whatever the client sends. Do NOT tell them a doc is still "missing" or "outstanding" — you have no view of their upload history.`;
                 }
             }
 
@@ -746,7 +743,6 @@ Rules for this state:
                         getRefundStatus: handleGetRefundStatus,
                         getSubmissionStatus: handleGetSubmissionStatus,
                         getAuditStatus: handleGetAuditStatus,
-                        getReceivedDocuments: handleGetReceivedDocuments,
                         getRequiredDocuments: handleGetRequiredDocuments,
                     },
                     meta: metaWhatsAppService,

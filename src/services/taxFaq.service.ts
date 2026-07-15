@@ -2,15 +2,14 @@
  * Handlers for the tax-season FAQ tools wired into claude.service.ts:
  *   - get_refund_status
  *   - get_submission_status
- *   - get_received_documents — lists rows from riivo_taxsubmissionsdocuments
  *   - get_audit_status
- *   - get_required_documents — computes the SARS-code/industry checklist
- *     (with a typical-return baseline fallback) and cross-references the
- *     uploaded entity to flag what's still outstanding.
+ *   - get_required_documents — computes the SARS-code/industry list of
+ *     documents associated with the client's return (with a typical-return
+ *     baseline fallback). Pure ADVICE (ADR 0004): it does NOT read the client's
+ *     upload records and never tells them what they have or haven't sent.
  *
  * Every handler returns a JSON string the Claude turn loop relays as a
- * tool_result. Document-side tools are intentionally NOT feature-flagged:
- * riivo_taxsubmissionsdocuments is the single source of truth for uploads.
+ * tool_result.
  *
  * Tax-year filtering is done in-memory against the OptionSet's
  * FormattedValue annotation (the Dynamics `Prefer: odata.include-annotations`
@@ -20,9 +19,9 @@
  * field on tasks/preseason (mixed schemes).
  */
 
-import { dynamicsService, isClientStatedMarkerRow } from './dynamics.service';
+import { dynamicsService } from './dynamics.service';
 import { graphMailService } from './graphMail.service';
-import { computeRequiredDocuments } from './requiredDocuments.service';
+import { computeRequiredDocuments, formatRequiredDocumentsMessage } from './requiredDocuments.service';
 import type { DocTopic } from './requiredDocuments.service';
 import { getPersonalizedForms, formatTrailingLine } from './taxForms.service';
 import { summariseAuditDuration } from '../utils/workingDays';
@@ -263,101 +262,12 @@ export async function handleGetAuditStatus(params: {
     return JSON.stringify({ status: 'on_audit', cases: perCase });
 }
 
-// ─── Document tools ───────────────────────────────────────────────────────
-//
-// Both tools read from a single source of truth: the
-// `riivo_taxsubmissionsdocuments` entity. Every WhatsApp upload writes a row
-// there (with `_riivo_client_value` set to the contact); Power Automate does
-// the same for emailed docs. No preseason-record reads — the entity rows are
-// authoritative.
-
-function pickSubmissionDocLabel(row: any): string {
-    return row?.['_riivo_documenttype_value@OData.Community.Display.V1.FormattedValue']
-        || row?.riivo_taxsubmissionsdocument
-        || 'Document';
-}
-
-function formatYearTag(year: number | null): string {
-    return year ? ` (${year})` : '';
-}
-
-// ─── get_received_documents ───────────────────────────────────────────────
-
-export async function handleGetReceivedDocuments(params: {
-    contactId: string;
-    taxYear?: number;
-}): Promise<string> {
-    const rows = await dynamicsService.getTaxSubmissionDocsByClient(params.contactId, params.taxYear);
-
-    if (rows.length === 0) {
-        return JSON.stringify({
-            status: 'none_received',
-            message: `I can't see anything received from you yet${params.taxYear ? ` for ${params.taxYear}` : ''}. If you've already sent docs and they're not showing up here, send them through and I'll get them logged.`,
-        });
-    }
-
-    // Verified uploads vs. Issue 27 "client states provided" markers. The two
-    // are surfaced separately so we never present an unverified, client-stated
-    // doc as something TTT has actually received.
-    const toEntry = (r: any) => ({
-        label: pickSubmissionDocLabel(r),
-        tax_year: typeof r?.riivo_taxyear === 'number' ? r.riivo_taxyear : null,
-        created_on: r?.createdon || null,
-    });
-    const docs = rows.filter(r => !isClientStatedMarkerRow(r)).map(toEntry);
-    const clientStated = rows.filter(r => isClientStatedMarkerRow(r)).map(toEntry);
-
-    const lines: string[] = [];
-    if (docs.length > 0) {
-        lines.push(`Here's what we've got on file from you${params.taxYear ? ` for ${params.taxYear}` : ''}:`);
-        docs.forEach(d => lines.push(`• ${d.label}${formatYearTag(d.tax_year)}`));
-    } else {
-        lines.push(`I haven't got any documents confirmed on file from you yet${params.taxYear ? ` for ${params.taxYear}` : ''}.`);
-    }
-
-    if (clientStated.length > 0) {
-        if (lines.length > 0) lines.push('');
-        lines.push('You\'ve told me these are already with your consultant (I\'ve noted them, but they\'re not confirmed on our side yet):');
-        clientStated.forEach(d => lines.push(`• ${d.label}${formatYearTag(d.tax_year)} — noted as sent to your consultant`));
-    }
-
-    return JSON.stringify({
-        status: docs.length > 0 ? 'received' : 'client_stated_only',
-        message: lines.join('\n'),
-        documents: docs,
-        client_stated_unverified: clientStated,
-        count: docs.length,
-    });
-}
-
 // ─── get_required_documents ───────────────────────────────────────────────
-
-/**
- * Normalise a label so we can match required-list entries against uploaded
- * rows (which carry canonical strings like "IRP5", "Bank Statements",
- * "Medical Aid Tax Certificate", "Logbook", "Other"). Lowercases, strips
- * punctuation and trailing notes in brackets.
- */
-function normaliseDocLabel(label: string): string {
-    return label
-        .toLowerCase()
-        .replace(/\([^)]*\)/g, '')
-        .replace(/[—–-]/g, ' ')
-        .replace(/[^a-z0-9 ]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-function labelsMatch(required: string, uploaded: string): boolean {
-    const a = normaliseDocLabel(required);
-    const b = normaliseDocLabel(uploaded);
-    if (!a || !b) return false;
-    if (a === b) return true;
-    // Loose substring match — "irp5" matches "irp5", "bank statement" matches
-    // "bank statements", "medical aid tax certificate" matches "medical aid
-    // tax certificate", etc.
-    return a.includes(b) || b.includes(a);
-}
+//
+// ADR 0004 (advice-only): this reads the client's PROFILE (SARS source codes +
+// industry) to personalise WHICH documents are associated with their return,
+// but never reads their upload records and never diffs. Tina advises what to
+// gather; she never tells the client what they have or haven't sent.
 
 export async function handleGetRequiredDocuments(params: {
     contactId: string;
@@ -369,64 +279,7 @@ export async function handleGetRequiredDocuments(params: {
     const industryName = profile?.industryName || null;
     const expected = computeRequiredDocuments(sourceCodes, industryName, new Date(), params.topic);
 
-    // The target year for the upload cross-reference: caller-supplied if
-    // given, otherwise the current SA tax year (which also matches the
-    // checklist computed above).
-    const targetYear = typeof params.taxYear === 'number' && Number.isFinite(params.taxYear)
-        ? params.taxYear
-        : expected.taxYear.label;
-    const uploadedRows = await dynamicsService.getTaxSubmissionDocsByClient(params.contactId, targetYear);
-    // Verified uploads suppress the ask AND count as received; Issue 27
-    // "client states provided" markers suppress the ask but are surfaced
-    // distinctly — never as a verified receipt.
-    const uploadedLabels = uploadedRows.filter(r => !isClientStatedMarkerRow(r)).map(pickSubmissionDocLabel);
-    const clientStatedLabels = uploadedRows.filter(r => isClientStatedMarkerRow(r)).map(pickSubmissionDocLabel);
-
-    const allExpected = [...expected.bySourceCode, ...expected.byIndustry, ...expected.byTopic, ...expected.baseline];
-    const seen = new Set<string>();
-    const received: { label: string }[] = [];
-    const clientStated: { label: string }[] = [];
-    const outstanding: { label: string; notes?: string }[] = [];
-    for (const doc of allExpected) {
-        const key = doc.label.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        if (uploadedLabels.some(u => labelsMatch(doc.label, u))) {
-            received.push({ label: doc.label });
-        } else if (clientStatedLabels.some(u => labelsMatch(doc.label, u))) {
-            clientStated.push({ label: doc.label });
-        } else {
-            outstanding.push({ label: doc.label, notes: doc.reason });
-        }
-    }
-
-    const yearLabel = targetYear;
-    const lines: string[] = [];
-
-    if (received.length > 0) {
-        lines.push(`Here's what we've got on file from you for ${yearLabel}:`);
-        received.forEach(d => lines.push(`• ${d.label}`));
-        lines.push('');
-    }
-
-    if (clientStated.length > 0) {
-        lines.push(`Noted as already sent to your consultant (not yet confirmed on our side):`);
-        clientStated.forEach(d => lines.push(`• ${d.label}`));
-        lines.push('');
-    }
-
-    if (outstanding.length === 0) {
-        lines.push(`Looks like we've got everything we need for your ${yearLabel} return. Your consultant will be in touch if anything else comes up.`);
-    } else {
-        lines.push(`Still outstanding for your ${yearLabel} return:`);
-        outstanding.forEach(d => lines.push(`• ${d.label}${d.notes ? ` (${d.notes})` : ''}`));
-        if (!expected.hasPersonalisation) {
-            lines.push('');
-            lines.push('This is a typical list. Once your consultant has set up your income sources and industry, I can give you a more specific list.');
-        }
-        lines.push('');
-        lines.push("Reply with the file directly — I'll route it to your consultant.");
-    }
+    const lines: string[] = [formatRequiredDocumentsMessage(expected)];
 
     const relevantForms = getPersonalizedForms(sourceCodes);
     if (relevantForms.length > 0) {
@@ -435,12 +288,10 @@ export async function handleGetRequiredDocuments(params: {
     }
 
     return JSON.stringify({
-        status: outstanding.length === 0 ? 'all_received' : 'outstanding',
+        status: 'associated_documents',
         message: lines.join('\n'),
-        tax_year: yearLabel,
-        received,
-        client_stated_unverified: clientStated,
-        outstanding,
+        tax_year: expected.taxYear.label,
+        documents: [...expected.bySourceCode, ...expected.byIndustry, ...expected.byTopic, ...expected.baseline].map(d => ({ label: d.label, notes: d.reason })),
         has_personalisation: expected.hasPersonalisation,
     });
 }

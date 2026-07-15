@@ -1,6 +1,13 @@
 # ADR 0002 — Document collection is a stateless, client-initiated journey
 
-Status: accepted · 2026-06-24
+Status: accepted · 2026-06-24 · **decisions 2 & 3 superseded by [ADR 0004](0004-advice-only-document-guidance.md) (2026-07-15)**
+
+> **Superseded in part.** ADR 0004 removes the received-doc *diff* entirely: Tina no longer reads
+> a client's `riivo_taxsubmissionsdocuments` rows and no longer reports received / outstanding /
+> "already sent" status. Decision 1 (stateless — no journey state machine) and decision 4 (pure
+> recommendation kernel) still hold; the kernel now returns advice only. Decisions 2 and 3, and
+> the escape-hatch marker, are withdrawn. Read this ADR for the journey framing, then ADR 0004 for
+> the current document-guidance behaviour.
 
 ## Context
 

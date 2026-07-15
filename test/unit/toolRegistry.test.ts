@@ -61,7 +61,6 @@ function fakeDynamics(overrides: FakeOverrides = {}): DynamicsPort {
         createCallbackRequest: async () => true,
         getContactTaxProfile: async () => null,
         logTaxFormSentToContact: async () => ({ success: true }),
-        markDocumentClientStated: async () => ({ success: true, taxYear: 2026 }),
         // Staff write methods (slice 5).
         createCase: async () => ({ new_name: 'CASE-1', new_caseid: 'case-1' }),
         createLead: async () => ({ new_leadid: 'lead-1' }),
@@ -140,7 +139,6 @@ function fakeTaxFaq(overrides: Partial<TaxFaqPort> = {}): TaxFaqPort {
         getRefundStatus: async (p) => JSON.stringify({ tool: 'refund', ...p }),
         getSubmissionStatus: async (p) => JSON.stringify({ tool: 'submission', ...p }),
         getAuditStatus: async (p) => JSON.stringify({ tool: 'audit', ...p }),
-        getReceivedDocuments: async (p) => JSON.stringify({ tool: 'received', ...p }),
         getRequiredDocuments: async (p) => JSON.stringify({ tool: 'required', ...p }),
         ...overrides,
     };
@@ -204,13 +202,11 @@ test('deriveOfferedTools: client gets every read-only client tool, ungated by pe
             'get_my_referral_code',
             'get_office_contact',
             'get_outstanding_balance',
-            'get_received_documents',
             'get_refund_status',
             'get_required_documents',
             'get_submission_status',
             'get_tax_number',
             'list_tax_forms',
-            'mark_document_already_sent',
             'opt_out_whatsapp',
             'request_consultant_callback',
             'save_document',
@@ -813,20 +809,21 @@ test('get_refund_status: falls back to "Client" when no name is on the turn', as
     });
 });
 
-test('get_submission_status / get_received_documents / get_audit_status delegate to their port methods', async () => {
+test('get_submission_status / get_audit_status delegate to their port methods', async () => {
     const ctx = buildCtx();
     assert.deepStrictEqual(
         JSON.parse(await runTool('get_submission_status', { tax_year: 2024 }, ctx)),
         { tool: 'submission', contactId: 'contact-1', taxYear: 2024 },
     );
     assert.deepStrictEqual(
-        JSON.parse(await runTool('get_received_documents', {}, ctx)),
-        { tool: 'received', contactId: 'contact-1' },
-    );
-    assert.deepStrictEqual(
         JSON.parse(await runTool('get_audit_status', { tax_year: 2026 }, ctx)),
         { tool: 'audit', contactId: 'contact-1', taxYear: 2026 },
     );
+});
+
+test('get_received_documents is retired — no such tool (ADR 0004, advice-only)', async () => {
+    const ctx = buildCtx();
+    await assert.rejects(() => runTool('get_received_documents', {}, ctx));
 });
 
 test('tax-faq tools and consultant/referral tools are denied to staff (client-only roles)', async () => {
@@ -1293,7 +1290,7 @@ test('upload_irp5: client success clears the upload, flags the session, and rend
                     taxsubmissionsdocumentId: 't1',
                     sharepointUrl: 'http://sp',
                     wrongYearWarning: undefined,
-                    outstanding: [],
+                    associatedDocs: [],
                 }),
             }),
         },
@@ -1331,32 +1328,12 @@ test('upload_irp5: a non-State-B lead is rejected as wrong_role', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// mark_document_already_sent handler
+// mark_document_already_sent — retired (ADR 0004, advice-only)
 // ---------------------------------------------------------------------------
 
-test('mark_document_already_sent: records the noted docs and returns noted_unverified', async () => {
-    const seen: string[] = [];
-    const ctx = buildCtx({
-        deps: { dynamics: fakeDynamics({ markDocumentClientStated: async (p) => { seen.push(p.canonicalDocType); return { success: true, taxYear: 2026 }; } }) },
-    });
-    const payload = JSON.parse(await runTool('mark_document_already_sent', { doc_types: ['IRP5', 'Bank statement'] }, ctx));
-    assert.equal(payload.status, 'noted_unverified');
-    assert.deepStrictEqual(payload.recorded, ['IRP5', 'Bank statement']);
-    assert.deepStrictEqual(seen, ['IRP5', 'Bank statement']);
-});
-
-test('mark_document_already_sent: empty doc_types returns no_doc_types', async () => {
+test('mark_document_already_sent is retired — no such tool', async () => {
     const ctx = buildCtx();
-    const payload = JSON.parse(await runTool('mark_document_already_sent', { doc_types: [] }, ctx));
-    assert.equal(payload.error, 'no_doc_types');
-});
-
-test('mark_document_already_sent: all writes failing returns write_failed', async () => {
-    const ctx = buildCtx({
-        deps: { dynamics: fakeDynamics({ markDocumentClientStated: async () => ({ success: false, taxYear: 2026 }) }) },
-    });
-    const payload = JSON.parse(await runTool('mark_document_already_sent', { doc_types: ['IRP5'] }, ctx));
-    assert.equal(payload.error, 'write_failed');
+    await assert.rejects(() => runTool('mark_document_already_sent', { doc_types: ['IRP5'] }, ctx));
 });
 
 // ===========================================================================

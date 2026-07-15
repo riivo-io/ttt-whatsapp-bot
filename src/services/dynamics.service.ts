@@ -33,27 +33,6 @@ export interface LocalCrmEntity {
 
 const AUDIT_FIELDS = ['ttt_ai_triggered_by', 'ttt_ai_model', 'ttt_ai_generated_at'];
 
-/**
- * Notes sentinel stamped on the Issue 27 "already sent it" escape-hatch row.
- * A `riivo_taxsubmissionsdocuments` row carrying this in `riivo_documentnotes`
- * is an UNVERIFIED client-stated marker, NOT a verified receipt: it suppresses
- * the re-ask in re-derivation but must never be counted/surfaced as received.
- * Worded so a consultant reading the CRM sees exactly what it is (ADR 0002
- * decision 3). Do not reword without updating isClientStatedMarkerRow.
- */
-export const CLIENT_STATED_DOC_NOTE = 'CLIENT STATES PROVIDED — UNVERIFIED (client says this was sent to their consultant; TTT has not received or verified it)';
-
-/**
- * True when a tax-submission-document row is an unverified client-stated marker
- * (Issue 27) rather than a verified upload. Keys on the notes sentinel — the
- * one field we control on write. Verified WhatsApp uploads and Power Automate
- * emailed-doc rows never carry it.
- */
-export function isClientStatedMarkerRow(row: any): boolean {
-    const notes = typeof row?.riivo_documentnotes === 'string' ? row.riivo_documentnotes : '';
-    return notes.toUpperCase().includes('CLIENT STATES PROVIDED');
-}
-
 // Boolean field on the new_lead entity indicating a signed Letter of
 // Engagement has been received. Schema name in Dynamics is riivo_LoEReceived;
 // the Web API uses the lowercased logical name.
@@ -2191,62 +2170,11 @@ export class DynamicsService {
     }
 
     /**
-     * Record the Issue 27 "already sent it" escape hatch: an UNVERIFIED
-     * "client states provided" marker for a doc the client says they already
-     * sent to their consultant. Writes a `riivo_taxsubmissionsdocuments`-shaped
-     * row that is clearly distinct from a verified upload —
-     *   - `riivo_uploaded = false` (verified WhatsApp/Power Automate rows set true)
-     *   - NO `riivo_filereference` (there is no file)
-     *   - `riivo_documentnotes` = CLIENT_STATED_DOC_NOTE sentinel
-     * The canonical doc label rides in `riivo_taxsubmissionsdocument` so
-     * re-derivation can loose-match and suppress that item's re-ask across
-     * session resets. It is NEVER counted as a verified receipt (see
-     * isClientStatedMarkerRow); a consultant can confirm or clear it.
-     */
-    async markDocumentClientStated(params: {
-        contactId: string;
-        canonicalDocType: string;
-        triggeredBy: string;
-    }): Promise<{ success: boolean; recordId?: string; taxYear: number; error?: string }> {
-        const inferred = await this.inferUploadContext(params.contactId);
-
-        const payload: any = {
-            'riivo_taxsubmissionsdocument': params.canonicalDocType,
-            'riivo_taxyear': inferred.taxYear,
-            'riivo_uploaded': false,
-            'riivo_documentnotes': `${CLIENT_STATED_DOC_NOTE} — ${params.canonicalDocType}`,
-            'riivo_Client@odata.bind': `/contacts(${params.contactId})`,
-        };
-
-        try {
-            const response = await this.crmPost('riivo_taxsubmissionsdocumentses', payload, params.triggeredBy);
-            const recordId = response.data?.riivo_taxsubmissionsdocumentsid;
-            console.log(`[Dynamics CRM] Recorded UNVERIFIED client-stated marker ${recordId} for contact ${params.contactId}, doc "${params.canonicalDocType}", year ${inferred.taxYear}`);
-            await supabaseService.logCrmWrite({
-                crmEntity: 'riivo_taxsubmissionsdocumentses',
-                crmRecordId: recordId,
-                action: 'create',
-                payload: {
-                    canonical_doc_type: params.canonicalDocType,
-                    tax_year: inferred.taxYear,
-                    client_stated_unverified: true,
-                },
-                triggeredBy: params.triggeredBy,
-            });
-            return { success: true, recordId, taxYear: inferred.taxYear };
-        } catch (error: any) {
-            const errMsg = error?.response?.data?.error?.message || error.message;
-            console.error(`[Dynamics CRM] Failed to record client-stated marker for contact ${params.contactId}:`, errMsg);
-            return { success: false, taxYear: inferred.taxYear, error: errMsg };
-        }
-    }
-
-    /**
      * Active IRP5 records for a client in a specific assessment year. One
      * row per employer is the expected pattern — multi-job filers will have
      * several. Used by the IRP5 upload flow to (a) dedupe re-sends by
      * certificate number and (b) union source codes across all of a client's
-     * IRP5s before computing the outstanding-doc list.
+     * IRP5s before computing the associated-docs advice list.
      */
     async getIrp5RecordsForClient(contactId: string, assessmentYear: number): Promise<any[]> {
         const token = await this.getToken();

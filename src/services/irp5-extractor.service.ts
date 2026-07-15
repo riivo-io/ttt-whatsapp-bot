@@ -33,7 +33,7 @@ export interface Irp5ExtractedFields {
     riivoFields: Record<string, any>;
     /**
      * Every 4-digit SARS code spotted on the certificate, deduped. Drives
-     * `requiredDocuments.computeMissingDocsForClient`. Includes codes that
+     * `requiredDocuments.computeAssociatedDocsForClient`. Includes codes that
      * don't have a dedicated riivo_irp5s field (e.g. 3696, 3697) — the
      * advice engine cares about them even when the CRM doesn't store them.
      */

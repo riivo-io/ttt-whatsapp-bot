@@ -1,14 +1,19 @@
 /**
- * Pure kernel of the document-collection journey (ADR 0002, PRD §Step 2).
+ * Pure kernel of document guidance (ADR 0002, ADR 0004).
  *
- * Given a client's tax signals (SARS source codes + industry) and what's
- * already on file, produce the **concise, reason-annotated, form-deduped**
- * outstanding list. This is the decision logic the deletion test in ADR 0002
- * calls out: source-code / industry expansion, received-doc diff, form
- * supersession, reason attachment, and ordering. It is **pure** — no Dynamics
- * reads, no clock beyond an injected `today`. The service (`requiredDocuments
- * .service.ts`) keeps doing the Dynamics reads and feeds the data in, mirroring
- * the `decideCaseRouting` / `decideFeedbackReply` / `clientRoleContext` seam.
+ * Given a client's tax signals (SARS source codes + industry), produce the
+ * **concise, reason-annotated, form-deduped** list of documents *associated*
+ * with their return — pure advice on what to gather, NOT a status check.
+ *
+ * ADR 0004 (advice-only): this kernel deliberately does NOT know or care what
+ * the client has already sent. TTT's upload records are unreliable, so Tina
+ * never diffs the associated list against them and never tells a client what
+ * they have or haven't uploaded. The decision logic here is source-code /
+ * industry / topic expansion, form supersession, reason attachment, and
+ * ordering — no received-doc diff. It is **pure** — no Dynamics reads, no clock
+ * beyond an injected `today`. The service (`requiredDocuments.service.ts`)
+ * supplies the profile signals, mirroring the `decideCaseRouting` /
+ * `decideFeedbackReply` / `clientRoleContext` seam.
  *
  * Two rules from the PRD are encoded structurally:
  *  - **Reason on every spec.** Every `DocSpec` carries a non-empty client-facing
@@ -65,9 +70,7 @@ export type DocSpec = { label: string; reason: string };
  * stays out** entirely.
  *
  * Guide source of truth: `docs/document-requirements-guide.md` §Everyone
- * (baseline). The investment-certificate item keeps the `IT3(b)` hint in
- * parentheses so the received-doc loose-match still recognises an uploaded
- * IT3(b) (Issue 03). Re-sync this table when that guide section changes.
+ * (baseline). Re-sync this table when that guide section changes.
  */
 export const BASELINE_DOCS: DocSpec[] = [
     { label: 'IRP5', reason: "your employer's tax certificate — the starting point for your return" },
@@ -318,21 +321,11 @@ export type DocRecommendationInput = {
     sourceCodes: string[];
     /** Contact's industry name, or null if unknown. */
     industryName: string | null;
-    /** Labels of docs VERIFIED on file (a real upload or Power Automate row). */
-    receivedLabels: string[];
-    /**
-     * Labels of docs the client has *stated* they already sent to their
-     * consultant — the Issue 27 escape hatch (ADR 0002 decision 3). These
-     * SUPPRESS the re-ask (so the item leaves `outstanding`) but are NEVER
-     * counted as a verified receipt: they surface in their own `clientStated`
-     * bucket, visibly distinct from `received`. Defaults to none.
-     */
-    clientStatedLabels?: string[];
     /**
      * Optional non-code scenario the client disclosed in chat — foreign or
      * rental income (Issue 04). Surfaces the matching `TOPIC_DOCS` specs,
-     * unioned + deduped/diffed like the rest. Foreign income can only ever reach
-     * the kernel this way (it is never read off an IRP5). Defaults to none.
+     * unioned + deduped like the rest. Foreign income can only ever reach the
+     * kernel this way (it is never read off an IRP5). Defaults to none.
      */
     topic?: DocTopic;
     /** Injected clock for the tax-year calc. */
@@ -347,16 +340,13 @@ export type DocRecommendationInput = {
 
 export type DocRecommendation = {
     taxYear: TaxYear;
-    /** Ordered, form-deduped, received-filtered list of what we don't yet see. */
-    outstanding: DocRecommendationItem[];
-    /** Items VERIFIED on file, surfaced so the caller can acknowledge them. */
-    received: DocRecommendationItem[];
     /**
-     * Items the client *stated* they already sent to their consultant (Issue 27
-     * escape hatch). Suppressed from `outstanding` but kept distinct from
-     * `received` — the caller must never present these as verified/received.
+     * Ordered, form-deduped list of documents associated with this client's
+     * return — pure advice (ADR 0004). This is NOT a diff against anything on
+     * file; the caller must present it as "what you'll typically need", never
+     * as "outstanding" or "what you still owe us".
      */
-    clientStated: DocRecommendationItem[];
+    documents: DocRecommendationItem[];
     matchedSourceCodes: string[];
     matchedIndustry: string | null;
     /** The disclosed topic that contributed specs, or null (Issue 04). */
@@ -365,8 +355,9 @@ export type DocRecommendation = {
 };
 
 /**
- * Build the tailored, reason-annotated, form-deduped, received-filtered
- * recommendation. Pure: the only clock is the injected `today`.
+ * Build the tailored, reason-annotated, form-deduped list of documents
+ * associated with the client's return. Pure: the only clock is the injected
+ * `today`.
  *
  * Ordering (PRD §Step 2 "lead with the form"): forms first, then source-code
  * docs, then industry docs, then baseline docs. De-dupes by label across all
@@ -376,13 +367,12 @@ export type DocRecommendation = {
  * source-code bucket is empty and the result is the safe generic list driven by
  * industry + baseline — still reason-annotated, never a dead end.
  *
- * Three-way diff (Issue 27): each candidate lands in `received` (verified on
- * file), `clientStated` (client says it's already with their consultant —
- * suppresses the ask but is NOT a verified receipt), or `outstanding`.
+ * Advice-only (ADR 0004): the kernel does NOT diff against the client's upload
+ * records. It returns the full associated list; Tina never reports what the
+ * client has or hasn't sent.
  */
 export function buildDocRecommendation(input: DocRecommendationInput): DocRecommendation {
-    const { sourceCodes, industryName, receivedLabels } = input;
-    const clientStatedLabels = input.clientStatedLabels ?? [];
+    const { sourceCodes, industryName } = input;
     const includeForms = input.includeForms !== false;
     const today = input.today ?? new Date();
     const taxYear = getCurrentSaTaxYear(today);
@@ -454,28 +444,11 @@ export function buildDocRecommendation(input: DocRecommendationInput): DocRecomm
     topicDocs.forEach(pushDoc);
     BASELINE_DOCS.forEach(pushDoc);
 
-    // 5. Split into received (verified) / client-stated (unverified marker) /
-    //    outstanding. A verified receipt wins over a client-stated marker for
-    //    the same doc. A client-stated marker suppresses the ask (drops it out
-    //    of `outstanding`) without ever being counted as received.
-    const outstanding: DocRecommendationItem[] = [];
-    const received: DocRecommendationItem[] = [];
-    const clientStated: DocRecommendationItem[] = [];
-    for (const item of items) {
-        if (receivedLabels.some(u => labelsLooseMatch(item.label, u))) {
-            received.push(item);
-        } else if (clientStatedLabels.some(u => labelsLooseMatch(item.label, u))) {
-            clientStated.push(item);
-        } else {
-            outstanding.push(item);
-        }
-    }
-
+    // Advice-only (ADR 0004): no diff against on-file records. The assembled,
+    // deduped, form-superseded list IS the recommendation.
     return {
         taxYear,
-        outstanding,
-        received,
-        clientStated,
+        documents: items,
         matchedSourceCodes,
         matchedIndustry,
         matchedTopic,
@@ -496,17 +469,4 @@ export function normaliseDocLabel(label: string): string {
         .replace(/[^a-z0-9 ]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
-}
-
-/**
- * Loose match between a required label and an uploaded/received label —
- * exact after normalisation, or one is a substring of the other ("bank
- * statement" ~ "bank statements", "irp5" ~ "irp5 2024").
- */
-export function labelsLooseMatch(required: string, uploaded: string): boolean {
-    const a = normaliseDocLabel(required);
-    const b = normaliseDocLabel(uploaded);
-    if (!a || !b) return false;
-    if (a === b) return true;
-    return a.includes(b) || b.includes(a);
 }
