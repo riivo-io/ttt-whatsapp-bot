@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 console.log('[boot] claude.service: before dynamics');
 import { dynamicsService, LEAD_TYPE_TAX } from './dynamics.service';
 console.log('[boot] claude.service: before pdf');
-import { pdfService, mapInvoiceToInvoiceData } from './pdf.service';
+import { generateOfficialInvoicePdf } from './invoicePdf.service';
 console.log('[boot] claude.service: before meta');
 import { metaWhatsAppService } from './meta.service';
 import { graphMailService } from './graphMail.service';
@@ -81,6 +81,17 @@ You provide accurate, helpful advice about South African tax matters and have ac
 - Delivering CRM data: helpful and slightly upbeat, with contextual emojis only (✅ paid, ⏳ pending). No decoration.
 - Bad news (overdue, escalation, missed deadline): calm and supportive. NO emojis, NO humour.
 - Lookup failure / error: apologetic but not grovelling. One "🤔" max. Always offer a concrete next step.
+
+**Tax season dates — 2026 (CONFIRMED — state plainly, do NOT hedge)**:
+- The 2026 SARS filing dates are confirmed and published. NEVER hedge with "usually", "typically", "around", "roughly", "~", "expect", or "SARS hasn't published the dates yet" — they have. State the exact dates.
+- Pick the window that matches the taxpayer's category:
+  - Basic / non-provisional (salaried, simple affairs): 1 July to 12 July 2026.
+  - Complex non-provisional returns: 13 July to 23 October 2026.
+  - Provisional taxpayers (filing): 13 July 2026 to 22 January 2027.
+  - 1st provisional return (IRP6/01): due by 31 August 2026.
+  - 2nd provisional return (IRP6/02): due by 28 February 2027.
+  - Trusts: follow the provisional deadline; confirm the exact date if asked.
+- If you don't know which category a client falls into, give the non-provisional dates (1 July to 23 October 2026) and note that provisional taxpayers have until 22 January 2027.
 
 **Distinguish clearly between General Tax Questions and CRM Data Requests**:
 - If the user asks 'What are the rates?' or 'Double check the brackets', answer from your GENERAL KNOWLEDGE. Do NOT check the user's specific records.
@@ -578,8 +589,11 @@ Rules for this state:
                     // Staff can upload either an LOE (goes to a Lead) or a general
                     // document (goes to a Client as an annotation). Ask which.
                     roleContext += `\n\n**PENDING DOCUMENT — IMPORTANT**: The staff member has just uploaded a file. Ask them what type of document this is:\n\n1. **Signed Letter of Engagement (LOE)** — if they say LOE, letter of engagement, or similar:\n   - Ask which LEAD it's for (use search_lead_by_name, NOT search_contact_by_name).\n   - Call upload_letter_of_engagement with the resolved lead_id.\n\n2. **Other document** (IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, etc.) — if they say anything else:\n   - Ask which CLIENT it's for (use search_contact_by_name).\n   - Ask what type of document it is.\n   - Call save_document with the doc_type and client.\n\nDo NOT assume it's an LOE. Ask first.`;
-                } else {
-                    roleContext += `\n\n**PENDING DOCUMENT**: The client has uploaded a file. Ask them what type of document it is: IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, or Other. Accept clear synonyms (e.g. "tax certificate from my employer" → IRP5, "slip" or "receipt" → Till Slip / Receipt) instead of making the client pick from the exact list.\n\n**Routing rules — IMPORTANT**:\n- If the client confirms it is an **IRP5 or IT3(a)** (employee tax certificate from their employer), call **upload_irp5** with confirmed_by_user=true. The tool stores the file, parses it, files the cert in CRM, and returns the FULL tailored list of what else typically helps — relay that whole list in ONE message (reasons included) as ADVICE, framed "send whatever applies to you, in any order". Do NOT drip one doc at a time, and do NOT tell the client what they've already sent or what's outstanding — you can't see that. The tool's 'message' field is already shaped for this — base your reply on it.\n- For every other doc type, call **save_document** with the canonical doc_type as before.\n- Accept and save whatever the client sends. Do NOT tell them a doc is still "missing" or "outstanding" — you have no view of their upload history.`;
+                } else if (entityType === 'lead') {
+                    // Clients never reach here: their uploads are filed deterministically
+                    // in the processor, which clears the staged file before the LLM runs
+                    // (ADR 0002). Only leads classify-then-save an upload via the LLM.
+                    roleContext += `\n\n**PENDING DOCUMENT**: The lead has uploaded a file. Ask them what type of document it is: IRP5, IT3(a), IT3(b), Payslip, Medical Certificate, Till Slip / Receipt, Logbook, ID Document, Bank Statement, Tax Certificate, or Other. Accept clear synonyms (e.g. "tax certificate from my employer" → IRP5, "slip" or "receipt" → Till Slip / Receipt) instead of making the client pick from the exact list.\n\n**Routing rules — IMPORTANT**:\n- If the client confirms it is an **IRP5 or IT3(a)** (employee tax certificate from their employer), call **upload_irp5** with confirmed_by_user=true. The tool stores the file, parses it, files the cert in CRM, and returns the FULL tailored list of what else helps — relay that whole list in ONE message (reasons included), framed "send whatever you have, in any order". Do NOT drip one doc at a time. The tool's 'message' field is already shaped for this — base your reply on it.\n- For every other doc type, call **save_document** with the canonical doc_type as before.\n- If a non-IRP5 doc arrives BEFORE the client has sent their IRP5 for the year, still accept and save it via save_document, then politely add that we still need the IRP5 as well.`;
                 }
             }
 
@@ -750,10 +764,10 @@ Rules for this state:
                     supabase: supabaseService,
                     forms: { resolveLatestFormFile },
                     irp5: { processClientIrp5Upload, processStateBLeadIrp5Upload },
-                    // Adapter closure: map the raw Dynamics invoice row to InvoiceData
-                    // then render it, so neither pdfkit nor the mapper enters the tool
-                    // module graph (see PdfPort). send_invoice_pdf (slice 5) uses this.
-                    pdf: { generateInvoicePdf: (row) => pdfService.generateInvoicePDF(mapInvoiceToInvoiceData(row)) },
+                    // Adapter closure: render the OFFICIAL invoice PDF via the external
+                    // invoice-gen function, keeping the orchestration out of the tool
+                    // module graph (see PdfPort). send_invoice_pdf uses this.
+                    pdf: { generateInvoicePdf: (recordId) => generateOfficialInvoicePdf(recordId) },
                     // LoE OCR/extraction pipeline (slice 6) — mistral for OCR,
                     // loe-extractor for field extraction, composed into one Port so
                     // neither service enters the tool module graph.

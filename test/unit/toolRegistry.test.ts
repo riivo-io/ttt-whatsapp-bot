@@ -209,11 +209,13 @@ test('deriveOfferedTools: client gets every read-only client tool, ungated by pe
             'list_tax_forms',
             'opt_out_whatsapp',
             'request_consultant_callback',
-            'save_document',
             'send_tax_form',
-            'upload_irp5',
         ],
     );
+    // save_document and upload_irp5 are deliberately NOT offered to clients:
+    // client uploads are filed deterministically in the processor (ADR 0002),
+    // which clears the staged file before the LLM runs, so a client can never
+    // usefully classify-then-save via a tool. Staff and leads still get them.
 });
 
 test('deriveOfferedTools: staff get only the permission-matched registry tools', () => {
@@ -995,12 +997,40 @@ test('get_industries: no_match echoes "(no filter)" when called without a filter
 // get_invoice_pdf handler
 // ---------------------------------------------------------------------------
 
-test('get_invoice_pdf: returns a download link on success', async () => {
-    const ctx = buildCtx({ deps: { dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ invoicenumber: 'INV123' }) }) } });
+test('get_invoice_pdf: renders the official PDF and sends it to the caller as a WhatsApp document', async () => {
+    let sentTo: string | null = null;
+    let sentName: string | null = null;
+    let renderedRecordId: string | null = null;
+    const ctx = buildCtx({
+        phoneNumber: '+27820001234',
+        deps: {
+            dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }) }),
+            pdf: fakePdf({ generateInvoicePdf: async (recordId) => { renderedRecordId = recordId; return Buffer.from('pdf'); } }),
+            meta: fakeMeta({ sendDocument: async (to, _buf, name) => { sentTo = to; sentName = name; return { delivered: true, dryRun: false }; } }),
+        },
+    });
     const payload = JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV123' }, ctx));
-    assert.equal(payload.status, 'success');
-    assert.equal(payload.pdfLink, 'http://localhost:3001/api/pdf/invoice/INV123');
-    assert.ok(payload.message.includes("Here's your invoice:"));
+    assert.equal(payload.status, 'sent');
+    assert.equal(renderedRecordId, 'inv-guid-1');
+    assert.equal(sentTo, '+27820001234');
+    assert.equal(sentName, 'INV123.pdf');
+    // No link should ever be handed to the client.
+    assert.equal(payload.pdfLink, undefined);
+    assert.ok(!/http/.test(payload.message), `message must not contain a link: ${payload.message}`);
+});
+
+test('get_invoice_pdf: a failed generation returns an error and sends nothing', async () => {
+    let sent = false;
+    const ctx = buildCtx({
+        deps: {
+            dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }) }),
+            pdf: fakePdf({ generateInvoicePdf: async () => null }),
+            meta: fakeMeta({ sendDocument: async () => { sent = true; return { delivered: true, dryRun: false }; } }),
+        },
+    });
+    const payload = JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV123' }, ctx));
+    assert.equal(payload.status, 'error');
+    assert.equal(sent, false);
 });
 
 test('get_invoice_pdf: returns not-found error when the invoice is missing', async () => {
@@ -1016,9 +1046,9 @@ test('get_invoice_pdf: staff need the send_invoice_pdf permission', async () => 
         entityType: 'user',
         ownerFilter: 'staff-1',
         permittedToolKeys: ['send_invoice_pdf'],
-        deps: { dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ invoicenumber: 'INV1' }) }) },
+        deps: { dynamics: fakeDynamics({ getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV1' }) }) },
     });
-    assert.equal(JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV1' }, allowed)).status, 'success');
+    assert.equal(JSON.parse(await runTool('get_invoice_pdf', { invoice_number: 'INV1' }, allowed)).status, 'sent');
 });
 
 // ---------------------------------------------------------------------------
@@ -1212,24 +1242,30 @@ test('opt_out_whatsapp: failure returns an error', async () => {
 // ---------------------------------------------------------------------------
 
 test('save_document: no pending upload returns an error', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => false }) });
+    const ctx = buildCtx({ entityType: 'lead', pendingUpload: fakePendingUpload({ has: () => false }) });
     const payload = JSON.parse(await runTool('save_document', { doc_type: 'IRP5' }, ctx));
     assert.equal(payload.status, 'error');
     assert.ok(payload.message.includes('No pending document upload found'));
 });
 
-test('save_document: client saves to their own profile and flags the session', async () => {
+test('save_document: a client is denied — uploads are auto-filed in the processor (ADR 0002)', async () => {
+    // Clients are not in save_document's roles. Their uploads are filed
+    // deterministically in the processor, which clears the staged file before the
+    // LLM runs, so the dispatch gate denies any client attempt to classify-then-save.
+    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => true }) });
+    assert.equal(await runTool('save_document', { doc_type: 'Payslip' }, ctx), DENIED);
+});
+
+test('save_document: a lead saves to their own lead record', async () => {
     let savedEntity: any = null;
-    let flagged = false;
     const ctx = buildCtx({
+        entityType: 'lead',
         pendingUpload: fakePendingUpload({ has: () => true, save: async (_d, e) => { savedEntity = e; return { success: true, fileName: 'f.pdf' }; } }),
-        deps: { supabase: fakeSupabase({ flagSessionDocUpload: async () => { flagged = true; } }) },
     });
     const payload = JSON.parse(await runTool('save_document', { doc_type: 'Payslip' }, ctx));
     assert.equal(payload.status, 'success');
     assert.equal(payload.message, 'Your payslip has been saved to your profile.');
-    assert.deepStrictEqual(savedEntity, { id: 'contact-1', type: 'client' });
-    assert.equal(flagged, true);
+    assert.deepStrictEqual(savedEntity, { id: 'contact-1', type: 'lead' });
 });
 
 test('save_document: staff with no resolvable client returns the could-not-determine error', async () => {
@@ -1245,7 +1281,7 @@ test('save_document: staff with no resolvable client returns the could-not-deter
 });
 
 test('save_document: save failure returns the retry error', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => true, save: async () => ({ success: false }) }) });
+    const ctx = buildCtx({ entityType: 'lead', pendingUpload: fakePendingUpload({ has: () => true, save: async () => ({ success: false }) }) });
     const payload = JSON.parse(await runTool('save_document', { doc_type: 'Logbook' }, ctx));
     assert.equal(payload.status, 'error');
     assert.ok(payload.message.includes('Failed to save the document'));
@@ -1256,51 +1292,25 @@ test('save_document: save failure returns the retry error', async () => {
 // ---------------------------------------------------------------------------
 
 test('upload_irp5: not confirmed returns not_confirmed', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ has: () => true }) });
+    const ctx = buildCtx({ entityType: 'lead', isStateBLeadUpload: true, pendingUpload: fakePendingUpload({ has: () => true }) });
     const payload = JSON.parse(await runTool('upload_irp5', { confirmed_by_user: false }, ctx));
     assert.equal(payload.error, 'not_confirmed');
 });
 
 test('upload_irp5: no staged file returns no_pending_upload', async () => {
-    const ctx = buildCtx({ pendingUpload: fakePendingUpload({ peek: () => null }) });
+    const ctx = buildCtx({ entityType: 'lead', isStateBLeadUpload: true, pendingUpload: fakePendingUpload({ peek: () => null }) });
     const payload = JSON.parse(await runTool('upload_irp5', { confirmed_by_user: true }, ctx));
     assert.equal(payload.error, 'no_pending_upload');
 });
 
-test('upload_irp5: client success clears the upload, flags the session, and renders the list', async () => {
-    let cleared = false;
-    let flagged = false;
+test('upload_irp5: a client is denied — IRP5 uploads are auto-processed in the processor (ADR 0002)', async () => {
+    // Client IRP5 uploads are handled deterministically (processClientIrp5Upload)
+    // in the processor before the LLM runs, so a client is not in upload_irp5's
+    // roles and the dispatch gate denies the call. Only State-B leads fast-track here.
     const ctx = buildCtx({
-        pendingUpload: fakePendingUpload({
-            peek: () => ({ fileName: 'irp5.pdf', mimeType: 'application/pdf', buffer: Buffer.from('x') }),
-            clear: () => { cleared = true; },
-        }),
-        deps: {
-            dynamics: fakeDynamics({ getContactDetails: async () => ({ fullname: 'Jules Customer' }) }),
-            supabase: fakeSupabase({ flagSessionDocUpload: async () => { flagged = true; } }),
-            irp5: fakeIrp5({
-                processClientIrp5Upload: async () => ({
-                    status: 'irp5_processed',
-                    employerName: 'Acme',
-                    assessmentYear: 2026,
-                    certificateNumber: 'C1',
-                    sourceCodes: ['3601'],
-                    irp5RecordId: 'r1',
-                    irp5Updated: false,
-                    taxsubmissionsdocumentId: 't1',
-                    sharepointUrl: 'http://sp',
-                    wrongYearWarning: undefined,
-                    associatedDocs: [],
-                }),
-            }),
-        },
+        pendingUpload: fakePendingUpload({ peek: () => ({ fileName: 'irp5.pdf', mimeType: 'application/pdf', buffer: Buffer.from('x') }) }),
     });
-    const payload = JSON.parse(await runTool('upload_irp5', { confirmed_by_user: true }, ctx));
-    assert.equal(payload.status, 'irp5_processed');
-    assert.equal(payload.employer_name, 'Acme');
-    assert.ok(payload.message.includes('Acme'));
-    assert.equal(cleared, true);
-    assert.equal(flagged, true);
+    assert.equal(await runTool('upload_irp5', { confirmed_by_user: true }, ctx), DENIED);
 });
 
 test('upload_irp5: State-B lead routes to the lead pipeline (no contact lookup)', async () => {
@@ -1512,12 +1522,12 @@ test('send_invoice_pdf: success resolves the client, renders + sends the PDF, an
         {
             searchContactByName: async () => [{ contactid: 'c-9', fullname: 'Jules Customer', mobilephone: '+27820001111' }],
             getContactDetails: async () => ({ mobilephone: '+27820001111', fullname: 'Jules Customer' }),
-            getInvoiceByNumber: async () => ({ invoicenumber: 'INV123' }),
+            getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }),
             logInvoiceSentToContact: async () => { logged = true; return { success: true }; },
         },
         {
             meta: fakeMeta({ sendDocument: async (to) => { sentTo = to; return { delivered: true, dryRun: false }; } }),
-            pdf: fakePdf({ generateInvoicePdf: async (row) => { renderedRow = row; return Buffer.from('pdf'); } }),
+            pdf: fakePdf({ generateInvoicePdf: async (recordId) => { renderedRow = recordId; return Buffer.from('pdf'); } }),
         },
     );
     const payload = JSON.parse(await runTool('send_invoice_pdf', { invoice_number: 'INV123', client: 'Jules' }, ctx));
@@ -1525,7 +1535,7 @@ test('send_invoice_pdf: success resolves the client, renders + sends the PDF, an
     assert.equal(payload.invoice_number, 'INV123');
     assert.equal(sentTo, '+27820001111');
     assert.equal(logged, true);
-    assert.deepStrictEqual(renderedRow, { invoicenumber: 'INV123' });
+    assert.equal(renderedRow, 'inv-guid-1');
     assert.ok(payload.whatsapp_caption.includes('Sam Staff from TTT'));
 });
 
@@ -1536,7 +1546,7 @@ test('send_invoice_pdf: dry-run reports TEST MODE and still logs the audit trail
         {
             searchContactByName: async () => [{ contactid: 'c-9', fullname: 'Jules', mobilephone: '+27820001111' }],
             getContactDetails: async () => ({ mobilephone: '+27820001111', fullname: 'Jules' }),
-            getInvoiceByNumber: async () => ({ invoicenumber: 'INV123' }),
+            getInvoiceByNumber: async () => ({ recordId: 'inv-guid-1', invoiceNumber: 'INV123' }),
             logInvoiceSentToContact: async () => { logged = true; return { success: true }; },
         },
         { meta: fakeMeta({ sendDocument: async () => ({ delivered: false, dryRun: true }) }) },

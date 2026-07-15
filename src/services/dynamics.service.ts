@@ -33,6 +33,27 @@ export interface LocalCrmEntity {
 
 const AUDIT_FIELDS = ['ttt_ai_triggered_by', 'ttt_ai_model', 'ttt_ai_generated_at'];
 
+/**
+ * Notes sentinel stamped on the Issue 27 "already sent it" escape-hatch row.
+ * A `riivo_taxsubmissionsdocuments` row carrying this in `riivo_documentnotes`
+ * is an UNVERIFIED client-stated marker, NOT a verified receipt: it suppresses
+ * the re-ask in re-derivation but must never be counted/surfaced as received.
+ * Worded so a consultant reading the CRM sees exactly what it is (ADR 0002
+ * decision 3). Do not reword without updating isClientStatedMarkerRow.
+ */
+export const CLIENT_STATED_DOC_NOTE = 'CLIENT STATES PROVIDED — UNVERIFIED (client says this was sent to their consultant; TTT has not received or verified it)';
+
+/**
+ * True when a tax-submission-document row is an unverified client-stated marker
+ * (Issue 27) rather than a verified upload. Keys on the notes sentinel — the
+ * one field we control on write. Verified WhatsApp uploads and Power Automate
+ * emailed-doc rows never carry it.
+ */
+export function isClientStatedMarkerRow(row: any): boolean {
+    const notes = typeof row?.riivo_documentnotes === 'string' ? row.riivo_documentnotes : '';
+    return notes.toUpperCase().includes('CLIENT STATES PROVIDED');
+}
+
 // Boolean field on the new_lead entity indicating a signed Letter of
 // Engagement has been received. Schema name in Dynamics is riivo_LoEReceived;
 // the Web API uses the lowercased logical name.
@@ -382,7 +403,7 @@ export class DynamicsService {
         const token = await this.getToken();
         const selectFields = [
             // Invoice header
-            'new_name', 'createdon',
+            'new_invoicesid', 'new_name', 'createdon',
             // Customer details
             'riivo_customerfullname', 'riivo_customerstreet', 'riivo_customerprovince',
             'riivo_customersuburb', 'riivo_customerponumber', 'riivo_customercity',
@@ -618,13 +639,15 @@ export class DynamicsService {
     }
 
     /**
-     * Look up by email across contacts, leads, and systemusers — used by the
-     * email-relay flow (TTT staff forwards a client email to tina-bot@; we
-     * need to find that client's WhatsApp number).
+     * Look up by email across contacts and leads — used by the email-relay
+     * flow (TTT staff forwards a client email to tina-bot@; we need to find
+     * that client's WhatsApp number).
      *
-     * Same priority as getContactByPhone: user > client > lead. Returns the
-     * mobile number alongside the entity so the caller doesn't need a second
-     * round-trip. Returns null if no match.
+     * Deliberately does NOT search systemusers: the relay must never resolve a
+     * forwarded thread to a staff member and WhatsApp the consultant instead of
+     * the client. Priority: client > lead. Returns the mobile number alongside
+     * the entity so the caller doesn't need a second round-trip. Null if no
+     * match.
      */
     async getEntityByEmail(email: string): Promise<any | null> {
         const normalized = email.trim().toLowerCase();
@@ -634,9 +657,7 @@ export class DynamicsService {
         // but `eq` on string columns is already case-insensitive — so a plain
         // equality match handles "Foo@bar.com" vs. "foo@bar.com" correctly.
         const odataEmail = normalized.replace(/'/g, "''");
-        // Staff resolution gated behind STAFF_MODE_ENABLED — see getContactByPhone.
-        const staffModeEnabled = process.env.STAFF_MODE_ENABLED === 'true';
-        const [contact, lead, user] = await Promise.all([
+        const [contact, lead] = await Promise.all([
             this.searchEntity(
                 'contacts',
                 `emailaddress1 eq '${odataEmail}' and statecode eq 0`,
@@ -647,29 +668,13 @@ export class DynamicsService {
                 `ttt_email eq '${odataEmail}' and statecode eq 0`,
                 ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             ),
-            staffModeEnabled
-                ? this.searchEntity(
-                    'systemusers',
-                    `internalemailaddress eq '${odataEmail}' and isdisabled eq false`,
-                    ['systemuserid', 'fullname', 'mobilephone', 'internalemailaddress']
-                )
-                : Promise.resolve(null),
         ]);
 
-        const matches = [contact ? 'client' : null, lead ? 'lead' : null, user ? 'user' : null].filter(Boolean);
+        const matches = [contact ? 'client' : null, lead ? 'lead' : null].filter(Boolean);
         if (matches.length > 1) {
-            console.warn(`[Dynamics CRM] Email ${normalized} found in MULTIPLE tables: ${matches.join(', ')}. Using priority: user > client > lead.`);
+            console.warn(`[Dynamics CRM] Email ${normalized} found in MULTIPLE tables: ${matches.join(', ')}. Using priority: client > lead.`);
         }
 
-        if (user) {
-            return {
-                id: user.systemuserid,
-                type: 'user',
-                fullname: user.fullname,
-                email: user.internalemailaddress || normalized,
-                mobilephone: user.mobilephone || null,
-            };
-        }
         if (contact) {
             return {
                 id: contact.contactid,
@@ -687,6 +692,61 @@ export class DynamicsService {
                 fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
                 email: lead.ttt_email || normalized,
                 mobilephone: lead.ttt_mobilephone || null,
+                loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
+                otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
+                leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
+            };
+        }
+
+        return null;
+    }
+
+    /**
+     * Look up by mobile number across contacts and leads — the phone-based twin
+     * of getEntityByEmail, used by the email-relay round-trip when a consultant
+     * replies with the client's number rather than their email. Like
+     * getEntityByEmail it deliberately skips systemusers so a staff number can
+     * never be relayed to. Priority: client > lead. Null if no match.
+     */
+    async getEntityByPhone(phoneNumber: string): Promise<any | null> {
+        const trimmed = (phoneNumber || '').trim();
+        if (!trimmed) return null;
+
+        const [contact, lead] = await Promise.all([
+            this.searchEntity(
+                'contacts',
+                `(${this.phoneOrFilter('mobilephone', trimmed)}) and statecode eq 0`,
+                ['contactid', 'fullname', 'mobilephone', 'emailaddress1', 'riivo_whatsappoptinout']
+            ),
+            this.searchEntity(
+                'new_leads',
+                `(${this.phoneOrFilter('ttt_mobilephone', trimmed)}) and statecode eq 0`,
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_mobilephone', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+            ),
+        ]);
+
+        const matches = [contact ? 'client' : null, lead ? 'lead' : null].filter(Boolean);
+        if (matches.length > 1) {
+            console.warn(`[Dynamics CRM] Phone ${trimmed} found in MULTIPLE tables: ${matches.join(', ')}. Using priority: client > lead.`);
+        }
+
+        if (contact) {
+            return {
+                id: contact.contactid,
+                type: 'client',
+                fullname: contact.fullname,
+                email: contact.emailaddress1 || null,
+                mobilephone: contact.mobilephone || trimmed,
+                optIn: contact.riivo_whatsappoptinout,
+            };
+        }
+        if (lead) {
+            return {
+                id: lead.new_leadid,
+                type: 'lead',
+                fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                email: lead.ttt_email || null,
+                mobilephone: lead.ttt_mobilephone || trimmed,
                 loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                 otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                 leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
@@ -2165,6 +2225,57 @@ export class DynamicsService {
         } catch (error: any) {
             const errMsg = error?.response?.data?.error?.message || error.message;
             console.error(`[Dynamics CRM] Failed to create taxsubmissionsdocument for contact ${params.contactId}:`, errMsg);
+            return { success: false, taxYear: inferred.taxYear, error: errMsg };
+        }
+    }
+
+    /**
+     * Record the Issue 27 "already sent it" escape hatch: an UNVERIFIED
+     * "client states provided" marker for a doc the client says they already
+     * sent to their consultant. Writes a `riivo_taxsubmissionsdocuments`-shaped
+     * row that is clearly distinct from a verified upload —
+     *   - `riivo_uploaded = false` (verified WhatsApp/Power Automate rows set true)
+     *   - NO `riivo_filereference` (there is no file)
+     *   - `riivo_documentnotes` = CLIENT_STATED_DOC_NOTE sentinel
+     * The canonical doc label rides in `riivo_taxsubmissionsdocument` so
+     * re-derivation can loose-match and suppress that item's re-ask across
+     * session resets. It is NEVER counted as a verified receipt (see
+     * isClientStatedMarkerRow); a consultant can confirm or clear it.
+     */
+    async markDocumentClientStated(params: {
+        contactId: string;
+        canonicalDocType: string;
+        triggeredBy: string;
+    }): Promise<{ success: boolean; recordId?: string; taxYear: number; error?: string }> {
+        const inferred = await this.inferUploadContext(params.contactId);
+
+        const payload: any = {
+            'riivo_taxsubmissionsdocument': params.canonicalDocType,
+            'riivo_taxyear': inferred.taxYear,
+            'riivo_uploaded': false,
+            'riivo_documentnotes': `${CLIENT_STATED_DOC_NOTE} — ${params.canonicalDocType}`,
+            'riivo_Client@odata.bind': `/contacts(${params.contactId})`,
+        };
+
+        try {
+            const response = await this.crmPost('riivo_taxsubmissionsdocumentses', payload, params.triggeredBy);
+            const recordId = response.data?.riivo_taxsubmissionsdocumentsid;
+            console.log(`[Dynamics CRM] Recorded UNVERIFIED client-stated marker ${recordId} for contact ${params.contactId}, doc "${params.canonicalDocType}", year ${inferred.taxYear}`);
+            await supabaseService.logCrmWrite({
+                crmEntity: 'riivo_taxsubmissionsdocumentses',
+                crmRecordId: recordId,
+                action: 'create',
+                payload: {
+                    canonical_doc_type: params.canonicalDocType,
+                    tax_year: inferred.taxYear,
+                    client_stated_unverified: true,
+                },
+                triggeredBy: params.triggeredBy,
+            });
+            return { success: true, recordId, taxYear: inferred.taxYear };
+        } catch (error: any) {
+            const errMsg = error?.response?.data?.error?.message || error.message;
+            console.error(`[Dynamics CRM] Failed to record client-stated marker for contact ${params.contactId}:`, errMsg);
             return { success: false, taxYear: inferred.taxYear, error: errMsg };
         }
     }
