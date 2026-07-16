@@ -446,7 +446,7 @@ export class DynamicsService {
         const rows = await this.getList(
             'new_cases',
             `_ttt_clientname_value eq ${contactId}`,
-            ['new_name', 'icon_caseprocess', 'icon_casestage', 'statecode', 'createdon']
+            ['new_caseid', 'new_name', 'icon_caseprocess', 'icon_casestage', 'ttt_taxyear', 'statecode', 'createdon']
         );
         return rows.map(sanitizeCaseRow);
     }
@@ -461,6 +461,35 @@ export class DynamicsService {
         const rows = await this.getList(
             'new_cases',
             `_ttt_clientname_value eq ${contactId} and statecode eq 0`,
+            [
+                'new_caseid',
+                'new_name',
+                'icon_caseprocess',
+                'icon_casestage',
+                'ttt_taxyear',
+                'riivo_potentialrefund',
+                'riivo_dateplacedonaudit',
+                'statecode',
+                'createdon',
+                '_ownerid_value',
+            ]
+        );
+        return rows.map(sanitizeCaseRow);
+    }
+
+    /**
+     * Tax cases for a client spanning both active AND recently-closed records,
+     * with the same rich field set as getActiveTaxCases. Consultants close a
+     * case the moment a return is completed, so an active-only lookup makes a
+     * just-finished return look like it never existed ("no active tax return").
+     * This drops the statecode filter so a completed return still surfaces;
+     * callers restrict to the relevant tax years (see isCurrentOrPriorTaxYear
+     * in taxFaq.service) so a long-closed historical return doesn't resurface.
+     */
+    async getRecentTaxCases(contactId: string): Promise<any[]> {
+        const rows = await this.getList(
+            'new_cases',
+            `_ttt_clientname_value eq ${contactId}`,
             [
                 'new_caseid',
                 'new_name',

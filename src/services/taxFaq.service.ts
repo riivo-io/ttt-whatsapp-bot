@@ -21,7 +21,7 @@
 
 import { dynamicsService } from './dynamics.service';
 import { graphMailService } from './graphMail.service';
-import { computeRequiredDocuments, formatRequiredDocumentsMessage } from './requiredDocuments.service';
+import { computeRequiredDocuments, formatRequiredDocumentsMessage, getCurrentSaTaxYear } from './requiredDocuments.service';
 import type { DocTopic } from './requiredDocuments.service';
 import { getPersonalizedForms, formatTrailingLine } from './taxForms.service';
 import { summariseAuditDuration } from '../utils/workingDays';
@@ -60,6 +60,23 @@ function filterCasesByYear(cases: any[], year?: number): any[] {
     if (!year) return cases;
     const target = String(year);
     return cases.filter(c => getCaseTaxYearLabel(c) === target);
+}
+
+/**
+ * Whether a case belongs to the current or immediately-prior SA tax year.
+ * Used to bound the recently-closed-case lookup: consultants close a return
+ * as soon as it's completed, so submission/audit answers read closed cases
+ * too — but only for the current + prior year, so a return finished several
+ * seasons ago doesn't resurface. Cases with no readable year label are kept
+ * (better to surface than silently drop).
+ */
+function isCurrentOrPriorTaxYear(caseRow: any, today: Date = new Date()): boolean {
+    const label = getCaseTaxYearLabel(caseRow);
+    if (!label) return true;
+    const n = Number(label);
+    if (!Number.isFinite(n)) return true;
+    const current = getCurrentSaTaxYear(today).label;
+    return n === current || n === current - 1;
 }
 
 function isOnAuditStage(stageLabel: string | null): boolean {
@@ -177,15 +194,16 @@ export async function handleGetSubmissionStatus(params: {
 }): Promise<string> {
     if (!isEnabled('submission')) return disabledResponse('submission');
 
-    const allCases = await dynamicsService.getActiveTaxCases(params.contactId);
-    const cases = filterCasesByYear(allCases, params.taxYear);
+    const allCases = await dynamicsService.getRecentTaxCases(params.contactId);
+    const recentCases = allCases.filter(c => isCurrentOrPriorTaxYear(c));
+    const cases = filterCasesByYear(recentCases, params.taxYear);
 
     if (cases.length === 0) {
         return JSON.stringify({
             status: 'not_submitted',
             message: params.taxYear
-                ? `No active tax return for ${params.taxYear} yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only set one up once we're ready to file.`
-                : `No active tax returns on file — TTT hasn't submitted a return for you yet. We only set one up once your return is ready to be filed.`,
+                ? `No tax return for ${params.taxYear} on file yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only set one up once we're ready to file.`
+                : `No tax return on file yet — TTT hasn't submitted a return for you yet. We only set one up once your return is ready to be filed.`,
         });
     }
 
@@ -198,7 +216,7 @@ export async function handleGetSubmissionStatus(params: {
 
     return JSON.stringify({
         status: 'submitted',
-        message: 'Yes — there is an active tax return on file, which means we have submitted you.',
+        message: 'Yes — we have a tax return on file for you, which means we have submitted you.',
         cases: perCase,
     });
 }
@@ -211,8 +229,9 @@ export async function handleGetAuditStatus(params: {
 }): Promise<string> {
     if (!isEnabled('audit')) return disabledResponse('audit');
 
-    const allCases = await dynamicsService.getActiveTaxCases(params.contactId);
-    const cases = filterCasesByYear(allCases, params.taxYear);
+    const allCases = await dynamicsService.getRecentTaxCases(params.contactId);
+    const recentCases = allCases.filter(c => isCurrentOrPriorTaxYear(c));
+    const cases = filterCasesByYear(recentCases, params.taxYear);
 
     const onAudit = cases.filter(c => isOnAuditStage(getCaseStageLabel(c)));
 
@@ -220,8 +239,8 @@ export async function handleGetAuditStatus(params: {
         return JSON.stringify({
             status: 'not_on_audit',
             message: cases.length === 0
-                ? `You don't have any active tax returns on file, so nothing is currently under SARS audit.`
-                : `None of your active tax returns are currently flagged as being under SARS audit.`,
+                ? `You don't have any tax returns on file for the current or prior tax year, so nothing is currently under SARS audit.`
+                : `None of your tax returns are currently flagged as being under SARS audit.`,
         });
     }
 
