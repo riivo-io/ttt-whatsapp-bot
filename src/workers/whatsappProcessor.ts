@@ -477,10 +477,12 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
     }
 }
 
-// Tap on the OTP template's two quick-reply buttons. DONE flags the lead for
-// auto-conversion in Dynamics (a Power Automate flow converts the lead to a
-// contact once icon_converttoclient flips) and resolves any open OTP-flavoured
-// riivo_requests for the lead. HELP creates a tracked riivo_request and emails
+// Tap on the OTP template's two quick-reply buttons. DONE records that the lead
+// finished the SARS OTP step (riivo_efilingotpcompleted) and resolves any open
+// OTP-flavoured riivo_requests, then hands off to a consultant to review and
+// convert the lead to a contact manually. Tina never auto-promotes a lead: she
+// does NOT set icon_converttoclient, so no Power Automate conversion flow fires
+// off a WhatsApp tap. HELP creates a tracked riivo_request and emails
 // taxcrew@ttt-tax.co.za from the tina-bot mailbox so a human picks it up.
 // Neither path uses ESCALATED — the OTP step is the normal next handoff in
 // signup, not an escalation; consultants pick it up during working hours.
@@ -498,9 +500,9 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
     const leadName: string = (crmEntity.fullname || '').trim() || 'Lead';
 
     if (payload === OTP_BUTTON_PAYLOAD.DONE) {
-        const result = await dynamicsService.markLeadOtpCompleteAndReadyToConvert(leadId, leadId);
+        const result = await dynamicsService.markLeadOtpComplete(leadId, leadId);
         if (!result.success) {
-            console.error(`[Processor] markLeadOtpCompleteAndReadyToConvert failed for lead ${leadId}: ${result.error}`);
+            console.error(`[Processor] markLeadOtpComplete failed for lead ${leadId}: ${result.error}`);
             await metaWhatsAppService.sendMessage(
                 from,
                 "Thanks for confirming! 🙌 We hit a snag on our side updating your profile — a consultant will check on it shortly and reach out here."
@@ -508,6 +510,41 @@ async function handleOtpTemplateResponse(from: string, payload: string, crmEntit
             return;
         }
         await dynamicsService.resolveOpenOtpRequestsForLead(leadId);
+
+        // Lead is now ready to become a client, but Tina never auto-promotes.
+        // Create a tracked request and email taxcrew so a consultant reviews
+        // the lead and converts it to a contact by hand in Dynamics.
+        const doneDescription = `Lead "${leadName}" tapped Done on SARS OTP template — OTP step complete, ready for a consultant to review and convert to a client.`;
+        const doneRequest = await dynamicsService.createRequest({
+            leadId,
+            contactType: 'lead',
+            phoneNumber: from,
+            description: doneDescription,
+        });
+        if (doneRequest?.riivo_requestid) {
+            await dynamicsService.updateRequest(doneRequest.riivo_requestid, {
+                statuscode: REQUEST_STATUSCODE.AWAITING_FEEDBACK,
+                riivo_classificationtopic: 'otp_done',
+            });
+        }
+
+        const doneEmailBody = [
+            `Lead "${leadName}" (${from}) has tapped the "Done" button on the SARS eFiling OTP template — the OTP step is complete.`,
+            '',
+            'Please review the lead and convert it to a client in Dynamics when you are happy it is ready. Tina does not promote leads automatically.',
+            '',
+            doneRequest?.riivo_requestid
+                ? `A tracked riivo_request has been created for follow-up: ${doneRequest.riivo_requestid}.`
+                : 'NOTE: we were unable to create a riivo_request for this lead — please pick this up from the email and follow up manually.',
+            '',
+            `Dynamics lead id: ${leadId}`,
+        ].join('\n');
+        await graphMailService.sendMail({
+            to: TAXCREW_EMAIL,
+            subject: `Lead ready to convert — ${leadName}`,
+            bodyText: doneEmailBody,
+        });
+
         await metaWhatsAppService.sendMessage(
             from,
             "Amazing, thank you! 🎉 You're all set. We'll finalise your account on our side and a TTT consultant will be in touch shortly to welcome you in properly."
