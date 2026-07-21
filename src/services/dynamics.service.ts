@@ -1968,10 +1968,13 @@ export class DynamicsService {
         }
     }
 
-    async markLeadOtpCompleteAndReadyToConvert(leadId: string, triggeredBy: string): Promise<{ success: boolean; error?: string }> {
+    // Record that the lead completed the SARS eFiling OTP step. This does NOT
+    // promote the lead to a contact — conversion is a deliberate human step in
+    // Dynamics. We intentionally never set icon_converttoclient here, so no
+    // Power Automate auto-conversion flow fires off the back of a WhatsApp tap.
+    async markLeadOtpComplete(leadId: string, triggeredBy: string): Promise<{ success: boolean; error?: string }> {
         const payload = {
             [LEAD_OTP_COMPLETED_FIELD]: true,
-            icon_converttoclient: true,
         };
         try {
             await this.crmPatch(
@@ -1990,7 +1993,7 @@ export class DynamicsService {
             return { success: true };
         } catch (error: any) {
             const errMsg = error?.response?.data?.error?.message || error.message;
-            console.error(`[Dynamics CRM] Failed to flag OTP done + convert for lead ${leadId}:`, errMsg);
+            console.error(`[Dynamics CRM] Failed to flag OTP done for lead ${leadId}:`, errMsg);
             return { success: false, error: errMsg };
         }
     }
