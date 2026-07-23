@@ -184,8 +184,9 @@ export async function handleGetSubmissionStatus(params: {
         return JSON.stringify({
             status: 'not_submitted',
             message: params.taxYear
-                ? `No active tax return for ${params.taxYear} yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only set one up once we're ready to file.`
-                : `No active tax returns on file — TTT hasn't submitted a return for you yet. We only set one up once your return is ready to be filed.`,
+                ? `No active tax return for ${params.taxYear} yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only set one up once we're ready to file. Once your paperwork is in, your consultant picks it up from there, so there's nothing you need to do right now.`
+                : `No active tax returns on file — TTT hasn't submitted a return for you yet. We only set one up once your return is ready to be filed. Once your paperwork is in, your consultant picks it up from there, so there's nothing you need to do right now.`,
+            reply_guidance: 'Relay this as-is. Do NOT offer a consultant callback or ask if they want someone to reach out — this message already closes the loop.',
         });
     }
 
