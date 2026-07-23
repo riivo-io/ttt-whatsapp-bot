@@ -125,7 +125,7 @@ export function computeRequiredDocuments(
 export function formatRequiredDocumentsMessage(result: RequiredDocumentsResult): string {
     const renderDoc = (d: DocSpec) => `• ${d.label}${d.reason ? ` (${d.reason})` : ''}`;
     const lines: string[] = [];
-    lines.push(`Here's what you'll need to upload for the ${result.taxYear.label} tax year — covering ${result.taxYear.start} to ${result.taxYear.end}:`);
+    lines.push(`Here's a general list of what typically helps for your ${result.taxYear.label} tax year (${result.taxYear.start} to ${result.taxYear.end}). If you've already sent these to your consultant, you're sorted — no need to send them again:`);
 
     if (result.bySourceCode.length > 0) {
         lines.push('');
@@ -151,9 +151,9 @@ export function formatRequiredDocumentsMessage(result: RequiredDocumentsResult):
 
     lines.push('');
     if (!result.hasPersonalisation) {
-        lines.push('This is a general list. Once your consultant has set up your income sources and industry, I can give you a more specific list.');
+        lines.push('Once your consultant has set up your income sources and industry, I can give you a more specific list.');
     }
-    lines.push('Bank statements, logbooks and payslips should cover the full tax year unless noted otherwise. Send documents one at a time — I\'ll file each one to your profile.');
+    lines.push('Bank statements, logbooks and payslips should cover the full tax year unless noted otherwise. If you haven\'t sent these to your consultant yet, you can reply with the files right here and I\'ll file each one to your profile — send them one at a time.');
 
     return lines.join('\n');
 }
