@@ -184,8 +184,9 @@ export async function handleGetSubmissionStatus(params: {
         return JSON.stringify({
             status: 'not_submitted',
             message: params.taxYear
-                ? `No active tax return for ${params.taxYear} yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only set one up once we're ready to file.`
-                : `No active tax returns on file — TTT hasn't submitted a return for you yet. We only set one up once your return is ready to be filed.`,
+                ? `No active tax return for ${params.taxYear} yet — that means TTT hasn't submitted your ${params.taxYear} return yet. We only set one up once we're ready to file. Once your paperwork is in, your consultant picks it up from there, so there's nothing you need to do right now.`
+                : `No active tax returns on file — TTT hasn't submitted a return for you yet. We only set one up once your return is ready to be filed. Once your paperwork is in, your consultant picks it up from there, so there's nothing you need to do right now.`,
+            reply_guidance: 'Relay this as-is. Do NOT offer a consultant callback or ask if they want someone to reach out — this message already closes the loop.',
         });
     }
 
@@ -315,32 +316,14 @@ export async function handleGetReceivedDocuments(params: {
 // ─── get_required_documents ───────────────────────────────────────────────
 
 /**
- * Normalise a label so we can match required-list entries against uploaded
- * rows (which carry canonical strings like "IRP5", "Bank Statements",
- * "Medical Aid Tax Certificate", "Logbook", "Other"). Lowercases, strips
- * punctuation and trailing notes in brackets.
+ * ADVICE-ONLY document guidance (ADR 0004). This builds a GENERAL list of the
+ * documents that typically help for the client's return, personalised purely
+ * from their PROFILE (SARS source codes + industry). It deliberately does NOT
+ * read upload records and never reports what's "received", "on file", or
+ * "outstanding" — Tina is not the system of record for what a client has sent
+ * their consultant, and asserting it confidently misleads clients who've
+ * already emailed their docs across.
  */
-function normaliseDocLabel(label: string): string {
-    return label
-        .toLowerCase()
-        .replace(/\([^)]*\)/g, '')
-        .replace(/[—–-]/g, ' ')
-        .replace(/[^a-z0-9 ]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-function labelsMatch(required: string, uploaded: string): boolean {
-    const a = normaliseDocLabel(required);
-    const b = normaliseDocLabel(uploaded);
-    if (!a || !b) return false;
-    if (a === b) return true;
-    // Loose substring match — "irp5" matches "irp5", "bank statement" matches
-    // "bank statements", "medical aid tax certificate" matches "medical aid
-    // tax certificate", etc.
-    return a.includes(b) || b.includes(a);
-}
-
 export async function handleGetRequiredDocuments(params: {
     contactId: string;
     taxYear?: number;
@@ -350,49 +333,38 @@ export async function handleGetRequiredDocuments(params: {
     const industryName = profile?.industryName || null;
     const expected = computeRequiredDocuments(sourceCodes, industryName);
 
-    // The target year for the upload cross-reference: caller-supplied if
-    // given, otherwise the current SA tax year (which also matches the
-    // checklist computed above).
-    const targetYear = typeof params.taxYear === 'number' && Number.isFinite(params.taxYear)
-        ? params.taxYear
-        : expected.taxYear.label;
-    const uploadedRows = await dynamicsService.getTaxSubmissionDocsByClient(params.contactId, targetYear);
-    const uploadedLabels = uploadedRows.map(pickSubmissionDocLabel);
-
-    const allExpected = [...expected.bySourceCode, ...expected.byIndustry, ...expected.baseline];
-    const seen = new Set<string>();
-    const received: { label: string }[] = [];
-    const outstanding: { label: string; notes?: string }[] = [];
-    for (const doc of allExpected) {
-        const key = doc.label.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const hit = uploadedLabels.some(u => labelsMatch(doc.label, u));
-        if (hit) received.push({ label: doc.label });
-        else outstanding.push({ label: doc.label, notes: doc.notes });
-    }
-
-    const yearLabel = targetYear;
+    const yearLabel = expected.taxYear.label;
+    const renderDoc = (d: { label: string; notes?: string }) =>
+        `• ${d.label}${d.notes ? ` (${d.notes})` : ''}`;
     const lines: string[] = [];
 
-    if (received.length > 0) {
-        lines.push(`Here's what we've got on file from you for ${yearLabel}:`);
-        received.forEach(d => lines.push(`• ${d.label}`));
+    lines.push(`Here's a general list of what typically helps for your ${yearLabel} return. If you've already sent these to your consultant, you're sorted — no need to send them again.`);
+
+    if (expected.bySourceCode.length > 0) {
         lines.push('');
+        lines.push('*Based on your income sources:*');
+        expected.bySourceCode.forEach(d => lines.push(renderDoc(d)));
     }
 
-    if (outstanding.length === 0) {
-        lines.push(`Looks like we've got everything we need for your ${yearLabel} return. Your consultant will be in touch if anything else comes up.`);
-    } else {
-        lines.push(`Still outstanding for your ${yearLabel} return:`);
-        outstanding.forEach(d => lines.push(`• ${d.label}${d.notes ? ` (${d.notes})` : ''}`));
-        if (!expected.hasPersonalisation) {
-            lines.push('');
-            lines.push('This is a typical list. Once your consultant has set up your income sources and industry, I can give you a more specific list.');
-        }
+    if (expected.byIndustry.length > 0) {
         lines.push('');
-        lines.push("Reply with the file directly — I'll route it to your consultant.");
+        lines.push(`*Based on your industry${expected.matchedIndustry ? ` (${expected.matchedIndustry})` : ''}:*`);
+        expected.byIndustry.forEach(d => lines.push(renderDoc(d)));
     }
+
+    if (expected.baseline.length > 0) {
+        lines.push('');
+        lines.push('*Everyone should send (if applicable):*');
+        expected.baseline.forEach(d => lines.push(renderDoc(d)));
+    }
+
+    if (!expected.hasPersonalisation) {
+        lines.push('');
+        lines.push('This is a general list. Once your consultant has set up your income sources and industry, I can give you a more specific one.');
+    }
+
+    lines.push('');
+    lines.push("If you haven't sent these to your consultant yet, you can reply with the files right here and I'll route them across.");
 
     const relevantForms = getPersonalizedForms(sourceCodes);
     if (relevantForms.length > 0) {
@@ -401,11 +373,10 @@ export async function handleGetRequiredDocuments(params: {
     }
 
     return JSON.stringify({
-        status: outstanding.length === 0 ? 'all_received' : 'outstanding',
+        status: 'advice',
         message: lines.join('\n'),
         tax_year: yearLabel,
-        received,
-        outstanding,
         has_personalisation: expected.hasPersonalisation,
+        reply_guidance: 'This is GENERAL advice, not a record of what the client has sent. Relay the message. Do NOT say anything about what we have "received", what is "on file", what is "outstanding", or that we have "everything we need" — you cannot see what the client has sent their consultant.',
     });
 }
