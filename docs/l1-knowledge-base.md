@@ -48,7 +48,7 @@ Tina handles each category directly — no proactive consultant callbacks. Hando
 |---|---|---|
 | What's my refund? | `riivo_potentialrefund` on active case for current year | "Your potential refund for {year} is R{x} — case is at {stage}." |
 | Have you submitted me? | `icon_casestage` | Map stage → plain-English sentence. |
-| Am I on audit? | `icon_casestage = "On Audit"` + `riivo_dateplacedonaudit` | "Yes, on audit since {date} — that's {n} working days in. Standard window is 21 working days, up to 60 in special cases." |
+| Am I on audit? | `ttt_caseonaudit = Yes` (958140001) + `riivo_dateplacedonaudit` | "Yes, on audit since {date} — that's {n} working days in. Standard window is 21 working days, up to 60 in special cases." |
 | Have you received my docs? | `riivo_preseasondocumentation.statuscode` (1 = awaiting, 100000001 = ready) + child `riivo_taxsubmissionsdocuments` rows | List outstanding doc types from per-type triplets. |
 | What docs do I still need? | → falls under §4 (document guidance) | Call `get_required_documents`. |
 

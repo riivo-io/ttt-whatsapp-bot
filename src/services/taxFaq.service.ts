@@ -19,7 +19,7 @@
  * field on tasks/preseason (mixed schemes).
  */
 
-import { dynamicsService } from './dynamics.service';
+import { dynamicsService, CASE_ON_AUDIT } from './dynamics.service';
 import { graphMailService } from './graphMail.service';
 import { computeRequiredDocuments, formatRequiredDocumentsMessage } from './requiredDocuments.service';
 import type { DocTopic } from './requiredDocuments.service';
@@ -62,9 +62,21 @@ function filterCasesByYear(cases: any[], year?: number): any[] {
     return cases.filter(c => getCaseTaxYearLabel(c) === target);
 }
 
-function isOnAuditStage(stageLabel: string | null): boolean {
-    if (!stageLabel) return false;
-    return /\baudit\b/i.test(stageLabel);
+/**
+ * Whether the CRM says this case is on audit.
+ *
+ * The authority is `ttt_caseonaudit` on new_case — a three-value OptionSet
+ * (Yes / No / To be determined) consultants set by hand. Anything other than
+ * an explicit Yes means we do not claim the client is on audit.
+ *
+ * This used to sniff the `icon_casestage` label for the word "audit", which
+ * was silently wrong: no stage value in this environment contains it. Cases on
+ * audit sit at stages like "Awaiting Supporting Documents", "Supporting
+ * Documents Submitted" or "Completed" (and some have no stage at all), so
+ * every on-audit client was told they were not on audit.
+ */
+function isCaseOnAudit(caseRow: any): boolean {
+    return caseRow?.ttt_caseonaudit === CASE_ON_AUDIT.YES;
 }
 
 function formatRand(amount: number): string {
@@ -215,7 +227,7 @@ export async function handleGetAuditStatus(params: {
     const allCases = await dynamicsService.getActiveTaxCases(params.contactId);
     const cases = filterCasesByYear(allCases, params.taxYear);
 
-    const onAudit = cases.filter(c => isOnAuditStage(getCaseStageLabel(c)));
+    const onAudit = cases.filter(isCaseOnAudit);
 
     if (onAudit.length === 0) {
         return JSON.stringify({
@@ -232,7 +244,7 @@ export async function handleGetAuditStatus(params: {
         if (!placedRaw) {
             return {
                 tax_year: yearLabel,
-                stage: getCaseStageLabel(c),
+                on_audit: true,
                 message: `Your ${yearLabel || 'tax'} return is on audit, but the placed-on-audit date isn't recorded yet. Your consultant will be able to give you exact timelines.`,
             };
         }
@@ -253,13 +265,17 @@ export async function handleGetAuditStatus(params: {
 
         return {
             tax_year: yearLabel,
-            stage: getCaseStageLabel(c),
+            on_audit: true,
             days_on_audit: summary.daysOnAudit,
             bucket: summary.bucket,
             message,
         };
     });
 
+    // `stage` is deliberately left out of the payload. icon_casestage tracks the
+    // preparation workflow, not the audit, so an on-audit case can legitimately
+    // sit at "Completed" — surfacing that alongside "on audit" only invites a
+    // contradictory reply.
     return JSON.stringify({ status: 'on_audit', cases: perCase });
 }
 
