@@ -13,7 +13,8 @@ The bot will read these as-is.
 
 | Entity | Field | Used for |
 |---|---|---|
-| `new_case` | `icon_casestage` | Case stage answers; audit detection (value = "On Audit") |
+| `new_case` | `icon_casestage` | Case stage answers (refund / submission context). NOT used for audit detection — no stage value in this environment is "On Audit" |
+| `new_case` | `ttt_caseonaudit` | Audit detection. OptionSet: 958140001 = Yes, 958140000 = No, 100000001 = To be determined. Only an explicit Yes counts as on audit |
 | `new_case` | `ttt_taxyear` | Per-year filtering / display |
 | `new_case` | `riivo_potentialrefund` | Refund amount answer |
 | `new_case` | `riivo_dateplacedonaudit` | Audit duration calculation |
@@ -72,4 +73,4 @@ No re-parenting. No mirroring. Bot reads child rows by either lookup depending o
 2. Pick a real client with `riivo_potentialrefund` null. Ask the same question. Case owner should receive a tina-bot email within seconds.
 3. Pick a real client whose preseason record has only `riivo_irp5_status = received`. Ask "what docs do you need?" — should list every other applicable type as outstanding.
 4. Manually create a `riivo_taxsubmissionsdocuments` row with the new preseason lookup populated. Ask "have you received my docs?" — should list it.
-5. Place a real case on audit, set `riivo_dateplacedonaudit` to 10 working days ago. Ask "audit status?" — should say standard 21-day window, X days in.
+5. Place a real case on audit — set `ttt_caseonaudit` to **Yes** — and set `riivo_dateplacedonaudit` to 10 working days ago. Ask "audit status?" — should say standard 21-day window, X days in. Setting the stage alone does nothing; the bot reads `ttt_caseonaudit`.

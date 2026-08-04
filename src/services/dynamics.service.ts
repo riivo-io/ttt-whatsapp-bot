@@ -118,6 +118,15 @@ export const CLASSIFICATION_LEVEL = {
     ESCALATION: 463630003,
 } as const;
 
+// ttt_caseonaudit option set on new_case — the CRM's authoritative answer to
+// "is this case on audit?". Consultants set it directly; it does NOT track
+// icon_casestage, which is why stage-label sniffing used to miss on-audit cases.
+export const CASE_ON_AUDIT = {
+    NO: 958140000,
+    YES: 958140001,
+    TO_BE_DETERMINED: 100000001,
+} as const;
+
 // Bad-debt threshold (PRD-bad-debt-collection.md §4). An open invoice
 // (ttt_outstanding > 0) that is >= 30 calendar days old (inclusive) puts the
 // client in bad-debt state. Calendar days, not working days.
@@ -468,6 +477,7 @@ export class DynamicsService {
                 'icon_casestage',
                 'ttt_taxyear',
                 'riivo_potentialrefund',
+                'ttt_caseonaudit',
                 'riivo_dateplacedonaudit',
                 'statecode',
                 'createdon',

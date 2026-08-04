@@ -378,7 +378,7 @@ Single class wrapping the Web API. Patterns unchanged (MSAL client-credentials w
 - **`contacts`** / **`new_leads`** / **`systemusers`** as before, plus owner-id reads (`getContactOwnerId`, `getLeadOwnerId`) for the close-summary.
 - **`riivo_irp5s`** — IRP5 certificate records (`createIrp5Record`, cert-number dedupe).
 - **`riivo_taxsubmissionsdocuments`** — per-submission document rows; written by the IRP5 drain and uploads. No longer read back to clients (ADR 0004 — Tina never reports upload status).
-- **Tax-status reads** (`taxFaq.service`): `riivo_potentialrefund`, `icon_casestage`, `riivo_dateplacedonaudit` feed the refund/submission/audit-status tools.
+- **Tax-status reads** (`taxFaq.service`): `riivo_potentialrefund`, `icon_casestage`, `ttt_caseonaudit`, `riivo_dateplacedonaudit` feed the refund/submission/audit-status tools. Audit status comes from `ttt_caseonaudit` only (Yes/No/To be determined) — `icon_casestage` tracks the prep workflow and never carries an "On Audit" value in this environment.
 - **`riivo_requests`** / **`riivo_whatsappcommunicationses`** / **`new_invoiceses`** / **`new_cases`** / tasks / annotations as before.
 
 Option-set enum maps (`REQUEST_STATE`, `REQUEST_STATUSCODE`, `RESOLUTION_METHOD`, `CLIENT_FEEDBACK`, `CLASSIFICATION_LEVEL`, and the type maps in `claude.service.ts`) still live at the top of the services. Note `@odata.bind` uses the nav-property name (e.g. `riivo_Client@odata.bind`) — see the `dynamics_odata_bind` memory note.

@@ -336,7 +336,7 @@ const getSubmissionStatus: ToolEntry = {
 
 const getAuditStatus: ToolEntry = {
     name: 'get_audit_status',
-    description: "Answer 'is my tax return in audit / what's happening with my audit?'. Detects audit by checking whether any active tax return has icon_casestage set to the 'On Audit' value. If on audit, reads riivo_dateplacedonaudit and computes working days elapsed, plus tells the client whether they're within the standard 21-day SARS window or the extended 60-day window. When relaying to the client, ALWAYS use the phrase \"tax return\" — never \"case\". Use whenever the client asks about audit, verification, or SARS reviewing their return.",
+    description: "Answer 'is my tax return in audit / what's happening with my audit?'. Detects audit from the ttt_caseonaudit field on the active tax return — the CRM's authoritative Yes/No audit flag, set by the consultant. If on audit, reads riivo_dateplacedonaudit and computes working days elapsed, plus tells the client whether they're within the standard 21-day SARS window or the extended 60-day window. This tool is the ONLY source of truth for audit status — never infer it from a case stage, process or any other tool's output, and never tell a client they are not on audit unless this tool says so. When relaying to the client, ALWAYS use the phrase \"tax return\" — never \"case\". Use whenever the client asks about audit, verification, or SARS reviewing their return.",
     input_schema: taxYearSchema,
     roles: ['client'],
     async handle(args: unknown, ctx: ToolContext): Promise<string> {
