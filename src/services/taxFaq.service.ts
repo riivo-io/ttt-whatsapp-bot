@@ -25,6 +25,7 @@ import { computeRequiredDocuments, formatRequiredDocumentsMessage } from './requ
 import type { DocTopic } from './requiredDocuments.service';
 import { getPersonalizedForms, formatTrailingLine } from './taxForms.service';
 import { summariseAuditDuration } from '../utils/workingDays';
+import { formatZar } from '../domain/money';
 
 const FAQ_FEATURE_FLAGS = {
     refund:        'ENABLE_REFUND_ANSWERS',
@@ -65,10 +66,6 @@ function filterCasesByYear(cases: any[], year?: number): any[] {
 function isOnAuditStage(stageLabel: string | null): boolean {
     if (!stageLabel) return false;
     return /\baudit\b/i.test(stageLabel);
-}
-
-function formatRand(amount: number): string {
-    return `R${amount.toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 // ─── get_refund_status ───────────────────────────────────────────────────
@@ -161,8 +158,8 @@ export async function handleGetRefundStatus(params: {
             tax_year: yearLabel,
             stage: stageLabel,
             refund_rand: amount,
-            refund_formatted: formatRand(amount),
-            message: `Your ${yearLabel || 'tax'} return has a potential refund of ${formatRand(amount)} (stage: ${stageLabel || 'unknown'}).`,
+            refund_formatted: formatZar(amount),
+            message: `Your ${yearLabel || 'tax'} return has a potential refund of ${formatZar(amount)} (stage: ${stageLabel || 'unknown'}).`,
         };
     }));
 

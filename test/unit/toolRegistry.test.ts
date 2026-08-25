@@ -573,9 +573,12 @@ test('get_outstanding_balance: client gets their own balance off ctx identity', 
         },
     });
     const out = await runTool('get_outstanding_balance', {}, ctx);
+    // Deliberate departure from the pre-migration string: the balance now goes
+    // through the shared formatZar, which groups thousands ("R1,234.50" rather
+    // than the old inline "R1234.50"). See src/domain/money.ts.
     assert.equal(out, JSON.stringify({
         client_id: 'contact-1',
-        outstanding_amount: 'R1234.50',
+        outstanding_amount: 'R1,234.50',
         open_invoices: 2,
     }));
     assert.equal(askedFor, 'contact-1');

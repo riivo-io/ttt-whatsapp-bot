@@ -19,6 +19,7 @@ import {
     formatSendCaption,
 } from '../taxForms.service';
 import { renderAssociatedDocsList } from '../../domain/irp5Reply';
+import { formatZar } from '../../domain/money';
 import { pickBranchForLocation, formatBranch, formatAllBranches } from '../../utils/officeContacts';
 
 const getMyDetails: ToolEntry = {
@@ -43,6 +44,20 @@ const getTaxNumber: ToolEntry = {
     },
 };
 
+/**
+ * Dynamics returns invoice totals as bare numbers, which leaves the model to
+ * guess a currency symbol — and it has guessed "$". Stamp the rand on before
+ * the row is serialised into a tool result.
+ */
+function withRandInvoiceTotals(invoices: unknown): unknown {
+    if (!Array.isArray(invoices)) return invoices;
+    return invoices.map(inv => {
+        const total = (inv as { riivo_totalinclvat?: unknown })?.riivo_totalinclvat;
+        if (typeof total !== 'number') return inv;
+        return { ...(inv as object), riivo_totalinclvat: formatZar(total), currency: 'ZAR' };
+    });
+}
+
 const getClientInvoices: ToolEntry = {
     name: 'get_client_invoices',
     description: "Get invoices. For clients, returns their own invoices. For staff, provide a client name or phone to look up their invoices.",
@@ -63,7 +78,7 @@ const getClientInvoices: ToolEntry = {
             }
             const r = await ctx.resolveClientDetailed(a.client);
             if (r.status === 'found') {
-                const data = await ctx.deps.dynamics.getClientInvoices(r.id);
+                const data = withRandInvoiceTotals(await ctx.deps.dynamics.getClientInvoices(r.id));
                 return JSON.stringify({ client_id: r.id, client_name: r.fullname, invoices: data });
             } else if (r.status === 'ambiguous') {
                 return JSON.stringify({
@@ -83,7 +98,7 @@ const getClientInvoices: ToolEntry = {
                 });
             }
         }
-        const data = await ctx.deps.dynamics.getClientInvoices(ctx.contactId as string);
+        const data = withRandInvoiceTotals(await ctx.deps.dynamics.getClientInvoices(ctx.contactId as string));
         return JSON.stringify(data);
     },
 };
@@ -176,7 +191,7 @@ const getOutstandingBalance: ToolEntry = {
         return JSON.stringify({
             client_id: targetId,
             client_name: targetName,
-            outstanding_amount: `R${balance.total.toFixed(2)}`,
+            outstanding_amount: formatZar(balance.total),
             open_invoices: balance.count,
         });
     },
