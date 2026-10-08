@@ -433,10 +433,10 @@ export class MetaWhatsAppService {
         }
     }
 
-    async sendListMessage(to: string, text: string, buttonText: string, sections: { title: string; rows: { id: string; title: string; description?: string }[] }[]): Promise<void> {
+    async sendListMessage(to: string, text: string, buttonText: string, sections: { title: string; rows: { id: string; title: string; description?: string }[] }[]): Promise<string | null> {
         if (!this.token || !this.phoneNumberId) {
             console.error('Cannot send list: Meta configuration missing');
-            return;
+            return null;
         }
 
         try {
@@ -457,15 +457,18 @@ export class MetaWhatsAppService {
                 }
             };
 
-            await axios.post(`${this.baseUrl}/${this.activePhoneNumberId()}/messages`, payload, {
+            const res = await axios.post(`${this.baseUrl}/${this.activePhoneNumberId()}/messages`, payload, {
                 headers: {
                     'Authorization': `Bearer ${this.token}`,
                     'Content-Type': 'application/json'
                 }
             });
-            console.log(`[Meta WhatsApp] Sent list to ${to}`);
+            const messageId: string | null = res.data?.messages?.[0]?.id || null;
+            console.log(`[Meta WhatsApp] Sent list to ${to}${messageId ? ` (${messageId})` : ''}`);
+            return messageId;
         } catch (error: any) {
             console.error('[Meta WhatsApp] Failed to send list:', error?.response?.data || error.message);
+            return null;
         }
     }
 }

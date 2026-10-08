@@ -1569,7 +1569,8 @@ export class DynamicsService {
         messageContent: string,
         direction: 'Incoming' | 'Outgoing',
         phoneNumber: string,
-        requestId?: string | null
+        requestId?: string | null,
+        messageId?: string | null
     ): Promise<void> {
         const directionValue = direction === 'Incoming' ? 463630000 : 463630001;
 
@@ -1581,6 +1582,14 @@ export class DynamicsService {
             "riivo_to": direction === 'Incoming' ? 'Bot' : phoneNumber,
             "riivo_timestamp": new Date().toISOString()
         };
+
+        // Meta's message id (wamid.xxx) for this exact message: the client's
+        // inbound message, or the reply we sent. Lets CRM link replies and
+        // delivery/read receipts back to the message. Omitted when unknown
+        // (synthetic/internal messages), so the row is written exactly as before.
+        if (messageId) {
+            payload["riivo_messageid"] = messageId;
+        }
 
         // Prefer threading under the request so staff can see the full
         // conversation on the request record in CRM. Fall back to the

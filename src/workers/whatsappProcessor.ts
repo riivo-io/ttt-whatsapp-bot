@@ -163,6 +163,8 @@ export type IncomingMessage = {
     interactiveId?: string;
     document?: { id: string; filename: string; mimeType: string };
     flowResponse?: SignUpFlowResponse;
+    // Meta's message id (wamid.xxx). Absent on synthetic messages built in-process.
+    wamid?: string;
 };
 
 /**
@@ -171,6 +173,14 @@ export type IncomingMessage = {
  * call from the webhook ingest path before enqueueing.
  */
 export function extractIncoming(metaMessage: any): IncomingMessage | null {
+    const incoming = parseIncoming(metaMessage);
+    if (incoming && typeof metaMessage?.id === 'string' && metaMessage.id) {
+        incoming.wamid = metaMessage.id;
+    }
+    return incoming;
+}
+
+function parseIncoming(metaMessage: any): IncomingMessage | null {
     const from = metaMessage.from;
     if (!from) return null;
 
@@ -239,9 +249,9 @@ export function extractIncoming(metaMessage: any): IncomingMessage | null {
     return null;
 }
 
-async function sendClientWelcomeMenu(to: string, firstName: string): Promise<string> {
+async function sendClientWelcomeMenu(to: string, firstName: string): Promise<{ body: string; wamid: string | null }> {
     const body = `Hey ${firstName || 'there'}! 👋 Tina here, your TTT tax sidekick.\n\nWhat can I help with today?`;
-    await metaWhatsAppService.sendListMessage(
+    const wamid = await metaWhatsAppService.sendListMessage(
         to,
         body,
         'Choose an option',
@@ -264,7 +274,7 @@ async function sendClientWelcomeMenu(to: string, firstName: string): Promise<str
             },
         ],
     );
-    return body;
+    return { body, wamid };
 }
 
 /**
@@ -285,6 +295,7 @@ async function handleTaxFormReturn(
     crmRequestId: string | null,
     formMatch: { key: string; label: string; filenamePrefix: string },
     source: 'filename' | 'context',
+    incomingWamid?: string,
 ): Promise<void> {
     const staged = peekPendingUpload(phoneNumber);
     if (!staged) {
@@ -341,10 +352,10 @@ async function handleTaxFormReturn(
     const ack = `Got your ${formMatch.label} — filed under your ${year} return. Thanks!`;
     await supabaseService.saveMessage(sessionId, 'user', incomingText);
     await supabaseService.saveMessage(sessionId, 'assistant', ack);
-    await metaWhatsAppService.sendMessage(phoneNumber, ack);
+    const ackWamid = await metaWhatsAppService.sendMessage(phoneNumber, ack);
     try {
-        await dynamicsService.logMessage(crmEntity as any, incomingText || '(document)', 'Incoming', phoneNumber, crmRequestId);
-        await dynamicsService.logMessage(crmEntity as any, ack, 'Outgoing', phoneNumber, crmRequestId);
+        await dynamicsService.logMessage(crmEntity as any, incomingText || '(document)', 'Incoming', phoneNumber, crmRequestId, incomingWamid);
+        await dynamicsService.logMessage(crmEntity as any, ack, 'Outgoing', phoneNumber, crmRequestId, ackWamid);
     } catch (e) {
         console.warn('[Processor] Tax-form return log failed:', (e as Error).message);
     }
@@ -758,7 +769,7 @@ async function evaluateBadDebt(
 }
 
 async function processMessage(incoming: IncomingMessage, outboundPrefix?: string): Promise<void> {
-    const { from, text, interactiveId, document, flowResponse } = incoming;
+    const { from, text, interactiveId, document, flowResponse, wamid } = incoming;
 
     if (flowResponse) {
         await handleSignUpFlowSubmission(from, flowResponse);
@@ -1011,6 +1022,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
                 null,
                 filenameMatch,
                 'filename',
+                wamid,
             );
             return;
         }
@@ -1026,6 +1038,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
                     null,
                     contextMatch,
                     'context',
+                    wamid,
                 );
                 return;
             }
@@ -1059,7 +1072,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
 
         await supabaseService.saveMessage(session.id, 'user', effectiveText);
         try {
-            await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, docCrmRequestId);
+            await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, docCrmRequestId, wamid);
         } catch (e) {
             console.warn('[Processor] Doc incoming log failed:', (e as Error).message);
         }
@@ -1117,9 +1130,9 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         clearPendingUpload(from);
 
         await supabaseService.saveMessage(session.id, 'assistant', ack);
-        await metaWhatsAppService.sendMessage(from, ack);
+        const ackWamid = await metaWhatsAppService.sendMessage(from, ack);
         try {
-            await dynamicsService.logMessage(crmEntity, ack, 'Outgoing', from, docCrmRequestId);
+            await dynamicsService.logMessage(crmEntity, ack, 'Outgoing', from, docCrmRequestId, ackWamid);
         } catch (e) {
             console.warn('[Processor] Doc outgoing log failed:', (e as Error).message);
         }
@@ -1140,10 +1153,10 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     if (crmEntity.type === 'client' && interactiveId === CLIENT_MENU_IDS.OTHER) {
         await supabaseService.saveMessage(session.id, 'user', effectiveText);
         await supabaseService.saveMessage(session.id, 'assistant', CLIENT_MENU_OTHER_ACK);
-        await metaWhatsAppService.sendMessage(from, CLIENT_MENU_OTHER_ACK);
+        const ackWamid = await metaWhatsAppService.sendMessage(from, CLIENT_MENU_OTHER_ACK);
         try {
-            await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, null);
-            await dynamicsService.logMessage(crmEntity, CLIENT_MENU_OTHER_ACK, 'Outgoing', from, null);
+            await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, null, wamid);
+            await dynamicsService.logMessage(crmEntity, CLIENT_MENU_OTHER_ACK, 'Outgoing', from, null, ackWamid);
         } catch (e) {
             console.warn('[Processor] Menu-other log failed:', (e as Error).message);
         }
@@ -1167,16 +1180,16 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         if (existingHistory.length === 0) {
             await supabaseService.saveMessage(session.id, 'user', effectiveText);
             try {
-                await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, null);
+                await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, null, wamid);
             } catch (e) {
                 console.warn('[Processor] Incoming log failed:', (e as Error).message);
             }
 
             const firstName = (crmEntity.fullname || '').trim().split(/\s+/)[0] || '';
-            const menuBody = await sendClientWelcomeMenu(from, firstName);
+            const { body: menuBody, wamid: menuWamid } = await sendClientWelcomeMenu(from, firstName);
             await supabaseService.saveMessage(session.id, 'assistant', menuBody);
             try {
-                await dynamicsService.logMessage(crmEntity, menuBody, 'Outgoing', from, null);
+                await dynamicsService.logMessage(crmEntity, menuBody, 'Outgoing', from, null, menuWamid);
             } catch (e) {
                 console.warn('[Processor] Outgoing log failed:', (e as Error).message);
             }
@@ -1337,7 +1350,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     }
 
     try {
-        await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, crmRequestId);
+        await dynamicsService.logMessage(crmEntity, effectiveText, 'Incoming', from, crmRequestId, wamid);
     } catch (e) {
         console.warn('[Processor] Incoming log failed:', (e as Error).message);
     }
@@ -1386,9 +1399,9 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         // under the tapped case's request when we have it.
         const sendBotText = async (text: string) => {
             await supabaseService.saveMessage(session.id, 'assistant', text);
-            await metaWhatsAppService.sendMessage(from, text);
+            const sentWamid = await metaWhatsAppService.sendMessage(from, text);
             try {
-                await dynamicsService.logMessage(crmEntity, text, 'Outgoing', from, tappedCase?.crm_case_id ?? crmRequestId);
+                await dynamicsService.logMessage(crmEntity, text, 'Outgoing', from, tappedCase?.crm_case_id ?? crmRequestId, sentWamid);
             } catch (e) {
                 console.warn('[Processor] Outgoing log failed:', (e as Error).message);
             }
@@ -1512,9 +1525,9 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         if (closed > 0) {
             await supabaseService.setSessionPendingCase(session.id, null);
             await supabaseService.saveMessage(session.id, 'assistant', WRAP_UP_NOTIFICATION);
-            await metaWhatsAppService.sendMessage(from, WRAP_UP_NOTIFICATION);
+            const wrapUpWamid = await metaWhatsAppService.sendMessage(from, WRAP_UP_NOTIFICATION);
             try {
-                await dynamicsService.logMessage(crmEntity, WRAP_UP_NOTIFICATION, 'Outgoing', from, crmRequestId);
+                await dynamicsService.logMessage(crmEntity, WRAP_UP_NOTIFICATION, 'Outgoing', from, crmRequestId, wrapUpWamid);
             } catch (e) {
                 console.warn('[Processor] Wrap-up outgoing log failed:', (e as Error).message);
             }
@@ -1608,7 +1621,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     const finalResponseText = outboundPrefix ? outboundPrefix + responseText : responseText;
     await supabaseService.saveMessage(session.id, 'assistant', finalResponseText);
 
-    await metaWhatsAppService.sendMessage(from, finalResponseText);
+    const replyWamid = await metaWhatsAppService.sendMessage(from, finalResponseText);
 
     // For leads with LoE still outstanding, follow the first-message AI reply
     // with a tiny buttoned prompt so the action is one tap away. Gated on
@@ -1670,7 +1683,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         .catch(e => console.warn('[Processor] Intent classification failed:', e.message));
 
     try {
-        await dynamicsService.logMessage(crmEntity, finalResponseText, 'Outgoing', from, crmRequestId);
+        await dynamicsService.logMessage(crmEntity, finalResponseText, 'Outgoing', from, crmRequestId, replyWamid);
     } catch (e) {
         console.warn('[Processor] Outgoing log failed:', (e as Error).message);
     }
