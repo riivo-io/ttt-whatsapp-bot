@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 7a7ab8c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit a47701c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -61,7 +61,7 @@ export interface AgentActionRow {
   urgent?: true;
   at: string;
   /** For a template send: which template and which version went out, and the text exactly as sent. */
-  template?: { name: string; version: string; text: string };
+  template?: { name: string; version: string; text?: string };
 }
 
 export type Outbound = { kind: 'text'; text: string } | { kind: 'template'; name: string; version: string; text: string };
