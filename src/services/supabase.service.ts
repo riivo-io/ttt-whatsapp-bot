@@ -170,6 +170,17 @@ export interface PendingLoeRow {
     created_at: string;
 }
 
+/** TTTFG-5168: one client's claim walkthrough in progress. */
+export interface ClaimWalkthroughRow {
+    phone_number: string;
+    contact_id: string;
+    request_id: string;
+    state: unknown;
+    last_sent: string | null;
+    started_at: string;
+    updated_at: string;
+}
+
 class SupabaseService {
     private client: SupabaseClient;
 
@@ -1396,6 +1407,32 @@ class SupabaseService {
      * Returns null if none. Used when the client taps the Yes/No button — the
      * payload is static (`relay_yes`/`relay_no`) so we identify the row by phone.
      */
+    // --- TTTFG-5168: claim walkthroughs (migration 20261021120000_claim_walkthroughs.sql) ---------------------------
+
+    async getClaimWalkthrough(phone: string): Promise<ClaimWalkthroughRow | null> {
+        const { data, error } = await this.client
+            .from('claim_walkthroughs')
+            .select('*')
+            .eq('phone_number', phone)
+            .maybeSingle();
+        // An error here must not be read as "no claim in progress": the caller would start Tina's normal reply in the
+        // middle of a claim. Throw, and the worker retries the message.
+        if (error) throw new Error(`[Supabase] getClaimWalkthrough: ${error.message}`);
+        return (data as ClaimWalkthroughRow) || null;
+    }
+
+    async saveClaimWalkthrough(row: Omit<ClaimWalkthroughRow, 'started_at' | 'updated_at'>): Promise<void> {
+        const { error } = await this.client
+            .from('claim_walkthroughs')
+            .upsert({ ...row, updated_at: new Date().toISOString() }, { onConflict: 'phone_number' });
+        if (error) throw new Error(`[Supabase] saveClaimWalkthrough: ${error.message}`);
+    }
+
+    async deleteClaimWalkthrough(phone: string): Promise<void> {
+        const { error } = await this.client.from('claim_walkthroughs').delete().eq('phone_number', phone);
+        if (error) throw new Error(`[Supabase] deleteClaimWalkthrough: ${error.message}`);
+    }
+
     async findActiveRelayByPhone(clientPhone: string): Promise<EmailRelayPendingRow | null> {
         const { data, error } = await this.client
             .from('email_relay_pending')

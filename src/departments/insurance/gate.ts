@@ -1,0 +1,53 @@
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/gate.ts (commit 3790e42). Do not edit here:
+// change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
+// TTTFG-5168 AC 9: the claim-outcome rule of the policy gate (SPEC-04 "Policy gate", SPEC-05 "What Tina may and may
+// not do"). Tina never says a claim is accepted, approved, paid or settled: that is the insurer's decision and the
+// broker's message. The rule checks Tina's outbound text after it is generated, because a prompt instruction alone
+// does not hold on every run ("Code enforces the gate, not only the prompt").
+//
+// It errs towards blocking. A blocked reply costs a holding line and a Follow-up for the broker; a reply that
+// promises a payout costs TTT a complaint. A rejection ("your claim was not approved") is blocked too: a person tells
+// the client about a rejection (SPEC-04 user story 42). A conditional clause ("whether it's approved is the
+// insurer's decision", "once the insurer has approved it, your broker will tell you") states no outcome and passes.
+
+/** Sent instead of a blocked reply. Fixed text, never generated. */
+export const HOLDING_LINE = 'Thanks for your message. The person handling your claim will update you on its progress.';
+
+const OUTCOME = '(?:accepted|approved|paid(?: out)?|settled|successful|declined|rejected|repudiated)';
+const BE = "(?:is|was|has been|have been|had been|will be|would be|should be|'s been|'ll be|got|gets|been|being)";
+const SUBJECT = '(?:claim|it|this|that)';
+const PAYER =
+  "(?:we|they|the insurer|your insurer|insurers?|the insurance company|TTT|Hybrid|Discovery(?: Insure)?|Momentum|Santam|OUTsurance|Old Mutual|King Price|MiWay|Hollard|Bryte|Dial Direct|Budget Insurance)";
+
+const RULES: RegExp[] = [
+  // "your claim has been approved", "it will be paid", "the claim is not approved", "claim was rejected"
+  new RegExp(`\\b${SUBJECT}\\b[^.?!\\n]{0,30}?\\b${BE}\\s+(?:not\\s+|now\\s+|already\\s+|fully\\s+)?${OUTCOME}\\b`, 'gi'),
+  // "it's approved", "the claim's been paid"
+  new RegExp(`\\b${SUBJECT}'s\\s+(?:been\\s+|now\\s+|already\\s+|not\\s+)?${OUTCOME}\\b`, 'gi'),
+  // "they've approved your claim", "the insurer will pay you", "Discovery has accepted"
+  new RegExp(`\\b${PAYER}\\s*(?:will|'ll|have|'ve|has|had|are going to|is going to)\\s+(?:now\\s+|already\\s+)?(?:approve|approved|accept|accepted|pay|paid|settle|settled|pay out|paid out)\\b`, 'gi'),
+  // "you will be paid", "you'll receive your payout", "you'll get the money"
+  /\byou(?:'ll| will| are going to)\s+(?:be paid|be reimbursed|receive (?:your |the |a )?(?:payment|payout|settlement|money)|get (?:your |the |a )?(?:payment|payout|settlement|money))\b/gi,
+  // "approved claim", "claim approval", "your payout", "payout of R5 000"
+  /\b(?:claim approval|approved claim|your payout|payout of)\b/gi,
+];
+
+/** A clause that only describes what may happen ("whether", "if", "once" before the match) states no outcome. */
+const CONDITIONAL = /\b(?:whether|if|once|when|until|unless|before|after)\b/i;
+
+function conditional(text: string, at: number): boolean {
+  const clauseStart = Math.max(text.lastIndexOf('.', at - 1), text.lastIndexOf('?', at - 1), text.lastIndexOf('!', at - 1), text.lastIndexOf('\n', at - 1), text.lastIndexOf(',', at - 1));
+  return CONDITIONAL.test(text.slice(clauseStart + 1, at));
+}
+
+export type GateResult = { ok: true; text: string } | { ok: false; text: string; rule: 'claim-outcome'; matched: string };
+
+export function claimOutcomeGate(text: string): GateResult {
+  const flat = text.replace(/[’‘]/g, "'");
+  for (const rule of RULES) {
+    for (const m of flat.matchAll(rule)) {
+      if (!conditional(flat, m.index)) return { ok: false, text: HOLDING_LINE, rule: 'claim-outcome', matched: m[0] };
+    }
+  }
+  return { ok: true, text };
+}

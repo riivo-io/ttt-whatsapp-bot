@@ -40,6 +40,7 @@ import {
     shouldSendAutoReplyClarification,
     AUTO_REPLY_CLARIFICATION,
 } from '../utils/autoReply';
+import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
@@ -887,6 +888,10 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     const { crmEntity, staffRoleId: initialStaffRoleId, permittedTools: initialTools } = await resolveSender(from);
 
     if (!crmEntity) {
+        // TTTFG-5168 AC 2: an unknown number reporting a claim gets only the unknown-number reply (no claim, no
+        // follow-up, no ID number asked). Off unless CLAIMS_ENABLED=true.
+        if (!document && await handleUnknownNumberClaim(from, effectiveText)) return;
+
         const codeMatch = effectiveText.match(REFERRAL_CODE_PATTERN);
         const code = codeMatch ? codeMatch[1] : null;
         const isReferralInbound = !!code || REFERRAL_KEYWORD_PATTERN.test(effectiveText);
@@ -997,6 +1002,10 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             console.warn('[Processor] Opt-in update failed:', (e as Error).message);
         }
     }
+
+    // TTTFG-5168: a claim walkthrough in progress, or a new claim report, takes the message before every other branch:
+    // the walkthrough's order (policy, hurt or in danger, then the facts) is the point. Off unless CLAIMS_ENABLED=true.
+    if (crmEntity.type === 'client' && !document && await handleClientClaimMessage(from, effectiveText, crmEntity, session.id)) return;
 
     // Bad-debt detection (PRD-bad-debt-collection.md §6.2). Runs on the first
     // client inbound of the session, caches on the session, and fires the
