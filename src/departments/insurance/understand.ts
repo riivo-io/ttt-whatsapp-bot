@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 3790e42). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 7a7ab8c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Claude reads one WhatsApp message from the client and says what it means for the step Tina is on. Code
 // decides what happens next (walkthrough.ts). This is the "use Claude only to understand each answer" half of the
@@ -74,6 +74,7 @@ ${STEP_HELP[state.step]}
 
 Rules:
 - Only set a field the client actually gave in this message. Never guess, infer or fill in a default. Leave it null.
+- already_known is context only. Never copy a value from it into your answer.
 - description: what happened, in the client's own words, copied rather than summarised.
 - incidentDate: YYYY-MM-DD. incidentTime: HH:MM, 24-hour. Both South African time. Work out "yesterday" or "on Saturday"
   from today's date. Leave incidentTime null when the client gave no time ("last night" is not a time).

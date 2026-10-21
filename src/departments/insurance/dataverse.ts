@@ -1,12 +1,11 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit 3790e42). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit 7a7ab8c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: ClaimPorts against Dataverse (the riivo_claim table from TTTFG-4885). The host passes in its own
 // Dataverse call (`Dv`, the same signature as the email agent's adapters/dataverse.ts `dv`) and its WhatsApp send, so
 // this file runs unchanged in the email agent and in Tina, and imports nothing from either.
 //
-// Choices are the 2Tables values, the same in every environment (read from DEV on 21 Oct 2026). Gaps carried here
-// until the data model catches up, each one also listed in the story report:
-// - riivo_claimtype has no Hijacking. A hijacking is stored as Motor theft; the client's words stay in the description.
+// Choices are the 2Tables values, the same in every environment (read from DEV on 21 Oct 2026; Hijacking 463630006 added
+// to riivo_claimtype the same day). Gaps carried here until the data model catches up:
 // - riivo_agentaction has no Regarding lookup yet (TTTFG-4853 adds it). Until then the row names the claim or request
 //   in riivo_sourcemessageid as "<table>:<id>", and links the client through riivo_client.
 // - Due dates follow the TTTFG-4853 urgency rule (src/core/urgency.ts): 17:00 South African time on the next working
@@ -19,7 +18,7 @@ import type { ClaimType, Policy } from './walkthrough';
 export type Dv = <T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, opts?: { formatted?: boolean; returnRow?: boolean }) => Promise<T>;
 
 const CLAIM_TYPE: Record<ClaimType, number> = {
-  'Motor accident': 463630000, 'Motor theft': 463630001, 'Hijacking': 463630001, 'Property loss or damage': 463630002,
+  'Motor accident': 463630000, 'Motor theft': 463630001, 'Hijacking': 463630006, 'Property loss or damage': 463630002,
   'Windscreen': 463630003, 'Portable possessions': 463630004, 'Other': 463630005,
 };
 const CLAIM_STATUS_FNOL_LOGGED = 463630000;
@@ -166,7 +165,7 @@ export function dataverseClaimPorts(o: ClaimsDataverseOptions): ClaimPorts {
         riivo_reportedon: row.reportedOn,
         riivo_incidentdate: row.incidentAt,
         riivo_incidentplace: row.place.slice(0, 200),
-        riivo_description: (row.claimType === 'Hijacking' ? `Hijacking. ${row.description}` : row.description).slice(0, 10000),
+        riivo_description: row.description.slice(0, 10000),
         riivo_thirdpartiesinvolved: row.thirdParties,
         riivo_thirdpartydetails: row.thirdPartyDetails?.slice(0, 2000) ?? null,
         riivo_sapsinvolved: row.saps,

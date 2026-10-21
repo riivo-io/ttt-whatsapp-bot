@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 3790e42). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 7a7ab8c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -246,7 +246,9 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
       if (answer.kind === 'correct' || answer.kind === 'facts') {
         const facts = merge(state.facts, answer.facts);
         const step = nextFactStep(facts);
-        const changed = Object.values(answer.facts).some((v) => v !== undefined && v !== '');
+        // Only a value that differs from what is on file is a correction. The model may repeat known values alongside
+        // "the date is wrong" (seen 21 Oct 2026); that is not a new date, so Tina asks for it.
+        const changed = !sameFacts(facts, state.facts);
         if (step !== 'summary') return goTo({ ...state, facts, step });
         if (!changed) {
           // "No, the date is wrong": ask for the right value. No claim yet.
@@ -258,6 +260,11 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
       return same();
     }
   }
+}
+
+function sameFacts(a: Facts, b: Facts): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<Fact>;
+  return [...keys].every((k) => a[k] === b[k]);
 }
 
 /** The facts are complete: everything the claim row needs from the client. */

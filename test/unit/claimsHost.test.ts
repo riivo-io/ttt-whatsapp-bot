@@ -53,7 +53,7 @@ function world(o: { policies?: Policy[]; enabled?: boolean; answers?: Record<str
 }
 
 test('TTTFG-5168 check 1: "I need to claim, my car was hit" opens an Insurance request and starts the walkthrough', async () => {
-    const w = world({ answers: [{ kind: 'facts', claimType: 'Motor accident' }] });
+    const w = world({ answers: [{ kind: 'facts', claimType: 'Motor accident', description: 'my car was hit' }] });
     const out = await claimFromClient(w.deps, PHONE, JANE, 'I need to claim, my car was hit', NOW);
     assert.deepEqual(out, { handled: true, kind: 'started' });
     assert.deepEqual(w.requests, ['I need to claim, my car was hit']);
@@ -62,6 +62,7 @@ test('TTTFG-5168 check 1: "I need to claim, my car was hit" opens an Insurance r
     const stored = w.store.get(PHONE)!;
     assert.equal(stored.state.step, 'policy');
     assert.equal(stored.state.facts.claimType, 'Motor accident', 'what the client already said is kept');
+    assert.equal(stored.state.facts.description, undefined, 'a four-word opening line is not the description: Tina asks for it');
     assert.equal(stored.lastSent, w.texts()[0]);
 });
 

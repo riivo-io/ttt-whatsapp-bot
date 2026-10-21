@@ -74,13 +74,21 @@ function deps(from: string, sessionId: string | null, entity: CrmEntity | null, 
         understandModel: toolModel(UNDERSTAND_MODEL, 'record_answer', limits) as UnderstandModel,
 
         async openRequest(contactId, phone, text) {
-            const r = await dynamicsService.createRequest({
-                contactId, contactType: 'client', phoneNumber: phone, description: text, category: REQUEST_CATEGORY_INSURANCE,
-            });
-            if (!r) return null;
-            // AC 1: the routing result on the request. Insurance and Advice is the category; Claim the topic.
-            await dynamicsService.updateRequest(r.riivo_requestid, { riivo_classificationtopic: 'Claim' });
-            return r.riivo_requestid;
+            // Not dynamicsService.createRequest: that gives the request the client's owner, and the insurance roles
+            // can't read riivo_request (DEV, 21 Oct 2026), so Dataverse refuses a broker as owner. The request stays
+            // with Tina's app user; the claim and its follow-ups carry the broker. AC 1's routing result is on the
+            // request: category Insurance, topic Claim.
+            try {
+                const r = await dynamicsService.webApi<{ riivo_requestid: string }>('POST', 'riivo_requests?$select=riivo_requestid', {
+                    riivo_clientmobilenumber: phone, riivo_channel: 1, riivo_category: REQUEST_CATEGORY_INSURANCE, riivo_priority: 1,
+                    riivo_description: text.slice(0, 100), riivo_classificationtopic: 'Claim', statecode: 0, statuscode: 1,
+                    'riivo_Client@odata.bind': `/contacts(${contactId})`,
+                }, { returnRow: true });
+                return r.riivo_requestid;
+            } catch (e) {
+                console.error('[Claims] Could not open the claim request:', (e as Error).message);
+                return null;
+            }
         },
 
         async logIncoming(requestId, text) {

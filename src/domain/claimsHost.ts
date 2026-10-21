@@ -17,6 +17,9 @@ import { claimRoute, type IntentModel } from '../departments/insurance/intent';
 import { understand, type UnderstandModel } from '../departments/insurance/understand';
 import { advance, type WalkthroughState } from '../departments/insurance/walkthrough';
 
+/** A description shorter than this in the opening message isn't kept (Tina asks "what happened?"). */
+const MIN_OPENING_DESCRIPTION_WORDS = 8;
+
 /** A walkthrough untouched this long is abandoned: the next message starts afresh. */
 export const ABANDONED_AFTER_MS = 72 * 3_600_000;
 
@@ -91,8 +94,13 @@ export async function claimFromClient(
     if (state) {
         // Whatever the client already said about the incident ("my car was hit at the Claremont robot") is kept, so
         // Tina doesn't ask for it again later. The steps keep their order: the next question is still the policy.
+        // An opening line like "my car was hit" is not the client's account of what happened: Tina still asks for it.
         const firstRead = await understand(deps.understandModel, { ...state, step: 'claim-type' }, 'What happened?', text, now);
-        if (firstRead.kind === 'facts') state = { ...state, facts: advance({ ...state, step: 'claim-type' }, firstRead).state?.facts ?? state.facts };
+        if (firstRead.kind === 'facts') {
+            const facts = { ...firstRead.facts };
+            if (facts.description && facts.description.split(/\s+/).length < MIN_OPENING_DESCRIPTION_WORDS) delete facts.description;
+            state = { ...state, facts: advance({ ...state, step: 'claim-type' }, { kind: 'facts', facts }).state?.facts ?? state.facts };
+        }
     }
     return persist(deps, phone, contact.id, requestId, state, r.lastSent ?? null, r.claim?.reference, 'started');
 }
