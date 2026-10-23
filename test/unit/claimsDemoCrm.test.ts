@@ -104,3 +104,23 @@ test('a 429 is waited out as the CRM asks, then the call goes through; the 4th 4
         globalThis.fetch = real;
     }
 });
+
+test('a read past the deadline is tried once more; a write is not', async () => {
+    const real = globalThis.fetch;
+    let n = 0;
+    globalThis.fetch = (async (_u: string, init: RequestInit) => {
+        n++;
+        if (n === 1 || init.method !== 'GET') { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+        const dv = dataverseCall('https://crm.example', () => 'token');
+        assert.deepEqual(await dv('GET', 'riivo_claims(1)'), { ok: true });
+        assert.equal(n, 2);
+        n = 5;
+        await assert.rejects(dv('PATCH', 'riivo_claims(1)', {}), /timeout/);
+        assert.equal(n, 6);
+    } finally {
+        globalThis.fetch = real;
+    }
+});

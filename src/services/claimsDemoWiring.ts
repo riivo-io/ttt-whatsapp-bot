@@ -35,7 +35,7 @@ const MAX_THROTTLE_RETRIES = 3;
 /**
  * One Dataverse Web API call, with a deadline, and a "too many requests" (HTTP 429, Dataverse's service protection
  * limits) waited out as the CRM asks (Retry-After, at most 30s, up to 3 times) rather than failing the message. A
- * refused request was never carried out, so retrying a write is safe.
+ * refused request was never carried out, so retrying a write is safe. A read past the deadline is tried once more.
  */
 export function dataverseCall(
     baseUrl: string, token: () => Promise<string> | string, o: { deadlineMs?: number; stats?: CrmStats } = {},
@@ -43,16 +43,25 @@ export function dataverseCall(
     const base = baseUrl.replace(/\/$/, '');
     return (async <T,>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, opts: { formatted?: boolean; returnRow?: boolean } = {}) => {
         const prefer = [opts.formatted ? 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' : '', opts.returnRow ? 'return=representation' : ''].filter(Boolean).join(', ');
+        let timedOut = false;
         for (let attempt = 0; ; attempt++) {
-            const res = await fetch(`${base}/api/data/v9.2/${path}`, {
-                method,
-                signal: AbortSignal.timeout(o.deadlineMs ?? 20_000),
-                headers: {
-                    Authorization: `Bearer ${await token()}`, Accept: 'application/json', 'Content-Type': 'application/json',
-                    'OData-Version': '4.0', 'OData-MaxVersion': '4.0', ...(method === 'PATCH' ? { 'If-Match': '*' } : {}), ...(prefer ? { Prefer: prefer } : {}),
-                },
-                body: body === undefined ? undefined : JSON.stringify(body),
-            });
+            let res: Response;
+            try {
+                res = await fetch(`${base}/api/data/v9.2/${path}`, {
+                    method,
+                    signal: AbortSignal.timeout(o.deadlineMs ?? 20_000),
+                    headers: {
+                        Authorization: `Bearer ${await token()}`, Accept: 'application/json', 'Content-Type': 'application/json',
+                        'OData-Version': '4.0', 'OData-MaxVersion': '4.0', ...(method === 'PATCH' ? { 'If-Match': '*' } : {}), ...(prefer ? { Prefer: prefer } : {}),
+                    },
+                    body: body === undefined ? undefined : JSON.stringify(body),
+                });
+            } catch (e) {
+                // A read that ran past the deadline is tried once more (the load test saw the odd slow read). A write is
+                // not: it may have been carried out.
+                if (method === 'GET' && !timedOut && (e as Error).name === 'TimeoutError') { timedOut = true; continue; }
+                throw e;
+            }
             if (res.status === 429 && attempt < MAX_THROTTLE_RETRIES) {
                 const after = Number(res.headers.get('Retry-After'));
                 if (o.stats) o.stats.throttled++;
