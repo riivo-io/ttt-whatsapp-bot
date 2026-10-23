@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
+    BUSY, claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
 } from '../../src/domain/claimsDemoHost';
 import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
@@ -43,9 +43,10 @@ const STEP_ANSWERS: [RegExp, Record<string, unknown>][] = [
 const blankAnswer = { kind: 'unclear', policyNumber: null, claimType: null, description: null, incidentDate: null, incidentTime: null, place: null,
     thirdParties: null, thirdPartyDetails: null, saps: null, injuries: null, injuryDetails: null, wrongFields: [] as string[] };
 const blankReply = { kind: 'unparsed', valueText: null, valueNumber: null, valueBool: null, sapsCaseNumber: null, sapsStation: null, differentIncident: false,
-    chosenClaim: null, yesNo: null, forItem: null, claimType: null, description: null, incidentDate: null, place: null };
+    chosenClaim: null, yesNo: null, forItem: null, claimType: null, description: null, incidentDate: null, place: null, otherAnswers: [], corrections: [] };
 
-function world(o: { isClaim?: boolean; rows?: Row[] } = {}) {
+function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, unknown>[] } = {}) {
+    const reportedSeen: string[] = [];
     const rows: Row[] = o.rows ?? [];
     const sent: string[] = [];
     const created: ClaimRow[] = [];
@@ -104,6 +105,7 @@ function world(o: { isClaim?: boolean; rows?: Row[] } = {}) {
         intentModel: async () => ({ reportingClaim: o.isClaim ?? true }),
         understandModel: async (req) => ({ ...blankAnswer, ...(STEP_ANSWERS.find(([re]) => re.test(req.system))?.[1] ?? {}) }),
         replyModel: async () => ({ ...blankReply, ...(replies.shift() ?? {}) }),
+        reportedModel: async (req) => (reportedSeen.push(req.user), { answers: o.reported ?? [] }),
         openRequest: async (_c, _p, text) => (requests.push(text), 'req-1'),
         withdrawOpenClaims: async () => { const refs = rows.filter((r) => isOpenClaim(r.status)).map((r) => (r.status = 'Withdrawn', r.reference)); withdrawn.push(...refs); return refs; },
         say: async (_p, text) => void sent.push(text),
@@ -111,7 +113,7 @@ function world(o: { isClaim?: boolean; rows?: Row[] } = {}) {
     };
     let seen = 0;
     const since = () => { const t = sent.slice(seen); seen = sent.length; return t; };
-    return { deps, rows, sent, since, created, actions, filed, signatureCalls, requests, withdrawn, store, replies };
+    return { deps, rows, sent, since, created, actions, filed, signatureCalls, requests, withdrawn, store, replies, reportedSeen };
 }
 
 const say = (w: ReturnType<typeof world>, text: string, now: Date, file?: ClientFile) =>
@@ -196,4 +198,61 @@ test('the SAPS step applies when the client describes a theft', () => {
     assert.equal(describedAsTheft(w('Motor theft', '')), true);
     assert.equal(describedAsTheft(w('Property loss or damage', 'Someone broke into the house and took the TV')), true);
     assert.equal(describedAsTheft(w('Motor accident', 'A taxi drove into me')), false);
+});
+
+test('what the client said while reporting the claim answers the form: Tina says so and skips that question', async () => {
+    const w = world({ reported: [{ key: 'driverName', valueText: 'Adriaan', valueNumber: null, valueBool: null }] });
+    let t = DAY1;
+    await say(w, 'I was driving my car when someone drove into the back of it at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    // Claude read the whole report: the opening message, the replies and the facts confirmed.
+    assert.match(w.reportedSeen[0], /I was driving my car when someone drove into the back of it/);
+    assert.match(w.reportedSeen[0], /What the client confirmed:/);
+    assert.equal(w.rows[0].answers.driverName?.value, 'Adriaan');
+    assert.equal(w.rows[0].answers.driverName?.source, 'report');
+    const opened = w.since().join('\n');
+    assert.match(opened, /I've filled in one of the insurer's questions from what you've already told me/);
+    assert.doesNotMatch(opened, /Who was driving the vehicle\?/);
+    assert.match(opened, /Please send me photos of the damage/i); // straight on to what's still missing
+    assert.deepEqual(w.store.get(PHONE)?.said, []);
+});
+
+test('Claude unavailable: Tina asks for the message again, and nothing is read, saved or counted as a miss', async () => {
+    const w = world();
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    w.since();
+    const before = structuredClone(w.store.get(PHONE)!.resume);
+    const down = w.deps.replyModel;
+    w.deps.replyModel = async () => { throw new Error('529 overloaded'); };
+    assert.equal(await say(w, 'Me, Adriaan', (t = tick(t, 1))), 'busy');
+    assert.deepEqual(w.since(), [BUSY]);
+    assert.deepEqual(w.store.get(PHONE)!.resume, before); // still asking the same question, no miss
+    assert.equal(w.rows[0].answers.driverName, undefined);
+    w.deps.replyModel = down;
+    w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
+    assert.equal(await say(w, 'Me, Adriaan', (t = tick(t, 1))), 'follow-on');
+    assert.equal(w.rows[0].answers.driverName?.value, 'Me, Adriaan');
+    assert.doesNotMatch(w.since().join('\n'), /didn't quite get that/);
+});
+
+test('Claude unavailable during the walkthrough or on the first message: the same, never "I didn\'t get that"', async () => {
+    const w = world();
+    const intent = w.deps.intentModel;
+    w.deps.intentModel = async () => { throw new Error('429'); };
+    assert.equal(await say(w, 'Someone drove into my car', DAY1), 'busy');
+    assert.deepEqual(w.since(), [BUSY]);
+    assert.equal(w.requests.length, 0);
+    w.deps.intentModel = intent;
+    assert.equal(await say(w, 'Someone drove into my car', tick(DAY1, 1)), 'started');
+    w.since();
+    const step = w.store.get(PHONE)!.walk!.step;
+    w.deps.understandModel = async () => { throw new Error('timeout'); };
+    assert.equal(await say(w, 'Yes', tick(DAY1, 2)), 'busy');
+    assert.deepEqual(w.since(), [BUSY]);
+    assert.equal(w.store.get(PHONE)!.walk!.step, step);
 });

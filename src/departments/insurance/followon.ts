@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 391dac8). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 0f9ac1f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -137,20 +137,33 @@ export interface FollowOnState {
 }
 
 /** What Claude understood from the client's message. Code decides what happens next. */
+/**
+ * TTTFG-4830: a value for a form question other than the one Tina asked, from the same message (or, at the start,
+ * from what the client said while reporting the claim). Code checks each one with accept() and saves only values for
+ * questions that apply and are still open; it never answers the question Tina is asking, and never starts a new entry
+ * of a repeating group.
+ */
+export interface OtherAnswer { key: string; value: string | number | boolean }
+
 export type FollowOnInput =
   /** Right after claimTurn() opened the claim. `describedAsTheft`: Claude read the description as a theft, burglary or hijacking. */
   | {
     kind: 'start'; claimId: string; describedAsTheft: boolean;
     /** TTTFG-5184: files the client sent before saying yes to "Is this a new claim?", kept for the new claim. */
     files?: ResumeFile[];
+    /** TTTFG-4830: form answers Claude read from what the client said while reporting the claim. */
+    reported?: OtherAnswer[];
   }
-  /** The value for the item being asked. */
-  | { kind: 'value'; value: string | number | boolean; wamid: string }
-  | { kind: 'saps'; caseNumber?: string; station?: string; wamid: string }
+  /**
+   * The value for the item being asked. `also`: values the same message gave for other open questions. `corrections`:
+   * new values for questions the client answered earlier ("actually no, there was no other car").
+   */
+  | { kind: 'value'; value: string | number | boolean; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  | { kind: 'saps'; caseNumber?: string; station?: string; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
   /** "I don't have it yet." */
-  | { kind: 'not-yet'; wamid: string }
-  /** Claude could not get a value from the reply. */
-  | { kind: 'unparsed'; wamid: string }
+  | { kind: 'not-yet'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  /** Claude could not get a value from the reply (for the item asked; `also` and `corrections` may still apply). */
+  | { kind: 'unparsed'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
   /** `forItem`: Claude's reading of which evidence item the file is, when it can tell (TTTFG-5184). */
   | { kind: 'file'; file: ClientFile; wamid: string; forItem?: string }
   /**
@@ -174,6 +187,13 @@ export interface ResumeFile { file: ClientFile; forItem?: string }
 export const SAVED_FILE = "Thanks, I've saved that with your claim. Back to my question:";
 export const SAVED_SAPS = "Thanks, I've saved the SAPS case number. Back to my question:";
 export const LEFT_OFF = 'Back to where we left off:';
+/** TTTFG-4830: the client changed an earlier answer. */
+export const CORRECTED = "No problem, I've changed that.";
+/** TTTFG-4830: the reply answered other questions but not the one Tina asked. */
+export const NOTED_OTHERS = "Thanks, I've noted that.";
+/** TTTFG-4830: after the duty of disclosure, when the client's report already answered some of the form's questions. */
+export const usedReport = (n: number) =>
+  `I've filled in ${n === 1 ? 'one of the insurer\'s questions' : `${n} of the insurer's questions`} from what you've already told me, so I won't ask ${n === 1 ? 'it' : 'them'} again.`;
 
 /** TTTFG-5254 step 4: fixed text, sent when the claim has no SAPS case number. */
 export const SAPS_INSTRUCTION = "If you haven't yet, please report this to the SAPS. The insurer needs the case number.";
@@ -218,6 +238,8 @@ type Out =
   | { kind: 'closing' }
   | { kind: 'still-missing'; items: QuestionItem[] }
   | { kind: 'save-answer'; key: string; record: AnswerRecord }
+  /** TTTFG-4830: an answer that no longer belongs on the claim (a group entry the client took back). */
+  | { kind: 'drop-answer'; key: string }
   | { kind: 'save-saps'; caseNumber?: string; station?: string }
   | { kind: 'file'; file: ClientFile; itemKey?: string }
   | { kind: 'request-signature' }
@@ -308,7 +330,7 @@ function sapsAsk(f: ClaimFacts): QuestionItem {
   return f.sapsCaseNumber ? SAPS_ITEMS[1] : SAPS_ITEMS[0];
 }
 
-export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly ResumeFile[] = []): Step {
+export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly ResumeFile[] = [], reported: readonly OtherAnswer[] = []): Step {
   const w = work(c.claim);
   const out: Out[] = [];
   const st: FollowOnState = {
@@ -319,13 +341,93 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
   if (st.sapsRequired) out.push({ kind: 'saps-required' });
   // Files kept from before the claim opened: filed now, so Tina never asks for one the client already sent.
   fileHeld(c, w, files, out, st.sapsRequired);
+  // TTTFG-4830: what the client already said while reporting the claim answers those questions; they aren't asked.
+  const used = applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
+  const noteUsed = (step: FollowOnState | null): Step => {
+    const first = out.findIndex((o) => o.kind === 'ask');
+    if (used && first >= 0) out.splice(first, 0, { kind: 'text', text: usedReport(used) });
+    return { state: step, out };
+  };
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
     if (!w.facts.sapsCaseNumber) out.push({ kind: 'saps-instruction' });
     const item = sapsAsk(w.facts);
     out.push({ kind: 'ask', item, simpler: false });
-    return { state: { ...st, phase: 'saps', asking: item.key }, out };
+    return noteUsed({ ...st, phase: 'saps', asking: item.key });
   }
-  return { state: intro(c, w, st, out), out };
+  return noteUsed(intro(c, w, st, out));
+}
+
+/**
+ * TTTFG-4830: saves the values a message (or the client's report) gave for open questions other than `except` (the one
+ * Tina is asking). Each is checked with accept() against its question; a question already answered, a SAPS key or a
+ * group's "another one?" question is never set this way, so no repeating-group entry is started. An answer can open a
+ * question (a yes to "Were there passengers?" opens the passenger's name), so it goes round until nothing more fits.
+ * Returns how many were saved.
+ */
+function applyOthers(
+  c: Ctx, w: Work, sapsRequired: boolean, others: readonly OtherAnswer[] | undefined,
+  rec: { at: string; wamid?: string; source: 'report' | 'same-message' }, out: Out[], except?: string,
+): number {
+  if (!others?.length) return 0;
+  let saved = 0;
+  for (let pass = 0, progress = true; progress && pass < 5; pass++) {
+    progress = false;
+    const items = formItems(c.form, w.answers, w.facts, sapsRequired);
+    for (const o of others) {
+      if (o.key === except || o.key.includes('.more.') || isSaps(o.key)) continue;
+      const prev = w.answers[o.key];
+      if (prev && prev.status !== 'not-yet') continue;
+      const item = items.find((i) => i.key === o.key);
+      if (!item || item.kind !== 'question' || !applies(item, w.answers, w.facts)) continue;
+      const value = accept(item, o.value);
+      if (value === undefined) continue;
+      const record: AnswerRecord = { value, status: 'answered', at: rec.at, ...(rec.wamid ? { wamid: rec.wamid } : {}), source: rec.source };
+      out.push({ kind: 'save-answer', key: item.key, record });
+      w.answers[item.key] = record;
+      saved++;
+      progress = true;
+    }
+  }
+  return saved;
+}
+
+/**
+ * TTTFG-4830: new values for questions already answered (the host lets Claude see only recent answers and the
+ * "another one?" answers). Each is checked with accept(); the question Tina is asking and SAPS keys are left alone. A
+ * "no" to a group's "another one?" ends the group there: the entries after it are dropped from the claim, so a car the
+ * client took back never reaches the form. Returns how many answers changed.
+ */
+function applyCorrections(
+  c: Ctx, w: Work, sapsRequired: boolean, corrections: readonly OtherAnswer[] | undefined, rec: { at: string; wamid?: string }, out: Out[], except?: string,
+): number {
+  if (!corrections?.length) return 0;
+  let changed = 0;
+  for (const k of corrections) {
+    const prev = w.answers[k.key];
+    if (k.key === except || isSaps(k.key) || !prev || prev.status === 'not-yet') continue;
+    const item = formItems(c.form, w.answers, w.facts, sapsRequired).find((i) => i.key === k.key);
+    if (!item || item.kind !== 'question') continue;
+    const value = accept(item, k.value);
+    if (value === undefined || (prev.status === 'answered' && prev.value === value)) continue;
+    const record: AnswerRecord = { value, status: 'answered', at: rec.at, ...(rec.wamid ? { wamid: rec.wamid } : {}), source: 'correction' };
+    out.push({ kind: 'save-answer', key: item.key, record });
+    w.answers[item.key] = record;
+    changed++;
+    const more = /^(.+)\.more\.(\d+)$/.exec(item.key);
+    if (more && value === false) {
+      const [, group, n] = more;
+      const members = new Set(c.form.questionList.filter((q) => q.group === group).map((q) => q.key));
+      for (const key of Object.keys(w.answers)) {
+        const m = /^(.+)\.more\.(\d+)$/.exec(key) ?? /^(.+)\.(\d+)$/.exec(key);
+        const later = m && Number(m[2]) > Number(n) && (members.has(m[1]) || m[1] === group);
+        if (later) {
+          out.push({ kind: 'drop-answer', key });
+          delete w.answers[key];
+        }
+      }
+    }
+  }
+  return changed;
 }
 
 // ---------------------------------------------------------------------------------------- TTTFG-5184: resuming
@@ -438,6 +540,10 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
   const w = work(c.claim);
   const out: Out[] = [];
   const at = c.now.toISOString();
+  // TTTFG-4830: an earlier answer the client changed, then the other questions this message answered, are saved first,
+  // so Tina neither carries on from a wrong answer nor asks for something she was just told.
+  const corrected = input.kind === 'file' ? 0 : applyCorrections(c, w, st.sapsRequired, input.corrections, { at, wamid: input.wamid }, out, st.asking);
+  const noted = input.kind === 'file' ? 0 : applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.asking);
 
   if (st.phase === 'saps') {
     let caseNumber = input.kind === 'saps' ? input.caseNumber?.trim() || undefined : undefined;
@@ -475,7 +581,11 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
   }
 
   const item = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === st.asking);
-  if (!item) return { state: proceed(c, w, st, out), out };
+  if (!item || !applies(item, w.answers, w.facts)) {
+    // The correction took away the question Tina was asking (no second car, so no second car's make): on to the next.
+    if (corrected) out.push({ kind: 'text', text: CORRECTED });
+    return { state: proceed(c, w, { ...st, misses: 0 }, out), out };
+  }
 
   if (input.kind === 'saps' && input.caseNumber) {
     // The case number the client didn't have earlier: saved, and the current item stands.
@@ -513,6 +623,8 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
       const record: AnswerRecord = { value, status: 'answered', at, wamid: input.wamid };
       out.push({ kind: 'save-answer', key: item.key, record });
       w.answers[item.key] = record;
+      // The answer may open questions the same message also answered ("yes, my aunt Arona" opens the passenger's name).
+      applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.asking);
       return { state: proceed(c, w, st, out), out };
     }
   }
@@ -525,6 +637,13 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
     out.push({ kind: 'save-answer', key: item.key, record });
     w.answers[item.key] = record;
     return { state: proceed(c, w, { ...st, skipped: [...st.skipped, item.key] }, out), out };
+  }
+
+  // The message changed an earlier answer or answered other questions, but not this one: that isn't a miss. Say so and
+  // ask it again as it was.
+  if ((corrected || noted) && input.kind === 'unparsed') {
+    out.push({ kind: 'ask', item, simpler: false, lead: corrected ? CORRECTED : NOTED_OTHERS });
+    return { state: st, out };
   }
 
   // A miss. Once: ask again in simpler words. Twice: the broker confirms it (a question) or it stays missing (evidence).
@@ -626,7 +745,7 @@ export async function followOnTurn(
 
   const ctx: Ctx = { claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays };
   const step =
-    input.kind === 'start' ? startFollowOn(ctx, input.describedAsTheft, input.files)
+    input.kind === 'start' ? startFollowOn(ctx, input.describedAsTheft, input.files, input.reported)
     : input.kind === 'resume' ? resumeStep(ctx, input.files, input.introSent, input.lead, input.skipped)
     : advanceFollowOn(ctx, state!, input);
 
@@ -645,7 +764,7 @@ export async function followOnTurn(
     status = to;
   };
 
-  for (const o of step.out) {
+  for (const [i, o] of step.out.entries()) {
     switch (o.kind) {
       case 'saps-instruction':
         await say(SAPS_INSTRUCTION);
@@ -676,8 +795,11 @@ export async function followOnTurn(
         await say(stillMissingText(o.items));
         break;
       case 'save-answer':
-        answers[o.key] = o.record;
-        await ports.saveAnswers(claimId, answers);
+      case 'drop-answer':
+        if (o.kind === 'save-answer') answers[o.key] = o.record;
+        else delete answers[o.key];
+        // Several changes from one message are written together.
+        if (!['save-answer', 'drop-answer'].includes(step.out[i + 1]?.kind ?? '')) await ports.saveAnswers(claimId, answers);
         break;
       case 'save-saps':
         await ports.saveSaps(claimId, { caseNumber: o.caseNumber, station: o.station });

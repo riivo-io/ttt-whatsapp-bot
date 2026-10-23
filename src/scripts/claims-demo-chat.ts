@@ -93,7 +93,7 @@ function claude(): Anthropic {
 }
 const toolModel = (model: string, name: string) => async (req: { system: string; user: string; schema: object }) => {
     const res = await claude().messages.create({
-        model, max_tokens: 1024, system: req.system, messages: [{ role: 'user', content: req.user }],
+        model, max_tokens: 2048, system: req.system, messages: [{ role: 'user', content: req.user }],
         tools: [{ name, description: 'Record the answer.', input_schema: req.schema as Anthropic.Tool.InputSchema }],
         tool_choice: { type: 'tool', name },
     });
@@ -150,6 +150,7 @@ const deps: ClaimsDemoDeps = {
     intentModel: toolModel(INTENT_MODEL, 'record_claim_intent'),
     understandModel: toolModel(UNDERSTAND_MODEL, 'record_answer'),
     replyModel: toolModel(UNDERSTAND_MODEL, 'record_reply'),
+    reportedModel: toolModel(UNDERSTAND_MODEL, 'record_known_answers'),
     openRequest: (c, p, text) => openDemoRequest(dv, c, p, text),
     withdrawOpenClaims: (c) => withdrawOpenClaims(dv, c),
     say: async (_p, text) => show('Tina', text),

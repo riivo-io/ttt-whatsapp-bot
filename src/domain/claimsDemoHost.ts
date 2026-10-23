@@ -6,7 +6,8 @@
  * is said and written; this module only joins its parts the way the DEV drivers do:
  *  - a 5168 walkthrough in progress: Claude reads the reply (understand.ts), claimTurn() asks the next question;
  *  - the walkthrough opens the claim: the 5176 follow-on starts at once (SAPS step, duty of disclosure, the form's
- *    questions, the filled form, then the evidence);
+ *    questions, the filled form, then the evidence). What the client said while reporting it already answers some of
+ *    the form's questions (reportedAnswers): those are filled in, not asked;
  *  - otherwise: Claude reads the message against the open claims (reply.ts) and resumeTurn() (5184) decides which claim
  *    it belongs to, or that there is none;
  *  - no open claim: a claim report starts the walkthrough under a new riivo_request; anything else gets the demo hello.
@@ -18,7 +19,7 @@
 import { claimTurn, type Conversation } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
-import { readReply, replyContext, type ReplyModel } from '../departments/insurance/reply';
+import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyModel, type ReportedModel } from '../departments/insurance/reply';
 import { NO_RESUME_STATE, resumeTurn, type ResumePorts, type ResumeState } from '../departments/insurance/resume';
 import { understand, type UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
@@ -52,6 +53,8 @@ export interface DemoConversation {
     resume: ResumeState;
     /** Files sent before the claim existed, for the follow-on's start. */
     held: ResumeFile[];
+    /** What the client wrote during the walkthrough in progress: read for the form's questions when the claim opens. */
+    said?: string[];
     lastSent: string | null;
     updatedAt?: string;
 }
@@ -74,6 +77,7 @@ export interface ClaimsDemoDeps {
     intentModel: IntentModel;
     understandModel: UnderstandModel;
     replyModel: ReplyModel;
+    reportedModel: ReportedModel;
     /** Opens the riivo_request (Insurance, topic Claim) a new claim conversation runs under. Null when refused. */
     openRequest(contactId: string, phone: string, text: string): Promise<string | null>;
     /** "#reset": sets the client's open claims to Withdrawn. Returns their references. */
@@ -84,7 +88,7 @@ export interface ClaimsDemoDeps {
 }
 
 export type DemoOutcome =
-    | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request';
+    | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request' | 'busy';
 
 export const helloText = (firstName: string) =>
     `Hi ${firstName}, it's Tina from TTT. On this number I'm set up to help with insurance claims. Tell me what happened `
@@ -93,6 +97,12 @@ export const resetText = (refs: string[]) =>
     `Demo reset. ${refs.length ? `I've withdrawn ${refs.join(', ')} and` : 'You had no open claims, and'} I've forgotten our chat. `
     + 'Say hi or tell me what happened to start again.';
 export const FILE_KEPT = "Thanks, I've kept that for your claim. I'll add it once your claim is open.";
+/**
+ * Claude couldn't be reached (after the SDK's retries). The package reads that as "unclear", which would tell the
+ * client they weren't understood and count a miss against a perfectly good answer. Instead nothing is read or saved,
+ * and the client is asked to send it again.
+ */
+export const BUSY = "Sorry, I'm a bit slow right now and couldn't read that. Please send it again in a minute.";
 
 const THEFT = /\b(stol(e|en)|theft|thie(f|ves)|burglar|broke into|break[- ]in|robbed|robbery|hijack)/i;
 /** The follow-on's `describedAsTheft`: the claim type says so, or the client's description does. */
@@ -114,6 +124,15 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     // A walkthrough untouched for three days is abandoned, as on Tina's claims path (claimsHost.ts).
     if (c.walk && c.updatedAt && now.getTime() - Date.parse(c.updatedAt) > ABANDONED_AFTER_MS) c.walk = null;
 
+    // A model call that fails is noted, so the turn stops instead of treating the message as unclear.
+    let unavailable = false;
+    const watch = <F extends (req: never) => Promise<unknown>>(f: F): F =>
+        (async (req: never) => { try { return await f(req); } catch (e) { unavailable = true; throw e; } }) as F;
+    const busy = async () => {
+        await deps.say(m.phone, BUSY);
+        return done('busy');
+    };
+
     let last: string | undefined;
     const sent = (text: string) => { last = text; };
     const done = async (outcome: DemoOutcome) => {
@@ -132,25 +151,33 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         }
         const ports = deps.ports(c.requestId, sent);
         const walk = c.walk;
-        const answer = await understand(deps.understandModel, walk, c.lastSent ?? '', m.text, now);
+        const answer = await understand(watch(deps.understandModel), walk, c.lastSent ?? '', m.text, now);
+        if (unavailable) return busy();
         const r = await claimTurn(ports, conv(), walk, answer, now);
         if (m.file) c.held = [...c.held, { file: m.file }];
+        if (m.text.trim()) c.said = [...(c.said ?? []), m.text.trim()];
         if (!r.claim) {
             c.walk = r.state;
             return done('walkthrough');
         }
-        // The claim is open: the follow-on starts at once, with any files the client sent on the way.
+        // The claim is open: the follow-on starts at once, with any files the client sent on the way and the form
+        // answers their report already gave.
         c.walk = null;
-        const fo = await followOnTurn(ports, conv(), null, { kind: 'start', claimId: r.claim.id, describedAsTheft: describedAsTheft(walk), files: c.held }, now);
+        const reported = await formAnswersFromReport(deps, ports, r.claim.id, walk, c.said ?? [], now);
+        const fo = await followOnTurn(ports, conv(), null, {
+            kind: 'start', claimId: r.claim.id, describedAsTheft: describedAsTheft(walk), files: c.held, reported,
+        }, now);
         c.resume = { followOn: fo.state, pending: null };
         c.held = [];
+        c.said = [];
         return done('opened');
     }
 
     // ---- no walkthrough: which open claim is this about? ----
     const ports = deps.ports(c.requestId, sent);
     const ctx = await replyContext(ports, m.contactId, c.resume, c.lastSent ?? undefined);
-    const reading = await readReply(deps.replyModel, ctx, m.text, m.file, m.wamid, now);
+    const reading = await readReply(watch(deps.replyModel), ctx, m.text, m.file, m.wamid, now);
+    if (unavailable) return busy();
     const r = await resumeTurn(ports, conv(), c.resume, reading, now);
     if (r.route === 'claim') {
         c.resume = r.state;
@@ -166,7 +193,9 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     // ---- no open claim ----
     c.resume = NO_RESUME_STATE;
     if (m.file) c.held = [...c.held, { file: m.file }];
-    if (!m.text.trim() || !(await claimRoute(deps.intentModel, m.text, { wordFilter: false }))) {
+    const route = m.text.trim() ? await claimRoute(watch(deps.intentModel), m.text, { wordFilter: false }) : null;
+    if (unavailable) return busy();
+    if (!route) {
         if (m.file) await deps.say(m.phone, FILE_KEPT);
         else {
             const contact = await ports.contactByWhatsApp(m.phone);
@@ -180,7 +209,35 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         return done('no-request');
     }
     c.requestId = requestId;
+    c.said = [m.text.trim()];
     const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start' }, now);
     c.walk = t.state && (await withOpeningFacts(deps.understandModel, t.state, m.text, now));
     return done('started');
+}
+
+/** The client's report as Claude reads it for the form: their own messages, then the facts they confirmed. */
+export function reportText(walk: WalkthroughState, said: readonly string[]): string {
+    const f = walk.facts;
+    const yn = (v: boolean | undefined, details?: string) => (v === undefined ? undefined : v ? `yes${details ? ` (${details})` : ''}` : 'no');
+    const confirmed = [
+        ['Claim type', f.claimType], ['What happened', f.description], ['When', [f.incidentDate, f.incidentTime].filter(Boolean).join(' ')],
+        ['Where', f.place], ['Anyone else involved', yn(f.thirdParties, f.thirdPartyDetails)], ['Police (SAPS) involved', yn(f.saps)],
+        ['Anyone injured', yn(f.injuries, f.injuryDetails)],
+    ].filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`);
+    return `The client's messages:\n${said.map((t) => `- ${t}`).join('\n')}\n\nWhat the client confirmed:\n${confirmed.join('\n')}`;
+}
+
+/** The form questions the client's report already answers, for the follow-on's start. Never fails the turn. */
+async function formAnswersFromReport(
+    deps: ClaimsDemoDeps, ports: ResumePorts, claimId: string, walk: WalkthroughState, said: readonly string[], now: Date,
+) {
+    try {
+        const claim = await ports.loadClaim(claimId);
+        const form = (await ports.activeClaimForm(claim.providerId, claim.claimType)) ?? (await ports.genericClaimForm());
+        const questions = openQuestions(form, claim.answers, { ...claim.facts, claimType: claim.claimType });
+        return await reportedAnswers(deps.reportedModel, questions, reportText(walk, said), now);
+    } catch (e) {
+        console.warn('[ClaimsDemo] Reading the report for form answers failed:', (e as Error).message);
+        return [];
+    }
 }
