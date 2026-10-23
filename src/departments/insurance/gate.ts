@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/gate.ts (commit a47701c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/gate.ts (commit cce71bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168 AC 9: the claim-outcome rule of the policy gate (SPEC-04 "Policy gate", SPEC-05 "What Tina may and may
 // not do"). Tina never says a claim is accepted, approved, paid or settled: that is the insurer's decision and the
@@ -40,7 +40,8 @@ function conditional(text: string, at: number): boolean {
   return CONDITIONAL.test(text.slice(clauseStart + 1, at));
 }
 
-export type GateResult = { ok: true; text: string } | { ok: false; text: string; rule: 'claim-outcome'; matched: string };
+export type GateRule = 'claim-outcome' | 'claim-risk';
+export type GateResult = { ok: true; text: string } | { ok: false; text: string; rule: GateRule; matched: string };
 
 export function claimOutcomeGate(text: string): GateResult {
   const flat = text.replace(/[’‘]/g, "'");
@@ -50,4 +51,62 @@ export function claimOutcomeGate(text: string): GateResult {
     }
   }
   return { ok: true, text };
+}
+
+// TTTFG-5176 (TTTFG-5254 step 7): the claim-risk rule. Tina never says or implies that a claim is at risk, late, may be
+// rejected or may not be covered. Whether a late claim is still covered is the insurer's call and the broker's
+// conversation, and TTT's claims guide and TCF forbid a message that threatens the claim. The notification deadline
+// note and the duty of disclosure are fixed templates for this reason; this rule catches a generated reply (a
+// rephrased question, an answer to the client) that slips through.
+//
+// No conditional exception here, unlike the claim-outcome rule. A condition is exactly how the threat is usually
+// phrased ("if you report it late, your claim may be rejected"), so no clause shape is safe. A neutral sentence about
+// who decides ("whether it's covered is the insurer's decision") never matches, because every rule below needs a
+// negative, a modal of loss or a lateness word. Errs towards blocking: a blocked reply costs a holding line and a
+// Follow-up; a threatening one costs TTT a complaint.
+
+const LOSS = '(?:rejected|declined|repudiated|refused|denied|voided|turned down|cancell?ed|invalidated)';
+const MAY = "(?:may|might|could|can|will|would|'ll|is likely to|are likely to|risks? being|at risk of being)";
+
+const RISK_RULES: RegExp[] = [
+  // "your claim is at risk", "this could jeopardise your claim", "put your claim in jeopardy"
+  /\bat risk\b|\bjeopard\w*|\bin danger of\b/gi,
+  // "it may be rejected", "your claim could be declined", "might not be paid"
+  new RegExp(`\\b${MAY}\\s+(?:not\\s+|still\\s+|then\\s+|well\\s+)?(?:be\\s+)?${LOSS}\\b`, 'gi'),
+  new RegExp(`\\b${MAY}\\s+not\\s+be\\s+paid(?: out)?\\b`, 'gi'),
+  // "they could reject your claim", "the insurer may refuse it"
+  new RegExp(`\\b${MAY}\\s+(?:\\w+\\s+)?(?:reject|decline|repudiate|refuse|deny|void|cancel|invalidate)\\s+(?:your|the|this|it|that)\\b`, 'gi'),
+  // "your claim was rejected", "the claim gets declined", "this claim is void". Only "your/the/this claim": a form may
+  // ask about the client's history ("Have you ever had a claim rejected?"), and that question must reach the client.
+  new RegExp(`\\b(?:your|the|this)\\s+(?:claim|cover)\\b[^.?!\\n]{0,30}?\\b(?:${LOSS}|void|invalid|forfeited|lapsed|prejudiced|compromised)\\b`, 'gi'),
+  // "you're not covered", "it won't be covered", "may not be covered", "no longer covered"
+  /\b(?:not|n't|never|no longer)\s+(?:be\s+|being\s+|been\s+|fully\s+|still\s+|yet\s+)?covered\b/gi,
+  // "you could lose your cover", "no cover", "the insurer may not pay", "won't cover it"
+  /\blos(?:e|ing|t)\s+(?:your\s+|the\s+|this\s+)?(?:cover|claim|payout)\b|\bno\s+(?:longer\s+)?cover\b/gi,
+  /\b(?:may|might|could|will|would)\s+not\s+(?:cover|pay)\b|\b(?:won't|wont|can't|cannot|doesn't|don't|didn't)\s+(?:cover|pay(?: out)?)\b/gi,
+  // "the claim is late", "you reported it too late", "a late claim", "late notification"
+  /\b(?:is|was|are|were|'s|'re|been|being|be|too|very|so|reported|reporting|notified|notifying|submitted|sent|claimed|claiming)\s+late\b(?!\s+(?:at night|in the (?:day|evening|afternoon)))/gi,
+  /\blate\s+(?:claim|notification|notice|report(?:ing)?|submission)\b/gi,
+  // "you've missed the deadline", "outside the notification period", "the deadline has passed", "time-barred"
+  /\b(?:missed|past|passed|over|outside|beyond|exceeded?|after)\s+(?:the\s+|your\s+|its\s+|their\s+)?(?:deadline|notification period|time limit|reporting period|cut-?off)\b/gi,
+  /\b(?:deadline|time limit|notification period)\s+(?:has|had|is|was)\s+(?:already\s+)?(?:passed|expired|over|gone)\b/gi,
+  /\boverdue\b|\bout of time\b|\btime-?barred\b/gi,
+  // "this could affect your claim", "it may harm your claim", "a problem with your claim"
+  /\b(?:affect|harm|hurt|damage|weaken|prejudice|compromise|endanger|risk)\w*\s+(?:your|the|this)\s+claim\b|\bproblem\s+with\s+(?:your|the|this)\s+claim\b/gi,
+];
+
+export function claimRiskGate(text: string): GateResult {
+  const flat = text.replace(/[’‘]/g, "'");
+  for (const rule of RISK_RULES) {
+    const m = rule.exec(flat);
+    rule.lastIndex = 0;
+    if (m) return { ok: false, text: HOLDING_LINE, rule: 'claim-risk', matched: m[0] };
+  }
+  return { ok: true, text };
+}
+
+/** Every outbound Tina claim text: the claim-outcome rule, then the claim-risk rule. */
+export function claimGate(text: string): GateResult {
+  const outcome = claimOutcomeGate(text);
+  return outcome.ok ? claimRiskGate(text) : outcome;
 }

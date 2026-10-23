@@ -90,19 +90,22 @@ export async function claimFromClient(
 
     const conv: Conversation = { phone, requestId, signUpLink: deps.signUpLink };
     const r = await claimTurn(deps.ports(requestId, contact), conv, null, { kind: 'start' }, now);
-    let state = r.state;
-    if (state) {
-        // Whatever the client already said about the incident ("my car was hit at the Claremont robot") is kept, so
-        // Tina doesn't ask for it again later. The steps keep their order: the next question is still the policy.
-        // An opening line like "my car was hit" is not the client's account of what happened: Tina still asks for it.
-        const firstRead = await understand(deps.understandModel, { ...state, step: 'claim-type' }, 'What happened?', text, now);
-        if (firstRead.kind === 'facts') {
-            const facts = { ...firstRead.facts };
-            if (facts.description && facts.description.split(/\s+/).length < MIN_OPENING_DESCRIPTION_WORDS) delete facts.description;
-            state = { ...state, facts: advance({ ...state, step: 'claim-type' }, { kind: 'facts', facts }).state?.facts ?? state.facts };
-        }
-    }
+    const state = r.state && (await withOpeningFacts(deps.understandModel, r.state, text, now));
     return persist(deps, phone, contact.id, requestId, state, r.lastSent ?? null, r.claim?.reference, 'started');
+}
+
+/**
+ * Whatever the client already said about the incident in the message that started the claim ("my car was hit at the
+ * Claremont robot") is kept, so Tina doesn't ask for it again later. The steps keep their order: the next question is
+ * still the policy. An opening line like "my car was hit" is not the client's account of what happened: Tina still
+ * asks for it.
+ */
+export async function withOpeningFacts(model: UnderstandModel, state: WalkthroughState, text: string, now: Date): Promise<WalkthroughState> {
+    const firstRead = await understand(model, { ...state, step: 'claim-type' }, 'What happened?', text, now);
+    if (firstRead.kind !== 'facts') return state;
+    const facts = { ...firstRead.facts };
+    if (facts.description && facts.description.split(/\s+/).length < MIN_OPENING_DESCRIPTION_WORDS) delete facts.description;
+    return { ...state, facts: advance({ ...state, step: 'claim-type' }, { kind: 'facts', facts }).state?.facts ?? state.facts };
 }
 
 async function persist(

@@ -35,7 +35,7 @@ const client = () => (anthropic ??= new Anthropic({ apiKey: process.env.ANTHROPI
  * One forced tool call; the tool's input is the answer. A 429 is remembered in `limits` and rethrown after the package
  * returns: the package reads a model error as "unclear", but a rate limit must re-enqueue the message instead.
  */
-function toolModel(model: string, name: string, limits: RateLimitError[]) {
+export function toolModel(model: string, name: string, limits: RateLimitError[]) {
     return async (req: { system: string; user: string; schema: object }): Promise<unknown> => {
         try {
             const res = await client().messages.create({

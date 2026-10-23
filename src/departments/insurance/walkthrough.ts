@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit a47701c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit cce71bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -179,8 +179,12 @@ export function sastParts(iso: string): { date: string; time: string } {
   return { date: local.slice(0, 10), time: local.slice(11, 16) };
 }
 
-/** Step 1: the sender's WhatsApp number against the CRM, then the client's active policies. */
-export function start(contact: { id: string; firstName: string } | null, policies: Policy[]): Turn {
+/**
+ * Step 1: the sender's WhatsApp number against the CRM, then the client's active policies. `known`: what the client
+ * already said about this incident (TTTFG-5184: the message that made Tina ask "Is this a new claim?"), so the later
+ * steps don't ask it again.
+ */
+export function start(contact: { id: string; firstName: string } | null, policies: Policy[], known: Facts = {}): Turn {
   if (!contact) return { state: null, say: [{ kind: 'unknown-number' }], effects: [] };
   if (policies.length === 0) {
     return {
@@ -189,7 +193,7 @@ export function start(contact: { id: string; firstName: string } | null, policie
       effects: [{ kind: 'follow-up', to: 'team', reason: 'no-active-policy' }],
     };
   }
-  const state: WalkthroughState = { contactId: contact.id, firstName: contact.firstName, policies, step: 'policy', facts: {} };
+  const state: WalkthroughState = { contactId: contact.id, firstName: contact.firstName, policies, step: 'policy', facts: merge({}, known) };
   return { state, say: [ask('policy', {})], effects: [] };
 }
 

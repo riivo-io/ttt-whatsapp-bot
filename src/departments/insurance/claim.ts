@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit a47701c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit cce71bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -7,7 +7,7 @@
 // Seam for tests: ClaimPorts. Dataverse, WhatsApp and the clock are faked there. The real adapters come with
 // TTTFG-4885 (riivo_claim, riivo_provider.riivo_assistnumber) and the SPEC-05 story that loads department packages
 // into Tina (epic TTTFG-4830).
-import { claimOutcomeGate } from './gate';
+import { claimGate } from './gate';
 import {
   advance, complete, start,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
@@ -182,7 +182,7 @@ export interface TurnResult {
 
 /** One message from the client: { kind: 'start' } when Anchor first routes a claim here, else what Claude understood. */
 export async function claimTurn(
-  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null, input: { kind: 'start' } | Answer, now: Date,
+  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null, input: { kind: 'start'; facts?: Facts } | Answer, now: Date,
 ): Promise<TurnResult> {
   const at = now.toISOString();
   let turn;
@@ -190,7 +190,7 @@ export async function claimTurn(
   if (input.kind === 'start' || !state) {
     const contact = await ports.contactByWhatsApp(conv.phone);
     contactId = contact?.id;
-    turn = start(contact, contact ? await ports.activePolicies(contact.id) : []);
+    turn = start(contact, contact ? await ports.activePolicies(contact.id) : [], input.kind === 'start' ? input.facts : undefined);
   } else {
     turn = advance(state, input as Answer);
   }
@@ -243,18 +243,18 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
   }
 }
 
-/** Every outbound text passes the claim-outcome gate. A blocked text becomes the holding line and a Follow-up.
- *  Returns the text that went out. */
+/** Every outbound text passes the policy gate (gate.ts claimGate). A blocked text becomes the holding line and a
+ *  Follow-up. Returns the text that went out. */
 export async function sendText(
   ports: ClaimPorts, conv: Conversation, text: string, claim: { id: string; owner: Owner } | null, at: string, contactId?: string,
 ): Promise<string> {
-  const gate = claimOutcomeGate(text);
+  const gate = claimGate(text);
   if (!gate.ok) {
     const owner = claim?.owner ?? (await ownerFor(ports, undefined));
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner,
       regarding: claim ? { table: 'riivo_claim', id: claim.id } : { table: 'riivo_request', id: conv.requestId }, contactId,
-      detail: `Tina's reply was blocked by the claim-outcome rule ("${gate.matched}"). The client got the holding line. Please update them.`,
+      detail: `Tina's reply was blocked by the ${gate.rule} rule ("${gate.matched}"). The client got the holding line. Please update them.`,
       at,
     });
   }

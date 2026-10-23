@@ -181,6 +181,18 @@ export interface ClaimWalkthroughRow {
     updated_at: string;
 }
 
+export interface ClaimConversationRow {
+    phone_number: string;
+    contact_id: string;
+    request_id: string;
+    walkthrough: unknown;
+    resume: unknown;
+    held: unknown;
+    last_sent: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
 class SupabaseService {
     private client: SupabaseClient;
 
@@ -1431,6 +1443,26 @@ class SupabaseService {
     async deleteClaimWalkthrough(phone: string): Promise<void> {
         const { error } = await this.client.from('claim_walkthroughs').delete().eq('phone_number', phone);
         if (error) throw new Error(`[Supabase] deleteClaimWalkthrough: ${error.message}`);
+    }
+
+    // TTTFG-4830 claims demo: the conversation on a demo number (migration 20261023120000_claim_conversations.sql).
+    async getClaimConversation(phone: string): Promise<ClaimConversationRow | null> {
+        const { data, error } = await this.client.from('claim_conversations').select('*').eq('phone_number', phone).maybeSingle();
+        // As getClaimWalkthrough: an error is not "no conversation". Throw, and the worker retries the message.
+        if (error) throw new Error(`[Supabase] getClaimConversation: ${error.message}`);
+        return (data as ClaimConversationRow) || null;
+    }
+
+    async saveClaimConversation(row: Omit<ClaimConversationRow, 'created_at' | 'updated_at'>): Promise<void> {
+        const { error } = await this.client
+            .from('claim_conversations')
+            .upsert({ ...row, updated_at: new Date().toISOString() }, { onConflict: 'phone_number' });
+        if (error) throw new Error(`[Supabase] saveClaimConversation: ${error.message}`);
+    }
+
+    async deleteClaimConversation(phone: string): Promise<void> {
+        const { error } = await this.client.from('claim_conversations').delete().eq('phone_number', phone);
+        if (error) throw new Error(`[Supabase] deleteClaimConversation: ${error.message}`);
     }
 
     async findActiveRelayByPhone(clientPhone: string): Promise<EmailRelayPendingRow | null> {

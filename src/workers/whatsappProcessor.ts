@@ -41,6 +41,7 @@ import {
     AUTO_REPLY_CLARIFICATION,
 } from '../utils/autoReply';
 import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
+import { claimsDemoContact, handleClaimsDemoMessage } from '../services/claimsDemo.service';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
@@ -771,6 +772,14 @@ async function evaluateBadDebt(
 
 async function processMessage(incoming: IncomingMessage, outboundPrefix?: string): Promise<void> {
     const { from, text, interactiveId, document, flowResponse, wamid } = incoming;
+
+    // TTTFG-4830 claims demo: a number in CLAIMS_DEMO_NUMBERS talks only to the claims flow, against the demo CRM
+    // (TTT DEV). Nothing below runs for it. Every other number skips this (unset: no demo numbers at all).
+    const demoContact = claimsDemoContact(from);
+    if (demoContact) {
+        await handleClaimsDemoMessage({ from, text, document, wamid }, demoContact);
+        return;
+    }
 
     if (flowResponse) {
         await handleSignUpFlowSubmission(from, flowResponse);
