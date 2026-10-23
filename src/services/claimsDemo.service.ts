@@ -19,8 +19,7 @@ import type { ReplyModel } from '../departments/insurance/reply';
 import { NO_RESUME_STATE, type ResumeState } from '../departments/insurance/resume';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
-import { RateLimitError } from '../utils/anthropicRateLimit';
-import { toolModel } from './claims.service';
+import Anthropic from '@anthropic-ai/sdk';
 import { demoPorts, openDemoRequest, withdrawOpenClaims, type DemoChannels, type Graph } from './claimsDemoWiring';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService } from './supabase.service';
@@ -42,6 +41,7 @@ async function appToken(tenant: string, clientId: string, secret: string, scope:
     if (t && t.until > Date.now() + 60_000) return t.value;
     const res = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, {
         method: 'POST',
+        signal: AbortSignal.timeout(DEADLINE_MS),
         body: new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: secret, scope }),
     });
     if (!res.ok) throw new Error(`[ClaimsDemo] token for ${scope}: HTTP ${res.status}`);
@@ -59,6 +59,7 @@ function dataverse(): Dv {
         const prefer = [opts.formatted ? 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' : '', opts.returnRow ? 'return=representation' : ''].filter(Boolean).join(', ');
         const res = await fetch(`${url}/api/data/v9.2/${path}`, {
             method,
+            signal: AbortSignal.timeout(DEADLINE_MS),
             headers: {
                 Authorization: `Bearer ${await appToken(tenant, id, secret, `${url}/.default`)}`, Accept: 'application/json', 'Content-Type': 'application/json',
                 'OData-Version': '4.0', 'OData-MaxVersion': '4.0', ...(method === 'PATCH' ? { 'If-Match': '*' } : {}), ...(prefer ? { Prefer: prefer } : {}),
@@ -76,7 +77,7 @@ function dataverse(): Dv {
 const graph: Graph = async (method, path, body, contentType) => {
     const token = await appToken(process.env.GRAPH_TENANT_ID || '', process.env.GRAPH_CLIENT_ID || '', process.env.GRAPH_CLIENT_SECRET || '', 'https://graph.microsoft.com/.default');
     return fetch(path.startsWith('https://') ? path : `https://graph.microsoft.com/v1.0${path}`, {
-        method, body, headers: { Authorization: `Bearer ${token}`, ...(contentType ? { 'Content-Type': contentType } : {}) },
+        method, body, signal: AbortSignal.timeout(DEADLINE_MS), headers: { Authorization: `Bearer ${token}`, ...(contentType ? { 'Content-Type': contentType } : {}) },
     });
 };
 
@@ -84,9 +85,19 @@ const channels = (): DemoChannels => ({
     dv: dataverse(),
     graph,
     site: process.env.CLAIMS_DEMO_SHAREPOINT_SITE || DEV_SITE,
+    // A send Meta refuses is tried once more, then logged with Meta's reason. It never stops the turn halfway: the claim
+    // is already written, so the conversation state must be saved with it.
     sendText: async (to, text) => {
-        const wamid = await metaWhatsAppService.sendMessage(to, text);
-        if (!wamid) console.warn(`[ClaimsDemo] WhatsApp send to ${to} returned no message id`);
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const wamid = await metaWhatsAppService.sendMessage(to, text);
+                if (!wamid) console.warn(`[ClaimsDemo] WhatsApp send to ${to} returned no message id`);
+                return;
+            } catch (e: any) {
+                console.error(`[ClaimsDemo] WhatsApp send to ${to} refused (attempt ${attempt}):`, JSON.stringify(e?.response?.data ?? e?.message));
+                if (attempt === 1) await new Promise((r) => setTimeout(r, 2000));
+            }
+        }
     },
     sendDocument: async (to, bytes, fileName, caption) => {
         const r = await metaWhatsAppService.sendDocument(to, bytes, fileName, caption);
@@ -96,7 +107,29 @@ const channels = (): DemoChannels => ({
     note: (text) => console.log(`[ClaimsDemo] ${text}`),
 });
 
-function deps(limits: RateLimitError[], phone: string, contactId: string): ClaimsDemoDeps {
+/** Every outside call gets a deadline, so one slow call can't hold the client's queue. */
+const DEADLINE_MS = 20_000;
+
+/**
+ * The demo's Claude call: one forced tool call. A rate limit or overload is retried here, with the SDK's backoff,
+ * rather than sending the message back to the queue: a message handled twice is read against the next question.
+ */
+let anthropic: Anthropic | undefined;
+const claude = () => (anthropic ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '', maxRetries: 3, timeout: 30_000 }));
+function demoModel(model: string, name: string) {
+    return async (req: { system: string; user: string; schema: object }): Promise<unknown> => {
+        const t = Date.now();
+        const res = await claude().messages.create({
+            model, max_tokens: 1024, system: req.system, messages: [{ role: 'user', content: req.user }],
+            tools: [{ name, description: 'Record the answer.', input_schema: req.schema as Anthropic.Tool.InputSchema }],
+            tool_choice: { type: 'tool', name },
+        });
+        console.log(`[ClaimsDemo] Claude ${name} ${Date.now() - t}ms`);
+        return res.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')?.input;
+    };
+}
+
+function deps(phone: string, contactId: string): ClaimsDemoDeps {
     const ch = channels();
     return {
         async load(phone) {
@@ -111,9 +144,9 @@ function deps(limits: RateLimitError[], phone: string, contactId: string): Claim
         }),
         remove: (phone) => supabaseService.deleteClaimConversation(phone),
         ports: (_requestId, sent) => demoPorts(ch, phone, contactId, sent),
-        intentModel: toolModel(INTENT_MODEL, 'record_claim_intent', limits) as IntentModel,
-        understandModel: toolModel(UNDERSTAND_MODEL, 'record_answer', limits) as UnderstandModel,
-        replyModel: toolModel(UNDERSTAND_MODEL, 'record_reply', limits) as ReplyModel,
+        intentModel: demoModel(INTENT_MODEL, 'record_claim_intent') as IntentModel,
+        understandModel: demoModel(UNDERSTAND_MODEL, 'record_answer') as UnderstandModel,
+        replyModel: demoModel(UNDERSTAND_MODEL, 'record_reply') as ReplyModel,
         openRequest: (contactId, phone, text) => openDemoRequest(ch.dv, contactId, phone, text),
         withdrawOpenClaims: (contactId) => withdrawOpenClaims(ch.dv, contactId),
         say: (phone, text) => ch.sendText(phone, text),
@@ -128,22 +161,21 @@ export interface DemoInbound {
 }
 
 /**
- * One message from a demo number. Every error but a rate limit is answered with an apology and logged, not retried:
- * a retry could open the same claim twice. A rate limit (nothing sent yet) goes back to the queue as usual.
+ * One message from a demo number, handled exactly once. Nothing is thrown back to the worker: a redelivered message
+ * would be read again against the next question (and could open the same claim twice). An error is logged and
+ * answered with an apology.
  */
 export async function handleClaimsDemoMessage(m: DemoInbound, contactId: string): Promise<void> {
-    const limits: RateLimitError[] = [];
+    const started = Date.now();
     const file: ClientFile | undefined = m.document
         ? { id: m.document.id, fileName: m.document.filename, mimeType: m.document.mimeType, media: m.document.mimeType.startsWith('image/') ? 'photo' : 'document' }
         : undefined;
     try {
-        const outcome = await claimsDemoTurn(deps(limits, m.from, contactId), { phone: m.from, contactId, text: m.text, file, wamid: m.wamid || `wamid.local.${Date.now()}` }, new Date());
-        console.log(`[ClaimsDemo] ${m.from}: ${outcome}`);
+        const outcome = await claimsDemoTurn(deps(m.from, contactId), { phone: m.from, contactId, text: m.text, file, wamid: m.wamid || `wamid.local.${Date.now()}` }, new Date());
+        console.log(`[ClaimsDemo] ${m.from}: ${outcome} in ${Date.now() - started}ms`);
     } catch (e) {
-        if (e instanceof RateLimitError) throw e;
-        console.error(`[ClaimsDemo] ${m.from} failed:`, (e as Error).message, (e as Error).stack);
-        await metaWhatsAppService.sendMessage(m.from, 'Sorry, something went wrong on my side. Please send that again in a minute.');
-        return;
+        console.error(`[ClaimsDemo] ${m.from} failed after ${Date.now() - started}ms:`, (e as Error).message, (e as Error).stack);
+        await metaWhatsAppService.sendMessage(m.from, 'Sorry, something went wrong on my side. Please send that again in a minute.')
+            .catch((err) => console.error(`[ClaimsDemo] ${m.from} apology not sent:`, err?.response?.data ?? err?.message));
     }
-    if (limits.length) throw limits[0];
 }
