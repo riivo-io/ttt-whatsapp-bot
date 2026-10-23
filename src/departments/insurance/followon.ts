@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 0f9ac1f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 039ecda). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -24,6 +24,7 @@
 // deadline note are not sent again, and the conversation carries on from the first missing item.
 import { DEPARTMENT, type AgentActionRow, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
+import { formatProblem } from './formats';
 import { claimGate } from './gate';
 import {
   applies, deferred, formItems, itemName, missingItems, nextItem, sapsStepApplies, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
@@ -125,6 +126,8 @@ export interface FollowOnState {
   sapsRequired: boolean;
   /** "Not yet" in this conversation. Still on the missing list. */
   skipped: string[];
+  /** TTTFG-4830: the question whose answer Tina said didn't look right (formats.ts). A second such answer is kept. */
+  formatChecked?: string;
   signingRequested: boolean;
   evidenceStarted: boolean;
   /** The deadline note and the duty of disclosure are out (TTTFG-5184: a resume doesn't send them again). */
@@ -380,7 +383,8 @@ function applyOthers(
       const item = items.find((i) => i.key === o.key);
       if (!item || item.kind !== 'question' || !applies(item, w.answers, w.facts)) continue;
       const value = accept(item, o.value);
-      if (value === undefined) continue;
+      // A value that doesn't look right isn't saved on the side: Tina asks the question later and checks it then.
+      if (value === undefined || formatProblem(item, value)) continue;
       const record: AnswerRecord = { value, status: 'answered', at: rec.at, ...(rec.wamid ? { wamid: rec.wamid } : {}), source: rec.source };
       out.push({ kind: 'save-answer', key: item.key, record });
       w.answers[item.key] = record;
@@ -395,13 +399,15 @@ function applyOthers(
  * TTTFG-4830: new values for questions already answered (the host lets Claude see only recent answers and the
  * "another one?" answers). Each is checked with accept(); the question Tina is asking and SAPS keys are left alone. A
  * "no" to a group's "another one?" ends the group there: the entries after it are dropped from the claim, so a car the
- * client took back never reaches the form. Returns how many answers changed.
+ * client took back never reaches the form. A new value that doesn't look right (formats.ts) is pointed out and not
+ * saved. Returns how many answers changed and how many corrections were pointed out.
  */
 function applyCorrections(
   c: Ctx, w: Work, sapsRequired: boolean, corrections: readonly OtherAnswer[] | undefined, rec: { at: string; wamid?: string }, out: Out[], except?: string,
-): number {
-  if (!corrections?.length) return 0;
+): { changed: number; flagged: number } {
   let changed = 0;
+  let flagged = 0;
+  if (!corrections?.length) return { changed, flagged };
   for (const k of corrections) {
     const prev = w.answers[k.key];
     if (k.key === except || isSaps(k.key) || !prev || prev.status === 'not-yet') continue;
@@ -409,6 +415,13 @@ function applyCorrections(
     if (!item || item.kind !== 'question') continue;
     const value = accept(item, k.value);
     if (value === undefined || (prev.status === 'answered' && prev.value === value)) continue;
+    const problem = formatProblem(item, value);
+    if (problem) {
+      // The corrected value doesn't look right either: say so, and keep the earlier answer until it comes back right.
+      out.push({ kind: 'text', text: problem });
+      flagged++;
+      continue;
+    }
     const record: AnswerRecord = { value, status: 'answered', at: rec.at, ...(rec.wamid ? { wamid: rec.wamid } : {}), source: 'correction' };
     out.push({ kind: 'save-answer', key: item.key, record });
     w.answers[item.key] = record;
@@ -427,7 +440,7 @@ function applyCorrections(
       }
     }
   }
-  return changed;
+  return { changed, flagged };
 }
 
 // ---------------------------------------------------------------------------------------- TTTFG-5184: resuming
@@ -542,7 +555,9 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
   const at = c.now.toISOString();
   // TTTFG-4830: an earlier answer the client changed, then the other questions this message answered, are saved first,
   // so Tina neither carries on from a wrong answer nor asks for something she was just told.
-  const corrected = input.kind === 'file' ? 0 : applyCorrections(c, w, st.sapsRequired, input.corrections, { at, wamid: input.wamid }, out, st.asking);
+  const { changed: corrected, flagged } = input.kind === 'file'
+    ? { changed: 0, flagged: 0 }
+    : applyCorrections(c, w, st.sapsRequired, input.corrections, { at, wamid: input.wamid }, out, st.asking);
   const noted = input.kind === 'file' ? 0 : applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.asking);
 
   if (st.phase === 'saps') {
@@ -619,8 +634,15 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
 
   if (item.kind === 'question' && input.kind === 'value') {
     const value = accept(item, input.value);
+    // TTTFG-4830: a phone number, email or ID number that doesn't look right is pointed out once. The same again is kept
+    // as given, with the reason for the broker: a client who means it is never stuck on a question.
+    const problem = value === undefined ? null : formatProblem(item, value);
+    if (problem && st.formatChecked !== item.key) {
+      out.push({ kind: 'text', text: problem });
+      return { state: { ...st, formatChecked: item.key }, out };
+    }
     if (value !== undefined) {
-      const record: AnswerRecord = { value, status: 'answered', at, wamid: input.wamid };
+      const record: AnswerRecord = { value, status: 'answered', at, wamid: input.wamid, ...(problem ? { doubt: problem.replace(/ Could you.*$/, '') } : {}) };
       out.push({ kind: 'save-answer', key: item.key, record });
       w.answers[item.key] = record;
       // The answer may open questions the same message also answered ("yes, my aunt Arona" opens the passenger's name).
@@ -641,8 +663,8 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
 
   // The message changed an earlier answer or answered other questions, but not this one: that isn't a miss. Say so and
   // ask it again as it was.
-  if ((corrected || noted) && input.kind === 'unparsed') {
-    out.push({ kind: 'ask', item, simpler: false, lead: corrected ? CORRECTED : NOTED_OTHERS });
+  if ((corrected || noted || flagged) && input.kind === 'unparsed') {
+    out.push({ kind: 'ask', item, simpler: false, lead: corrected ? CORRECTED : noted ? NOTED_OTHERS : undefined });
     return { state: st, out };
   }
 
