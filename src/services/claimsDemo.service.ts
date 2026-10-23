@@ -20,7 +20,9 @@ import { NO_RESUME_STATE, type ResumeState } from '../departments/insurance/resu
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
-import { demoPorts, openDemoRequest, withdrawOpenClaims, type DemoChannels, type Graph } from './claimsDemoWiring';
+import {
+    cachedDv, dataverseCall, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type CrmStats, type DemoChannels, type Graph,
+} from './claimsDemoWiring';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService } from './supabase.service';
 
@@ -50,28 +52,13 @@ async function appToken(tenant: string, clientId: string, secret: string, scope:
     return j.access_token;
 }
 
-function dataverse(): Dv {
+function dataverse(stats: CrmStats): Dv {
     const url = (process.env.CLAIMS_DEMO_DATAVERSE_URL || DEV_URL).replace(/\/$/, '');
     const tenant = process.env.CLAIMS_DEMO_DATAVERSE_TENANT_ID || process.env.DYNAMICS_TENANT_ID || '';
     const id = process.env.CLAIMS_DEMO_DATAVERSE_CLIENT_ID || process.env.DYNAMICS_CLIENT_ID || '';
     const secret = process.env.CLAIMS_DEMO_DATAVERSE_CLIENT_SECRET || process.env.DYNAMICS_CLIENT_SECRET || '';
-    return async <T,>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, opts: { formatted?: boolean; returnRow?: boolean } = {}) => {
-        const prefer = [opts.formatted ? 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' : '', opts.returnRow ? 'return=representation' : ''].filter(Boolean).join(', ');
-        const res = await fetch(`${url}/api/data/v9.2/${path}`, {
-            method,
-            signal: AbortSignal.timeout(DEADLINE_MS),
-            headers: {
-                Authorization: `Bearer ${await appToken(tenant, id, secret, `${url}/.default`)}`, Accept: 'application/json', 'Content-Type': 'application/json',
-                'OData-Version': '4.0', 'OData-MaxVersion': '4.0', ...(method === 'PATCH' ? { 'If-Match': '*' } : {}), ...(prefer ? { Prefer: prefer } : {}),
-            },
-            body: body === undefined ? undefined : JSON.stringify(body),
-        });
-        if (!res.ok) {
-            const err = ((await res.json().catch(() => ({}))) as { error?: { message?: string } }).error?.message ?? '';
-            throw new Error(`Dataverse ${method} ${path.split('?')[0]} ${res.status} ${err.slice(0, 300)}`);
-        }
-        return (res.status === 204 ? undefined : await res.json()) as T;
-    };
+    // Each row read once per message (cachedDv); a 429 waited out (dataverseCall).
+    return cachedDv(dataverseCall(url, () => appToken(tenant, id, secret, `${url}/.default`), { deadlineMs: DEADLINE_MS, stats }), stats);
 }
 
 const graph: Graph = async (method, path, body, contentType) => {
@@ -81,8 +68,8 @@ const graph: Graph = async (method, path, body, contentType) => {
     });
 };
 
-const channels = (): DemoChannels => ({
-    dv: dataverse(),
+const channels = (stats: CrmStats): DemoChannels => ({
+    dv: dataverse(stats),
     graph,
     site: process.env.CLAIMS_DEMO_SHAREPOINT_SITE || DEV_SITE,
     // A send Meta refuses is tried once more, then logged with Meta's reason. It never stops the turn halfway: the claim
@@ -129,8 +116,8 @@ function demoModel(model: string, name: string) {
     };
 }
 
-function deps(phone: string, contactId: string): ClaimsDemoDeps {
-    const ch = channels();
+function deps(phone: string, contactId: string, stats: CrmStats): ClaimsDemoDeps {
+    const ch = channels(stats);
     return {
         async load(phone) {
             const row = await supabaseService.getClaimConversation(phone);
@@ -171,12 +158,13 @@ export interface DemoInbound {
  */
 export async function handleClaimsDemoMessage(m: DemoInbound, contactId: string): Promise<void> {
     const started = Date.now();
+    const stats = newCrmStats();
     const file: ClientFile | undefined = m.document
         ? { id: m.document.id, fileName: m.document.filename, mimeType: m.document.mimeType, media: m.document.mimeType.startsWith('image/') ? 'photo' : 'document' }
         : undefined;
     try {
-        const outcome = await claimsDemoTurn(deps(m.from, contactId), { phone: m.from, contactId, text: m.text, file, wamid: m.wamid || `wamid.local.${Date.now()}` }, new Date());
-        console.log(`[ClaimsDemo] ${m.from}: ${outcome} in ${Date.now() - started}ms`);
+        const outcome = await claimsDemoTurn(deps(m.from, contactId, stats), { phone: m.from, contactId, text: m.text, file, wamid: m.wamid || `wamid.local.${Date.now()}` }, new Date());
+        console.log(`[ClaimsDemo] ${m.from}: ${outcome} in ${Date.now() - started}ms; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes${stats.throttled ? `, ${stats.throttled} throttled` : ''}`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${m.from} failed after ${Date.now() - started}ms:`, (e as Error).message, (e as Error).stack);
         await metaWhatsAppService.sendMessage(m.from, 'Sorry, something went wrong on my side. Please send that again in a minute.')
