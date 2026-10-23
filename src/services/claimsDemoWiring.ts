@@ -24,6 +24,106 @@ const guid = (id: string) => {
     return id;
 };
 
+// ------------------------------------------------------------------------------------------------- Dataverse calls
+
+/** How the CRM was used for one message: logged by Tina, counted by the load test. */
+export interface CrmStats { reads: number; cached: number; writes: number; throttled: number }
+export const newCrmStats = (): CrmStats => ({ reads: 0, cached: 0, writes: 0, throttled: 0 });
+
+const MAX_THROTTLE_RETRIES = 3;
+
+/**
+ * One Dataverse Web API call, with a deadline, and a "too many requests" (HTTP 429, Dataverse's service protection
+ * limits) waited out as the CRM asks (Retry-After, at most 30s, up to 3 times) rather than failing the message. A
+ * refused request was never carried out, so retrying a write is safe. A read past the deadline is tried once more.
+ */
+export function dataverseCall(
+    baseUrl: string, token: () => Promise<string> | string, o: { deadlineMs?: number; stats?: CrmStats } = {},
+): Dv {
+    const base = baseUrl.replace(/\/$/, '');
+    return (async <T,>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, opts: { formatted?: boolean; returnRow?: boolean } = {}) => {
+        const prefer = [opts.formatted ? 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' : '', opts.returnRow ? 'return=representation' : ''].filter(Boolean).join(', ');
+        let timedOut = false;
+        for (let attempt = 0; ; attempt++) {
+            let res: Response;
+            try {
+                res = await fetch(`${base}/api/data/v9.2/${path}`, {
+                    method,
+                    signal: AbortSignal.timeout(o.deadlineMs ?? 20_000),
+                    headers: {
+                        Authorization: `Bearer ${await token()}`, Accept: 'application/json', 'Content-Type': 'application/json',
+                        'OData-Version': '4.0', 'OData-MaxVersion': '4.0', ...(method === 'PATCH' ? { 'If-Match': '*' } : {}), ...(prefer ? { Prefer: prefer } : {}),
+                    },
+                    body: body === undefined ? undefined : JSON.stringify(body),
+                });
+            } catch (e) {
+                // A read that ran past the deadline is tried once more (the load test saw the odd slow read). A write is
+                // not: it may have been carried out.
+                if (method === 'GET' && !timedOut && (e as Error).name === 'TimeoutError') { timedOut = true; continue; }
+                throw e;
+            }
+            if (res.status === 429 && attempt < MAX_THROTTLE_RETRIES) {
+                const after = Number(res.headers.get('Retry-After'));
+                if (o.stats) o.stats.throttled++;
+                await new Promise((r) => setTimeout(r, Math.min(30_000, Math.max(1000, (Number.isFinite(after) && after > 0 ? after : 5) * 1000))));
+                continue;
+            }
+            if (!res.ok) {
+                const err = ((await res.json().catch(() => ({}))) as { error?: { message?: string } }).error?.message ?? '';
+                throw new Error(`Dataverse ${method} ${path.split('?')[0]} ${res.status} ${err.slice(0, 300)}`);
+            }
+            return (res.status === 204 ? undefined : await res.json()) as T;
+        }
+    }) as Dv;
+}
+
+/** Reads that hardly ever change, kept across messages for SHARED_TTL_MS: claim forms, document types, contacts' names. */
+const SHARED_SETS = new Set(['riivo_claimforms', 'riivo_documenttypes', 'contacts']);
+const SHARED_TTL_MS = 10 * 60_000;
+const shared = new Map<string, { at: number; value: Promise<unknown> }>();
+/** The table a Web API path is about: `riivo_claims(…)`, `riivo_claims?$filter=…` → riivo_claims. */
+const tableOf = (path: string) => path.split(/[(?/]/)[0];
+
+/**
+ * The claims package reads the same rows several times while handling one message (the claim, its documents, its claim
+ * form, the client's open claims: about 18 reads for 2 writes). This keeps each read for the rest of the message, so
+ * each row is read once. Any write to a table drops what was read from that table, so a read after a write is always
+ * fresh; other tables are untouched by it. Callers get their own copy of each result. One per message: nothing but
+ * SHARED_SETS outlives it.
+ */
+export function cachedDv(dv: Dv, stats?: CrmStats, now: () => number = Date.now): Dv {
+    const mine = new Map<string, Promise<unknown>>();
+    const forget = (table: string) => {
+        for (const k of [...mine.keys()]) if (tableOf(k.slice(2)) === table) mine.delete(k);
+        if (SHARED_SETS.has(table)) for (const k of [...shared.keys()]) if (tableOf(k.slice(2)) === table) shared.delete(k);
+    };
+    return (async <T,>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, opts: { formatted?: boolean; returnRow?: boolean } = {}) => {
+        const table = tableOf(path);
+        if (method !== 'GET') {
+            forget(table);
+            if (stats) stats.writes++;
+            return dv<T>(method, path, body, opts);
+        }
+        const key = `${opts.formatted ? 'F' : '-'} ${path}`;
+        const kept = SHARED_SETS.has(table) ? shared.get(key) : undefined;
+        let value = kept && now() - kept.at < SHARED_TTL_MS ? kept.value : mine.get(key);
+        if (value) {
+            if (stats) stats.cached++;
+        } else {
+            if (stats) stats.reads++;
+            const read = dv<T>('GET', path, undefined, opts);
+            read.catch(() => { mine.delete(key); shared.delete(key); });
+            mine.set(key, read);
+            if (SHARED_SETS.has(table)) shared.set(key, { at: now(), value: read });
+            value = read;
+        }
+        return structuredClone(await value) as T;
+    }) as Dv;
+}
+
+/** Test use only: forget the cross-message reads. */
+export const clearSharedCrmCache = () => shared.clear();
+
 /** One Microsoft Graph call (v1.0 path or absolute URL), authenticated by the caller. */
 export type Graph = (method: 'GET' | 'PUT', path: string, body?: Uint8Array, contentType?: string) => Promise<Response>;
 

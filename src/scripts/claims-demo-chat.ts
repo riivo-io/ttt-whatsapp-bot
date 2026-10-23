@@ -27,7 +27,9 @@ import type { ClientFile } from '../departments/insurance/followon';
 import {
     claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
 } from '../domain/claimsDemoHost';
-import { demoPorts, openDemoRequest, withdrawOpenClaims, type DemoChannels, type Graph } from '../services/claimsDemoWiring';
+import {
+    cachedDv, dataverseCall, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type Graph,
+} from '../services/claimsDemoWiring';
 
 const DEV = 'https://tttdevelopment.crm4.dynamics.com';
 const TENANT = process.env.DYNAMICS_TENANT_ID || '';
@@ -60,22 +62,8 @@ function azToken(resource: string): string {
     return value.value;
 }
 
-const dv: Dv = async <T,>(method: 'GET' | 'POST' | 'PATCH', p: string, body?: unknown, opts: { formatted?: boolean; returnRow?: boolean } = {}) => {
-    const prefer = [opts.formatted ? 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' : '', opts.returnRow ? 'return=representation' : ''].filter(Boolean).join(', ');
-    const res = await fetch(`${DEV}/api/data/v9.2/${p}`, {
-        method,
-        headers: {
-            Authorization: `Bearer ${azToken(DEV)}`, Accept: 'application/json', 'Content-Type': 'application/json', 'OData-Version': '4.0', 'OData-MaxVersion': '4.0',
-            ...(method === 'PATCH' ? { 'If-Match': '*' } : {}), ...(prefer ? { Prefer: prefer } : {}),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!res.ok) {
-        const err = ((await res.json().catch(() => ({}))) as { error?: { message?: string } }).error?.message ?? '';
-        throw new Error(`Dataverse ${method} ${p.split('?')[0]} ${res.status} ${err}`);
-    }
-    return (res.status === 204 ? undefined : await res.json()) as T;
-};
+// Tina's own Dataverse call (429s waited out); cachedDv below gives each message the same per-message cache as Tina.
+const rawDv: Dv = dataverseCall(DEV, () => azToken(DEV));
 
 const graph: Graph = async (method, p, body, contentType) => fetch(p.startsWith('https://') ? p : `https://graph.microsoft.com/v1.0${p}`, {
     method, body, headers: { Authorization: `Bearer ${azToken('https://graph.microsoft.com')}`, ...(contentType ? { 'Content-Type': contentType } : {}) },
@@ -127,8 +115,9 @@ async function localBlankForm(formUrl: string): Promise<Uint8Array | null> {
 const show = (who: string, text: string) => console.log(`\n${who}:\n${text.split('\n').map((l) => `  ${l}`).join('\n')}`);
 const storeFile = path.join(STORE, `${phone}.json`);
 
+let dv: Dv = rawDv;
 const channels: DemoChannels = {
-    dv, graph, site: SITE,
+    get dv() { return dv; }, graph, site: SITE,
     sendText: async (_to, text) => show('Tina', text),
     sendDocument: async (_to, bytes, fileName, caption) => {
         fs.mkdirSync(OUT, { recursive: true });
@@ -171,8 +160,10 @@ async function say(line: string) {
         text = m[2];
     }
     show(`Client (${phone})`, file ? `📎 ${file.fileName}${text ? ` - ${text}` : ''}` : text);
+    const stats = newCrmStats();
+    dv = cachedDv(rawDv, stats);
     const outcome = await claimsDemoTurn(deps, { phone: phone!, contactId: contactId!, text, file, wamid: `wamid.rehearsal.${Date.now()}.${++n}` }, new Date());
-    console.log(`  (${outcome})`);
+    console.log(`  (${outcome}; CRM ${stats.reads} reads, ${stats.cached} from cache, ${stats.writes} writes)`);
 }
 
 async function main() {
