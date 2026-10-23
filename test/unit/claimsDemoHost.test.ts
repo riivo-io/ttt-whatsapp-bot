@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
+    BUSY, claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
 } from '../../src/domain/claimsDemoHost';
 import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
@@ -217,4 +217,42 @@ test('what the client said while reporting the claim answers the form: Tina says
     assert.doesNotMatch(opened, /Who was driving the vehicle\?/);
     assert.match(opened, /Please send me photos of the damage/i); // straight on to what's still missing
     assert.deepEqual(w.store.get(PHONE)?.said, []);
+});
+
+test('Claude unavailable: Tina asks for the message again, and nothing is read, saved or counted as a miss', async () => {
+    const w = world();
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    w.since();
+    const before = structuredClone(w.store.get(PHONE)!.resume);
+    const down = w.deps.replyModel;
+    w.deps.replyModel = async () => { throw new Error('529 overloaded'); };
+    assert.equal(await say(w, 'Me, Adriaan', (t = tick(t, 1))), 'busy');
+    assert.deepEqual(w.since(), [BUSY]);
+    assert.deepEqual(w.store.get(PHONE)!.resume, before); // still asking the same question, no miss
+    assert.equal(w.rows[0].answers.driverName, undefined);
+    w.deps.replyModel = down;
+    w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
+    assert.equal(await say(w, 'Me, Adriaan', (t = tick(t, 1))), 'follow-on');
+    assert.equal(w.rows[0].answers.driverName?.value, 'Me, Adriaan');
+    assert.doesNotMatch(w.since().join('\n'), /didn't quite get that/);
+});
+
+test('Claude unavailable during the walkthrough or on the first message: the same, never "I didn\'t get that"', async () => {
+    const w = world();
+    const intent = w.deps.intentModel;
+    w.deps.intentModel = async () => { throw new Error('429'); };
+    assert.equal(await say(w, 'Someone drove into my car', DAY1), 'busy');
+    assert.deepEqual(w.since(), [BUSY]);
+    assert.equal(w.requests.length, 0);
+    w.deps.intentModel = intent;
+    assert.equal(await say(w, 'Someone drove into my car', tick(DAY1, 1)), 'started');
+    w.since();
+    const step = w.store.get(PHONE)!.walk!.step;
+    w.deps.understandModel = async () => { throw new Error('timeout'); };
+    assert.equal(await say(w, 'Yes', tick(DAY1, 2)), 'busy');
+    assert.deepEqual(w.since(), [BUSY]);
+    assert.equal(w.store.get(PHONE)!.walk!.step, step);
 });

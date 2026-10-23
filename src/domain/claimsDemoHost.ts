@@ -88,7 +88,7 @@ export interface ClaimsDemoDeps {
 }
 
 export type DemoOutcome =
-    | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request';
+    | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request' | 'busy';
 
 export const helloText = (firstName: string) =>
     `Hi ${firstName}, it's Tina from TTT. On this number I'm set up to help with insurance claims. Tell me what happened `
@@ -97,6 +97,12 @@ export const resetText = (refs: string[]) =>
     `Demo reset. ${refs.length ? `I've withdrawn ${refs.join(', ')} and` : 'You had no open claims, and'} I've forgotten our chat. `
     + 'Say hi or tell me what happened to start again.';
 export const FILE_KEPT = "Thanks, I've kept that for your claim. I'll add it once your claim is open.";
+/**
+ * Claude couldn't be reached (after the SDK's retries). The package reads that as "unclear", which would tell the
+ * client they weren't understood and count a miss against a perfectly good answer. Instead nothing is read or saved,
+ * and the client is asked to send it again.
+ */
+export const BUSY = "Sorry, I'm a bit slow right now and couldn't read that. Please send it again in a minute.";
 
 const THEFT = /\b(stol(e|en)|theft|thie(f|ves)|burglar|broke into|break[- ]in|robbed|robbery|hijack)/i;
 /** The follow-on's `describedAsTheft`: the claim type says so, or the client's description does. */
@@ -118,6 +124,15 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     // A walkthrough untouched for three days is abandoned, as on Tina's claims path (claimsHost.ts).
     if (c.walk && c.updatedAt && now.getTime() - Date.parse(c.updatedAt) > ABANDONED_AFTER_MS) c.walk = null;
 
+    // A model call that fails is noted, so the turn stops instead of treating the message as unclear.
+    let unavailable = false;
+    const watch = <F extends (req: never) => Promise<unknown>>(f: F): F =>
+        (async (req: never) => { try { return await f(req); } catch (e) { unavailable = true; throw e; } }) as F;
+    const busy = async () => {
+        await deps.say(m.phone, BUSY);
+        return done('busy');
+    };
+
     let last: string | undefined;
     const sent = (text: string) => { last = text; };
     const done = async (outcome: DemoOutcome) => {
@@ -136,7 +151,8 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         }
         const ports = deps.ports(c.requestId, sent);
         const walk = c.walk;
-        const answer = await understand(deps.understandModel, walk, c.lastSent ?? '', m.text, now);
+        const answer = await understand(watch(deps.understandModel), walk, c.lastSent ?? '', m.text, now);
+        if (unavailable) return busy();
         const r = await claimTurn(ports, conv(), walk, answer, now);
         if (m.file) c.held = [...c.held, { file: m.file }];
         if (m.text.trim()) c.said = [...(c.said ?? []), m.text.trim()];
@@ -160,7 +176,8 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     // ---- no walkthrough: which open claim is this about? ----
     const ports = deps.ports(c.requestId, sent);
     const ctx = await replyContext(ports, m.contactId, c.resume, c.lastSent ?? undefined);
-    const reading = await readReply(deps.replyModel, ctx, m.text, m.file, m.wamid, now);
+    const reading = await readReply(watch(deps.replyModel), ctx, m.text, m.file, m.wamid, now);
+    if (unavailable) return busy();
     const r = await resumeTurn(ports, conv(), c.resume, reading, now);
     if (r.route === 'claim') {
         c.resume = r.state;
@@ -176,7 +193,9 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     // ---- no open claim ----
     c.resume = NO_RESUME_STATE;
     if (m.file) c.held = [...c.held, { file: m.file }];
-    if (!m.text.trim() || !(await claimRoute(deps.intentModel, m.text, { wordFilter: false }))) {
+    const route = m.text.trim() ? await claimRoute(watch(deps.intentModel), m.text, { wordFilter: false }) : null;
+    if (unavailable) return busy();
+    if (!route) {
         if (m.file) await deps.say(m.phone, FILE_KEPT);
         else {
             const contact = await ports.contactByWhatsApp(m.phone);
