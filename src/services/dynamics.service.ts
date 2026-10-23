@@ -252,6 +252,39 @@ export class DynamicsService {
      * POST to CRM with automatic audit field retry.
      * Tries with audit fields first. If Dynamics rejects them, retries without and caches.
      */
+    /**
+     * TTTFG-5168: a plain Dataverse Web API call for the claims package (the `Dv` port in
+     * src/departments/insurance/dataverse.ts). No ttt_ai_* audit columns: the claim tables don't have them, and the
+     * claim's own riivo_agentaction rows are its audit trail. Throws on any HTTP error.
+     */
+    async webApi<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, opts: { formatted?: boolean; returnRow?: boolean } = {}): Promise<T> {
+        const token = await this.getToken();
+        const prefer = [
+            opts.formatted ? 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' : '',
+            opts.returnRow ? 'return=representation' : '',
+        ].filter(Boolean).join(', ');
+        const res = await axios.request({
+            method,
+            url: `${this.baseUrl}/api/data/v9.2/${path}`,
+            data: body,
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'OData-MaxVersion': '4.0',
+                'OData-Version': '4.0',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                ...(method === 'PATCH' ? { 'If-Match': '*' } : {}),
+                ...(prefer ? { 'Prefer': prefer } : {}),
+            },
+            validateStatus: () => true,
+        });
+        if (res.status >= 400) {
+            const err = res.data?.error;
+            throw new Error(`Dataverse ${method} ${path.split('?')[0]} ${res.status} ${err?.code ?? ''} ${err?.message ?? ''}`.trim());
+        }
+        return (res.status === 204 ? undefined : res.data) as T;
+    }
+
     private async crmPost(entity: string, payload: any, triggeredBy: string): Promise<any> {
         const token = await this.getToken();
         const headers = {

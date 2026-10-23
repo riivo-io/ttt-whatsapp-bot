@@ -1,0 +1,199 @@
+/**
+ * TTTFG-4830 claims demo: a demo number's whole claim on WhatsApp (src/domain/claimsDemoHost.ts). The claims package
+ * runs for real; Claude, the CRM, WhatsApp and Supabase are faked. The package's own rules are tested in
+ * ttt-preseason-agent (claims-open, claims-followon, claims-resume, claims-reply).
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+    claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
+} from '../../src/domain/claimsDemoHost';
+import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
+import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
+import type { ClientFile, FollowOnClaim, StoredClaimForm } from '../../src/departments/insurance/followon';
+import { isOpenClaim, type OpenClaim, type ResumePorts } from '../../src/departments/insurance/resume';
+import type { Policy, WalkthroughState } from '../../src/departments/insurance/walkthrough';
+
+const PHONE = '27821234567';
+const CONTACT = '11111111-2222-3333-4444-555555555555';
+const DAY1 = new Date('2026-10-23T08:00:00Z');
+const SIPHO = { kind: 'user' as const, id: 'u-sipho', name: 'Sipho' };
+const tick = (d: Date, minutes: number) => new Date(d.getTime() + minutes * 60_000);
+
+const q = (key: string, prompt: string, o: Partial<QuestionItem> = {}): QuestionItem => ({ key, kind: 'question', prompt, answerType: 'text', required: true, ...o });
+const MOTOR: StoredClaimForm = {
+    id: 'cf-motor', provider: 'prov-discovery', claimType: 'Motor accident', formPdf: 'Forms/motor.pdf', notificationPeriodDays: 30, sapsCaseRequired: false,
+    active: true, questionGroups: [], fieldMap: [],
+    questionList: [q('driverName', 'Who was driving the vehicle?'), q('damagePhoto', 'Photos of the damage.', { kind: 'evidence', answerType: 'photo', name: 'the photos of the damage' })],
+};
+const GENERIC: StoredClaimForm = { ...MOTOR, id: 'cf-generic', provider: null, claimType: 'Other', formPdf: null, questionList: [q('whatHappened', 'What happened?')] };
+const POLICY: Policy = { id: 'pol-car', providerId: 'prov-discovery', insurer: 'Discovery Insure', product: 'Motor', policyNumber: 'DI-9', assistNumber: '0860 333 444' };
+
+type Row = FollowOnClaim & { contactId: string; lastClientMessageOn?: string };
+
+/** The understand model answers by the walkthrough step it is asked about (the step help in its prompt). */
+const STEP_ANSWERS: [RegExp, Record<string, unknown>][] = [
+    [/which policy the claim is about/, { kind: 'yes' }],
+    [/hurt or in danger right now/, { kind: 'no' }],
+    [/what kind of claim it is/, { kind: 'facts', claimType: 'Motor accident', description: 'Someone drove into the back of my car at the Claremont robot' }],
+    [/what happened, when and where/, { kind: 'facts', incidentDate: '2026-10-22', incidentTime: '17:30', place: 'Claremont' }],
+    [/anyone else was involved/, { kind: 'facts', thirdParties: false, saps: false, injuries: false }],
+    [/read back a summary/, { kind: 'confirm' }],
+];
+const blankAnswer = { kind: 'unclear', policyNumber: null, claimType: null, description: null, incidentDate: null, incidentTime: null, place: null,
+    thirdParties: null, thirdPartyDetails: null, saps: null, injuries: null, injuryDetails: null, wrongFields: [] as string[] };
+const blankReply = { kind: 'unparsed', valueText: null, valueNumber: null, valueBool: null, sapsCaseNumber: null, sapsStation: null, differentIncident: false,
+    chosenClaim: null, yesNo: null, forItem: null, claimType: null, description: null, incidentDate: null, place: null };
+
+function world(o: { isClaim?: boolean; rows?: Row[] } = {}) {
+    const rows: Row[] = o.rows ?? [];
+    const sent: string[] = [];
+    const created: ClaimRow[] = [];
+    const actions: AgentActionRow[] = [];
+    const filed: { file: ClientFile; claimId: string; itemKey?: string }[] = [];
+    const signatureCalls: string[] = [];
+    const requests: string[] = [];
+    const withdrawn: string[] = [];
+    const store = new Map<string, DemoConversation>();
+    const replies: Record<string, unknown>[] = [];
+    const row = (id: string) => rows.find((r) => r.id === id)!;
+    const ports = (sentTo: (t: string) => void): ResumePorts => ({
+        contactByWhatsApp: async () => ({ id: CONTACT, firstName: 'Adriaan' }),
+        activePolicies: async () => [POLICY],
+        policyOwner: async () => ({ kind: 'user', id: SIPHO.id, firstName: 'Sipho', enabled: true }),
+        insuranceTeam: async () => ({ id: 't-ia', name: 'the Insurance and Advice team' }),
+        createClaim: async (r) => {
+            created.push(r);
+            const id = `claim-${rows.length + 1}`;
+            const reference = `CLM-00000${rows.length + 1}`;
+            rows.push({
+                id, reference, contactId: r.contactId, providerId: r.providerId, insurer: 'Discovery Insure', claimType: r.claimType,
+                facts: { claimType: r.claimType, description: r.description, incidentAt: r.incidentAt, place: r.place, thirdParties: r.thirdParties, saps: r.saps, injuries: r.injuries },
+                status: r.status, signatureStatus: 'Not sent', answers: {}, evidence: [], owner: r.owner, lastClientMessageOn: r.lastClientMessageOn,
+            });
+            return { id, reference };
+        },
+        openClaimsForClient: async (contactId): Promise<OpenClaim[]> => rows.filter((r) => r.contactId === contactId && isOpenClaim(r.status))
+            .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt, status: r.status, lastClientMessageOn: r.lastClientMessageOn })),
+        loadClaim: async (id) => structuredClone(row(id)),
+        activeClaimForm: async (provider, type) => (provider === MOTOR.provider && type === MOTOR.claimType ? MOTOR : null),
+        genericClaimForm: async () => GENERIC,
+        claimForm: async (id) => (id === MOTOR.id ? MOTOR : GENERIC),
+        setClaimForm: async (id, formId) => void (row(id).claimFormId = formId),
+        saveSaps: async () => {},
+        setSapsRequired: async (id) => void (row(id).sapsRequired = true),
+        saveAnswers: async (id, a: ClaimAnswers) => void (row(id).answers = structuredClone(a)),
+        setStatus: async (id, s) => void (row(id).status = s),
+        setEvidenceComplete: async () => {},
+        setLastClientMessageOn: async (id, at) => void (row(id).lastClientMessageOn = at),
+        fileToPipeline: async (file, to) => {
+            filed.push({ file, ...to });
+            if (to.itemKey) row(to.claimId).evidence = [...row(to.claimId).evidence, { key: to.itemKey }];
+            return { documentId: `doc-${filed.length}` };
+        },
+        storeVideo: async () => ({ documentId: 'v' }),
+        requestClaimSignature: async (id) => (signatureCalls.push(id), 'notAvailable'),
+        createAgentAction: async (r) => (actions.push(r), { id: `aa-${actions.length}`, dueOn: '2026-10-24T15:00:00Z' }),
+        send: async (_to, m) => { sent.push(m.text); sentTo(m.text); },
+    });
+    const deps: ClaimsDemoDeps = {
+        load: async (p) => store.get(p) ?? null,
+        save: async (p, c) => void store.set(p, { ...structuredClone(c), updatedAt: DAY1.toISOString() }),
+        remove: async (p) => void store.delete(p),
+        ports: (_r, s) => ports(s),
+        intentModel: async () => ({ reportingClaim: o.isClaim ?? true }),
+        understandModel: async (req) => ({ ...blankAnswer, ...(STEP_ANSWERS.find(([re]) => re.test(req.system))?.[1] ?? {}) }),
+        replyModel: async () => ({ ...blankReply, ...(replies.shift() ?? {}) }),
+        openRequest: async (_c, _p, text) => (requests.push(text), 'req-1'),
+        withdrawOpenClaims: async () => { const refs = rows.filter((r) => isOpenClaim(r.status)).map((r) => (r.status = 'Withdrawn', r.reference)); withdrawn.push(...refs); return refs; },
+        say: async (_p, text) => void sent.push(text),
+        signUpLink: 'https://ttt.example/signup',
+    };
+    let seen = 0;
+    const since = () => { const t = sent.slice(seen); seen = sent.length; return t; };
+    return { deps, rows, sent, since, created, actions, filed, signatureCalls, requests, withdrawn, store, replies };
+}
+
+const say = (w: ReturnType<typeof world>, text: string, now: Date, file?: ClientFile) =>
+    claimsDemoTurn(w.deps, { phone: PHONE, contactId: CONTACT, text, file, wamid: `wamid.${now.getTime()}` }, now);
+const photo: ClientFile = { id: 'media-1', fileName: 'image-1.jpeg', mimeType: 'image/jpeg', media: 'photo' };
+
+test('demo numbers: any SA format matches; anything else, or a bad entry, does not', () => {
+    const n = parseDemoNumbers(`27723203629:${CONTACT}, +27 83 285 2913:${CONTACT.replace('1', '9')}, 0821234567:not-a-guid, 123:${CONTACT}`);
+    assert.equal(n.size, 2);
+    assert.equal(demoContactFor(n, '27723203629'), CONTACT);
+    assert.equal(demoContactFor(n, '+27723203629'), CONTACT);
+    assert.equal(demoContactFor(n, '0832852913'), CONTACT.replace('1', '9'));
+    assert.equal(demoContactFor(n, '27821234567'), null);
+    assert.equal(demoContactFor(parseDemoNumbers(undefined), '27723203629'), null);
+});
+
+test('a hello with no open claim gets the demo hello, and opens nothing', async () => {
+    const w = world({ isClaim: false });
+    assert.equal(await say(w, 'Hi Tina', DAY1), 'hello');
+    assert.deepEqual(w.since(), [helloText('Adriaan')]);
+    assert.equal(w.requests.length, 0);
+    assert.equal(w.created.length, 0);
+});
+
+test('the whole claim: walkthrough, the form after the last question, then the photo; nothing asked twice', async () => {
+    const w = world();
+    let t = DAY1;
+    assert.equal(await say(w, 'Someone drove into the back of my car at the Claremont robot', t), 'started');
+    assert.deepEqual(w.requests, ['Someone drove into the back of my car at the Claremont robot']);
+    assert.match(w.since().join('\n'), /Discovery Insure/); // the policy question
+
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    assert.equal(w.rows.length, 1);
+    const opened = w.since().join('\n');
+    assert.match(opened, /CLM-000001/); // the acknowledgement
+    assert.match(opened, /Who was driving the vehicle\?/); // the follow-on's first question, straight after
+    assert.equal(w.store.get(PHONE)?.walk, null);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.asking, 'driverName');
+
+    w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
+    assert.equal(await say(w, 'Me, Adriaan', (t = tick(t, 2))), 'follow-on');
+    assert.deepEqual(w.signatureCalls, ['claim-1']); // the form, after the last question and before any evidence
+    assert.equal(w.rows[0].answers.driverName?.value, 'Me, Adriaan');
+    assert.match(w.since().join('\n'), /Please send me photos of the damage/i);
+
+    w.replies.push({});
+    assert.equal(await say(w, '', (t = tick(t, 2)), photo), 'follow-on');
+    assert.deepEqual(w.filed.map((f) => [f.file.id, f.claimId, f.itemKey]), [['media-1', 'claim-1', 'damagePhoto']]);
+    assert.equal(w.store.get(PHONE)?.resume.followOn, null); // nothing more to ask
+    assert.equal(w.signatureCalls.length, 1);
+});
+
+test('a photo sent during the walkthrough is kept and filed when the claim opens', async () => {
+    const w = world();
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    assert.equal(await say(w, '', (t = tick(t, 1)), photo), 'file-held');
+    assert.deepEqual(w.since().at(-1), FILE_KEPT);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    assert.deepEqual(w.filed.map((f) => [f.file.id, f.claimId]), [['media-1', 'claim-1']]);
+    assert.deepEqual(w.store.get(PHONE)?.held, []);
+});
+
+test('#reset withdraws the open claims and forgets the conversation', async () => {
+    const w = world();
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', DAY1);
+    for (let i = 0; i < 8 && !w.rows.length; i++) await say(w, 'reply', tick(DAY1, i + 1));
+    assert.equal(await say(w, ' #RESET ', tick(DAY1, 30)), 'reset');
+    assert.deepEqual(w.withdrawn, ['CLM-000001']);
+    assert.equal(w.store.has(PHONE), false);
+    assert.match(w.sent.at(-1)!, /Demo reset\. I've withdrawn CLM-000001/);
+    // A fresh start: no open claim, so a new report starts a new walkthrough.
+    assert.equal(await say(w, 'My geyser burst this morning', tick(DAY1, 31)), 'started');
+});
+
+test('the SAPS step applies when the client describes a theft', () => {
+    const w = (claimType: string, description: string) => ({ facts: { claimType, description } }) as unknown as WalkthroughState;
+    assert.equal(describedAsTheft(w('Motor theft', '')), true);
+    assert.equal(describedAsTheft(w('Property loss or damage', 'Someone broke into the house and took the TV')), true);
+    assert.equal(describedAsTheft(w('Motor accident', 'A taxi drove into me')), false);
+});

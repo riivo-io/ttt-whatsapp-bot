@@ -35,3 +35,6 @@ test-enqueue.ts
 # Scratch planning docs (root-level only — docs/ is curated)
 /REMOTION-VIDEO-PROMPT.md
 /PLAN-create-task.md
+
+# Local scratch (TTTFG-5168 claims-chat harness state)
+.work/
