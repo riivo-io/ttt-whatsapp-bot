@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 0f9ac1f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 039ecda). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -168,6 +168,12 @@ export interface AnswerRecord {
    * this one too; `correction`, the client changed their earlier answer. Absent: the client's reply to this question.
    */
   source?: 'report' | 'same-message' | 'correction';
+  /**
+   * TTTFG-4830: the value doesn't look right (formats.ts: a phone number with too many digits, an email without "@",
+   * an ID number that fails its check digit). Tina pointed it out and the client sent it again still that way, so it's
+   * kept as given, with the reason, for the broker to check.
+   */
+  doubt?: string;
 }
 /** riivo_claim.riivo_answers, keyed by question key (`<key>.<n>` for the n-th entry of a grouped question). */
 export type ClaimAnswers = Record<string, AnswerRecord>;
