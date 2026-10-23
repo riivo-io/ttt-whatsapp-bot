@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit cce71bb). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 391dac8). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830 (claims on Tina): Claude reads one WhatsApp message from a client who has an open claim and says what it
 // means for resume.ts (a ResumeMessage). It is the follow-on's half of understand.ts: TTTFG-5176 and TTTFG-5184 left
@@ -90,10 +90,16 @@ function askingHelp(ctx: ReplyContext): string {
     choice: `Set valueText to exactly one of these choices: ${(item.choices ?? []).map((c) => `"${c}"`).join(', ')}.`,
     text: 'Set valueText to the answer in the client\'s own words, copied rather than summarised.',
   };
+  const noIsAnswer = item.answerType === 'text'
+    ? 'A short "no", "none", "nothing" or "nobody" answers a question about whether something exists or happened (or one '
+      + 'that says to answer "no" or "none"): that is kind "value" with the client\'s word as valueText. '
+    : '';
   return `Tina asked: "${item.prompt}". When the message answers it, use kind "value". ${how[item.answerType] ?? how.text} `
+    + noIsAnswer
     + `${item.required ? '' : 'The question is optional: "no" or "nothing" is a value, not "not-yet". '}`
-    + 'Use kind "not-yet" when the client says they don\'t know yet or will find out. Use kind "unparsed" when the message '
-    + 'doesn\'t answer the question.';
+    + 'Use kind "not-yet" when the client says they don\'t know, aren\'t sure or will find out, or gives only a guess the '
+    + 'answer type can\'t hold (for example "around 2008" for a date). Use kind "unparsed" when the message doesn\'t answer '
+    + 'the question.';
 }
 
 export function replyPrompt(ctx: ReplyContext, text: string, file: ClientFile | undefined, now: Date): { system: string; user: string } {

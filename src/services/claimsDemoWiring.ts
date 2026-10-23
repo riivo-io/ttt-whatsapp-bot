@@ -99,18 +99,28 @@ export function claimFolders(ch: DemoChannels): { files: ClaimFileStore; forms: 
     };
 }
 
-/** The insurer's blank PDF from its riivo_formurl: Graph's download link, else the caller's fallback. */
+/**
+ * The insurer's blank PDF from its riivo_formurl: Graph's download link, else Graph's content route, else the caller's
+ * fallback. (A delegated `az login` token reads the item but may be refused the bytes; Tina's app token is not.)
+ */
 export async function blankForm(ch: DemoChannels, formUrl: string): Promise<Uint8Array> {
+    const why: string[] = [];
     try {
         const meta = await ch.graph('GET', `/shares/${shareId(formUrl)}/driveItem`);
         const url = meta.ok ? ((await meta.json()) as { '@microsoft.graph.downloadUrl'?: string })['@microsoft.graph.downloadUrl'] : undefined;
+        why.push(`item HTTP ${meta.status}`);
         if (url) {
             const res = await fetch(url);
             if (res.ok) return new Uint8Array(await res.arrayBuffer());
+            why.push(`download link HTTP ${res.status}`);
         }
-    } catch {
-        // the fallback below
+        const content = await ch.graph('GET', `/shares/${shareId(formUrl)}/driveItem/content`);
+        if (content.ok) return new Uint8Array(await content.arrayBuffer());
+        why.push(`content HTTP ${content.status}`);
+    } catch (e) {
+        why.push((e as Error).message);
     }
+    ch.note?.(`Blank form not downloaded from SharePoint (${why.join(', ')})`);
     const local = await ch.blankFormFallback?.(formUrl);
     if (local) return local;
     throw new Error(`The blank claim form could not be read: ${formUrl}`);
@@ -131,10 +141,21 @@ export const demoSigningStep = (ch: DemoChannels, phone: string, sent?: (text: s
 export function demoPorts(ch: DemoChannels, phone: string, contactId: string, sent: (text: string) => void): ResumePorts {
     const { files, forms } = claimFolders(ch);
     const fill = dataverseFillPorts({ dv: ch.dv, files: forms, blankForm: (url) => blankForm(ch, url), signingStep: demoSigningStep(ch, phone, sent) });
+    const sign = requestClaimSignature(fill);
     const base = dataverseResumePorts({
         dv: ch.dv,
         files,
-        requestClaimSignature: requestClaimSignature(fill),
+        // A fill that fails (the blank PDF unreachable, say) must not stop the conversation: Tina goes on to the
+        // evidence and the broker fills the form. The error is logged.
+        requestClaimSignature: async (claimId) => {
+            try {
+                return await sign(claimId);
+            } catch (e) {
+                console.error(`[ClaimsDemo] Claim form fill failed for ${claimId}:`, (e as Error).message);
+                ch.note?.(`Claim form not filled (${(e as Error).message}): Tina moves on to the evidence`);
+                return 'notAvailable';
+            }
+        },
         send: async (to, m) => {
             // Templates (the duty of disclosure, the deadline note) go as text: the client is inside the 24-hour window.
             await ch.sendText(to, m.text);

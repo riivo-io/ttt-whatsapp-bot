@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit cce71bb). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit 391dac8). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
