@@ -15,7 +15,7 @@ import { claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, 
 import type { Dv } from '../departments/insurance/dataverse';
 import type { ClientFile, ResumeFile } from '../departments/insurance/followon';
 import type { IntentModel } from '../departments/insurance/intent';
-import type { ReplyModel } from '../departments/insurance/reply';
+import type { ReplyModel, ReportedModel } from '../departments/insurance/reply';
 import { NO_RESUME_STATE, type ResumeState } from '../departments/insurance/resume';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
@@ -120,7 +120,7 @@ function demoModel(model: string, name: string) {
     return async (req: { system: string; user: string; schema: object }): Promise<unknown> => {
         const t = Date.now();
         const res = await claude().messages.create({
-            model, max_tokens: 1024, system: req.system, messages: [{ role: 'user', content: req.user }],
+            model, max_tokens: 2048, system: req.system, messages: [{ role: 'user', content: req.user }],
             tools: [{ name, description: 'Record the answer.', input_schema: req.schema as Anthropic.Tool.InputSchema }],
             tool_choice: { type: 'tool', name },
         });
@@ -136,17 +136,21 @@ function deps(phone: string, contactId: string): ClaimsDemoDeps {
             const row = await supabaseService.getClaimConversation(phone);
             return row ? {
                 contactId: row.contact_id, requestId: row.request_id, walk: (row.walkthrough as WalkthroughState | null) ?? null,
+                said: ((row.walkthrough as { said?: string[] } | null)?.said) ?? [],
                 resume: (row.resume as ResumeState) ?? NO_RESUME_STATE, held: (row.held as ResumeFile[]) ?? [], lastSent: row.last_sent, updatedAt: row.updated_at,
             } : null;
         },
         save: (phone, c: DemoConversation) => supabaseService.saveClaimConversation({
-            phone_number: phone, contact_id: c.contactId, request_id: c.requestId, walkthrough: c.walk, resume: c.resume, held: c.held, last_sent: c.lastSent,
+            // The client's walkthrough messages ride along in the walkthrough column (no extra column needed).
+            phone_number: phone, contact_id: c.contactId, request_id: c.requestId, walkthrough: c.walk ? { ...c.walk, said: c.said ?? [] } : null,
+            resume: c.resume, held: c.held, last_sent: c.lastSent,
         }),
         remove: (phone) => supabaseService.deleteClaimConversation(phone),
         ports: (_requestId, sent) => demoPorts(ch, phone, contactId, sent),
         intentModel: demoModel(INTENT_MODEL, 'record_claim_intent') as IntentModel,
         understandModel: demoModel(UNDERSTAND_MODEL, 'record_answer') as UnderstandModel,
         replyModel: demoModel(UNDERSTAND_MODEL, 'record_reply') as ReplyModel,
+        reportedModel: demoModel(UNDERSTAND_MODEL, 'record_known_answers') as ReportedModel,
         openRequest: (contactId, phone, text) => openDemoRequest(ch.dv, contactId, phone, text),
         withdrawOpenClaims: (contactId) => withdrawOpenClaims(ch.dv, contactId),
         say: (phone, text) => ch.sendText(phone, text),

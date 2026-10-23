@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit 391dac8). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit 0f9ac1f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: ClaimPorts against Dataverse (the riivo_claim table from TTTFG-4885). The host passes in its own
 // Dataverse call (`Dv`, the same signature as the email agent's adapters/dataverse.ts `dv`) and its WhatsApp send, so

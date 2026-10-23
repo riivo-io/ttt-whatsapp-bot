@@ -6,7 +6,8 @@
  * is said and written; this module only joins its parts the way the DEV drivers do:
  *  - a 5168 walkthrough in progress: Claude reads the reply (understand.ts), claimTurn() asks the next question;
  *  - the walkthrough opens the claim: the 5176 follow-on starts at once (SAPS step, duty of disclosure, the form's
- *    questions, the filled form, then the evidence);
+ *    questions, the filled form, then the evidence). What the client said while reporting it already answers some of
+ *    the form's questions (reportedAnswers): those are filled in, not asked;
  *  - otherwise: Claude reads the message against the open claims (reply.ts) and resumeTurn() (5184) decides which claim
  *    it belongs to, or that there is none;
  *  - no open claim: a claim report starts the walkthrough under a new riivo_request; anything else gets the demo hello.
@@ -18,7 +19,7 @@
 import { claimTurn, type Conversation } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
-import { readReply, replyContext, type ReplyModel } from '../departments/insurance/reply';
+import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyModel, type ReportedModel } from '../departments/insurance/reply';
 import { NO_RESUME_STATE, resumeTurn, type ResumePorts, type ResumeState } from '../departments/insurance/resume';
 import { understand, type UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
@@ -52,6 +53,8 @@ export interface DemoConversation {
     resume: ResumeState;
     /** Files sent before the claim existed, for the follow-on's start. */
     held: ResumeFile[];
+    /** What the client wrote during the walkthrough in progress: read for the form's questions when the claim opens. */
+    said?: string[];
     lastSent: string | null;
     updatedAt?: string;
 }
@@ -74,6 +77,7 @@ export interface ClaimsDemoDeps {
     intentModel: IntentModel;
     understandModel: UnderstandModel;
     replyModel: ReplyModel;
+    reportedModel: ReportedModel;
     /** Opens the riivo_request (Insurance, topic Claim) a new claim conversation runs under. Null when refused. */
     openRequest(contactId: string, phone: string, text: string): Promise<string | null>;
     /** "#reset": sets the client's open claims to Withdrawn. Returns their references. */
@@ -135,15 +139,21 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         const answer = await understand(deps.understandModel, walk, c.lastSent ?? '', m.text, now);
         const r = await claimTurn(ports, conv(), walk, answer, now);
         if (m.file) c.held = [...c.held, { file: m.file }];
+        if (m.text.trim()) c.said = [...(c.said ?? []), m.text.trim()];
         if (!r.claim) {
             c.walk = r.state;
             return done('walkthrough');
         }
-        // The claim is open: the follow-on starts at once, with any files the client sent on the way.
+        // The claim is open: the follow-on starts at once, with any files the client sent on the way and the form
+        // answers their report already gave.
         c.walk = null;
-        const fo = await followOnTurn(ports, conv(), null, { kind: 'start', claimId: r.claim.id, describedAsTheft: describedAsTheft(walk), files: c.held }, now);
+        const reported = await formAnswersFromReport(deps, ports, r.claim.id, walk, c.said ?? [], now);
+        const fo = await followOnTurn(ports, conv(), null, {
+            kind: 'start', claimId: r.claim.id, describedAsTheft: describedAsTheft(walk), files: c.held, reported,
+        }, now);
         c.resume = { followOn: fo.state, pending: null };
         c.held = [];
+        c.said = [];
         return done('opened');
     }
 
@@ -180,7 +190,35 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         return done('no-request');
     }
     c.requestId = requestId;
+    c.said = [m.text.trim()];
     const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start' }, now);
     c.walk = t.state && (await withOpeningFacts(deps.understandModel, t.state, m.text, now));
     return done('started');
+}
+
+/** The client's report as Claude reads it for the form: their own messages, then the facts they confirmed. */
+export function reportText(walk: WalkthroughState, said: readonly string[]): string {
+    const f = walk.facts;
+    const yn = (v: boolean | undefined, details?: string) => (v === undefined ? undefined : v ? `yes${details ? ` (${details})` : ''}` : 'no');
+    const confirmed = [
+        ['Claim type', f.claimType], ['What happened', f.description], ['When', [f.incidentDate, f.incidentTime].filter(Boolean).join(' ')],
+        ['Where', f.place], ['Anyone else involved', yn(f.thirdParties, f.thirdPartyDetails)], ['Police (SAPS) involved', yn(f.saps)],
+        ['Anyone injured', yn(f.injuries, f.injuryDetails)],
+    ].filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`);
+    return `The client's messages:\n${said.map((t) => `- ${t}`).join('\n')}\n\nWhat the client confirmed:\n${confirmed.join('\n')}`;
+}
+
+/** The form questions the client's report already answers, for the follow-on's start. Never fails the turn. */
+async function formAnswersFromReport(
+    deps: ClaimsDemoDeps, ports: ResumePorts, claimId: string, walk: WalkthroughState, said: readonly string[], now: Date,
+) {
+    try {
+        const claim = await ports.loadClaim(claimId);
+        const form = (await ports.activeClaimForm(claim.providerId, claim.claimType)) ?? (await ports.genericClaimForm());
+        const questions = openQuestions(form, claim.answers, { ...claim.facts, claimType: claim.claimType });
+        return await reportedAnswers(deps.reportedModel, questions, reportText(walk, said), now);
+    } catch (e) {
+        console.warn('[ClaimsDemo] Reading the report for form answers failed:', (e as Error).message);
+        return [];
+    }
 }

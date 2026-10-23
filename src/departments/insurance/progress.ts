@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 391dac8). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 0f9ac1f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -131,7 +131,9 @@ export function formItems(form: ClaimForm, answers: ClaimAnswers, facts?: ClaimF
       }
       if (n === g.max) break;
       const more = moreKey(g.key, n);
-      out.push({ key: more, kind: 'question', prompt: g.more, answerType: 'yes/no', required: true, group: g.key });
+      // TTTFG-4830: said with what's already given, so "yes" can't be read as the one the client just described.
+      const prompt = `Apart from ${n === 1 ? 'the one' : `the ${n}`} you've told me about, ${g.more.charAt(0).toLowerCase()}${g.more.slice(1)}`;
+      out.push({ key: more, kind: 'question', prompt, answerType: 'yes/no', required: true, group: g.key });
       const k = known(more, answers, facts);
       if (!k || k.brokerToConfirm || k.value !== true) break;
     }
