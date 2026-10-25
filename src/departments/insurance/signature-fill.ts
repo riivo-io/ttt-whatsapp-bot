@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit 2ec679b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the fill half of the requestClaimSignature seam (TTTFG-5248 steps 6 to 8). TTTFG-5176 (WhatsApp) and
 // TTTFG-5188 (email) call it when no form answer is missing. It fills the insurer's form, or the summary sheet for the

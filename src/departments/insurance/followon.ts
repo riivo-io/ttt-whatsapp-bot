@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 2ec679b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -77,6 +77,11 @@ export interface FollowOnClaim {
   /** riivo_clientdocument rows linked to the claim, by question list item. */
   evidence: ReceivedEvidence;
   owner: Owner;
+  /**
+   * TTTFG-4830: the client's address on the CRM (contact.address1_composite), for the address check. null: the CRM has
+   * none (Tina asks for it). Absent: the host didn't read it, so there's no check.
+   */
+  contactAddress?: string | null;
 }
 
 /** A file the client sent on WhatsApp. `media` comes from the WhatsApp message type. */
@@ -118,7 +123,8 @@ export interface FollowOnPorts {
 /** Stored on the Tina conversation, keyed by claim id. Where the conversation is, not what the claim holds. */
 export interface FollowOnState {
   claimId: string;
-  phase: 'saps' | 'items';
+  /** `address` (TTTFG-4830): Tina is confirming the client's home address, between the duty of disclosure and the form. */
+  phase: 'saps' | 'address' | 'items';
   /** The key Tina asked last. */
   asking: string;
   /** Unreadable replies to `asking` in a row. */
@@ -128,6 +134,8 @@ export interface FollowOnState {
   skipped: string[];
   /** TTTFG-4830: the question whose answer Tina said didn't look right (formats.ts). A second such answer is kept. */
   formatChecked?: string;
+  /** TTTFG-4830: how many questions the client's report answered; said once, right after the duty of disclosure. */
+  reportedUsed?: number;
   signingRequested: boolean;
   evidenceStarted: boolean;
   /** The deadline note and the duty of disclosure are out (TTTFG-5184: a resume doesn't send them again). */
@@ -190,6 +198,8 @@ export interface ResumeFile { file: ClientFile; forItem?: string }
 export const SAVED_FILE = "Thanks, I've saved that with your claim. Back to my question:";
 export const SAVED_SAPS = "Thanks, I've saved the SAPS case number. Back to my question:";
 export const LEFT_OFF = 'Back to where we left off:';
+/** TTTFG-4830: "I don't know" to a required question. */
+export const BROKER_WILL_CHECK = 'No problem, your broker will check that with you.';
 /** TTTFG-4830: the client changed an earlier answer. */
 export const CORRECTED = "No problem, I've changed that.";
 /** TTTFG-4830: the reply answered other questions but not the one Tina asked. */
@@ -247,7 +257,9 @@ type Out =
   | { kind: 'file'; file: ClientFile; itemKey?: string }
   | { kind: 'request-signature' }
   | { kind: 'status'; status: 'Awaiting client docs' }
-  | { kind: 'evidence-complete' };
+  | { kind: 'evidence-complete' }
+  /** TTTFG-4830: open work for the claim's owner (the broker), for example to update the client's address in the CRM. */
+  | { kind: 'follow-up'; detail: string };
 
 export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number }
 /** The claim as it stands within this turn. */
@@ -265,6 +277,14 @@ function work(claim: FollowOnClaim): Work {
   };
 }
 
+/** TTTFG-4830: a whole message that is only a no ("No", "none", "nobody"). */
+export const BARE_NO = /^\s*(no|nope|nah|none|nothing|nobody|no one|n\/?a)\s*[.!]?\s*$/i;
+/**
+ * A free-text question that "no" answers: one asked as a yes/no ("Does the car have any marks…?") or one that invites
+ * it ('Say "no" if not'). "What is that person's full name?" is not.
+ */
+const NO_INVITED = /^(do|does|did|is|are|was|were|has|have|had|can|could|will|would|any)\b|say "(no|none|nothing|don't know)"|"(no|none)" if/i;
+
 /** The value Claude gave, checked against the item's answer type. undefined = not a usable value (a miss). */
 export function accept(item: QuestionItem, v: string | number | boolean): string | number | boolean | undefined {
   const s = typeof v === 'string' ? v.trim() : undefined;
@@ -276,10 +296,14 @@ export function accept(item: QuestionItem, v: string | number | boolean): string
       return Number.isFinite(n) ? n : undefined;
     }
     case 'date':
+      // TTTFG-4830: a month and year (YYYY-MM) is enough for questions like "when did you buy it?".
+      if (s && /^\d{4}-(0[1-9]|1[0-2])$/.test(s)) return s;
       return s && /^\d{4}-\d{2}-\d{2}/.test(s) && !Number.isNaN(Date.parse(s)) ? s : undefined;
     case 'choice':
       return s ? item.choices?.find((c) => c.toLowerCase() === s.toLowerCase()) : undefined;
     default:
+      // TTTFG-4830: "No" is not a name or a number. It answers a free-text question only when the question invites it.
+      if (s && BARE_NO.test(s) && !NO_INVITED.test(item.prompt)) return undefined;
       return s || (typeof v === 'number' ? String(v) : undefined);
   }
 }
@@ -324,7 +348,137 @@ function intro(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | 
     out.push({ kind: 'template', template, text: template.render(vars) });
   }
   out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
+  // TTTFG-4830: after the duty of disclosure, just before the first of the insurer's questions.
+  if (st.reportedUsed) {
+    out.push({ kind: 'text', text: usedReport(st.reportedUsed) });
+    st = { ...st, reportedUsed: undefined };
+  }
+  // TTTFG-4830: the client's home address goes on every form; confirmed first when it's missing or looks out of date.
+  const check = addressAsk(c.claim, w.answers);
+  if (check) {
+    out.push({ kind: 'ask', item: check, simpler: false });
+    return { ...st, phase: 'address', asking: check.key, misses: 0 };
+  }
   return proceed(c, w, st, out);
+}
+
+// ------------------------------------------------------------------------------- TTTFG-4830: the client's address
+
+/**
+ * The address the client confirmed when it isn't the one on the CRM (or the CRM has none). The form's "physical
+ * address" uses it instead of the CRM's (fill-dataverse.ts), and the broker gets a Follow-up to update the contact:
+ * Tina never changes a client's address in the CRM herself.
+ */
+export const ADDRESS_KEY = 'clientAddress';
+/** The answer to "is that still your address?": STILL, MOVED or OTHER. */
+export const ADDRESS_CHECK_KEY = 'clientAddressCheck';
+/** The answer to "is <the address where it happened> your home address?" when the CRM has none. */
+export const ADDRESS_IS_HOME_KEY = 'clientAddressIsHome';
+const STILL = 'Still the same';
+const MOVED = 'Moved there';
+const OTHER = 'Another address';
+
+/** The address in the place the client gave ("8 Kingsbury Park Road, Rondebosch (home)"): a street number and name. */
+export function addressIn(place?: string): string | undefined {
+  if (!place || !/\d+[a-z]?\s+[A-Za-z]{2,}/.test(place)) return undefined;
+  return place.replace(/\s*\((my )?home\)\s*$/i, '').replace(/^(at\s+)?(my\s+)?(home|house)\b[,:]?\s*/i, '').trim();
+}
+
+const plain = (a: string) => a.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+/** One line, as Tina says it. */
+export const oneLine = (a: string) => a.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).join(', ');
+/** The same address: the first line on file (street number and name) is in the other one. */
+export function sameAddress(onFile: string, given: string): boolean {
+  const first = plain(onFile.split(/\r?\n|,/)[0] ?? '');
+  return !!first && plain(given).includes(first);
+}
+
+/** The question for an address key, in words for this claim. */
+export function addressItem(claim: FollowOnClaim, key: string): QuestionItem | undefined {
+  const onFile = claim.contactAddress?.trim();
+  const here = claim.claimType === 'Property loss or damage' ? addressIn(claim.facts.place) : undefined;
+  switch (key) {
+    case ADDRESS_CHECK_KEY:
+      return onFile && here ? {
+        key, kind: 'question', answerType: 'choice', required: true, choices: [STILL, MOVED, OTHER], name: 'your home address',
+        prompt: `We have ${oneLine(onFile)} as your home address. Is that still right, or do you live at ${here} now?`,
+      } : undefined;
+    case ADDRESS_IS_HOME_KEY:
+      return here ? {
+        key, kind: 'question', answerType: 'yes/no', required: true, name: 'your home address',
+        prompt: `We don't have your home address on file. Is ${here} your home address?`,
+      } : undefined;
+    case ADDRESS_KEY:
+      return {
+        key, kind: 'question', answerType: 'text', required: true, name: 'your home address',
+        prompt: onFile || here ? 'What is your home address now? Please include the suburb and town.' : "We don't have your home address on file. What is your home address? Please include the suburb and town.",
+      };
+  }
+  return undefined;
+}
+
+/**
+ * The first address question, or null when there's nothing to confirm: the claim at the client's home (Property loss
+ * or damage) gave an address that isn't the one on the CRM, or the CRM has no address at all. Asked once per claim.
+ */
+export function addressAsk(claim: FollowOnClaim, answers: ClaimAnswers): QuestionItem | null {
+  if (claim.contactAddress === undefined || [ADDRESS_KEY, ADDRESS_CHECK_KEY, ADDRESS_IS_HOME_KEY].some((k) => answers[k])) return null;
+  const onFile = claim.contactAddress?.trim();
+  const here = claim.claimType === 'Property loss or damage' ? addressIn(claim.facts.place) : undefined;
+  if (onFile) return here && !sameAddress(onFile, here) ? addressItem(claim, ADDRESS_CHECK_KEY)! : null;
+  return addressItem(claim, here ? ADDRESS_IS_HOME_KEY : ADDRESS_KEY)!;
+}
+
+/** The address question's answer: saved, the new address passed to the broker, then the next address question or the form. */
+function advanceAddress(c: Ctx, w: Work, st: FollowOnState, input: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>, out: Out[], at: string): FollowOnState | null {
+  const item = addressItem(c.claim, st.asking);
+  const toForm = () => proceed(c, w, { ...st, phase: 'items', misses: 0 }, out);
+  if (!item) return toForm();
+  const value = input.kind === 'value' ? accept(item, input.value) : undefined;
+  if (value === undefined) {
+    // "Not yet" or a miss: once in simpler words, then on to the form with the CRM's address (the broker checks it).
+    if (input.kind !== 'not-yet' && st.misses + 1 < 2) {
+      out.push({ kind: 'ask', item, simpler: true });
+      return { ...st, misses: st.misses + 1 };
+    }
+    return toForm();
+  }
+  const save = (key: string, v: string | number | boolean) => {
+    const record: AnswerRecord = { value: v, status: 'answered', at, wamid: input.wamid };
+    out.push({ kind: 'save-answer', key, record });
+    w.answers[key] = record;
+  };
+  const onFile = c.claim.contactAddress?.trim();
+  const newAddress = (address: string) => {
+    save(ADDRESS_KEY, address);
+    out.push({
+      kind: 'follow-up',
+      detail: `The client gave their home address on WhatsApp as ${address}${onFile ? `; the CRM has ${oneLine(onFile)}` : '; the CRM has none'}. `
+        + 'Please update the contact in the CRM, and check that the policy covers this address.',
+    });
+    out.push({ kind: 'text', text: "Thanks, I've noted your address. I'll use it on your claim and ask your broker to update it on our system." });
+    return toForm();
+  };
+  const ask = (key: string) => {
+    out.push({ kind: 'ask', item: addressItem(c.claim, key)!, simpler: false });
+    return { ...st, asking: key, misses: 0 };
+  };
+  const here = addressIn(c.claim.facts.place);
+  // The new address given in the same message ("No, I live at 5 Main Road, Claremont now"): not asked for again.
+  const given = input.kind === 'value' ? input.also?.find((a) => a.key === ADDRESS_KEY && typeof a.value === 'string' && a.value.trim()) : undefined;
+  const elsewhere = () => (given ? newAddress(String(given.value).trim()) : ask(ADDRESS_KEY));
+  switch (st.asking) {
+    case ADDRESS_CHECK_KEY:
+      save(ADDRESS_CHECK_KEY, value);
+      if (value === MOVED && here) return newAddress(here);
+      if (value === OTHER || value === MOVED) return elsewhere();
+      return toForm();
+    case ADDRESS_IS_HOME_KEY:
+      save(ADDRESS_IS_HOME_KEY, value);
+      return value === true && here ? newAddress(here) : elsewhere();
+    default:
+      return typeof value === 'string' ? newAddress(value) : toForm();
+  }
 }
 
 /** The SAPS question for what is still missing. */
@@ -346,18 +500,14 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
   fileHeld(c, w, files, out, st.sapsRequired);
   // TTTFG-4830: what the client already said while reporting the claim answers those questions; they aren't asked.
   const used = applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
-  const noteUsed = (step: FollowOnState | null): Step => {
-    const first = out.findIndex((o) => o.kind === 'ask');
-    if (used && first >= 0) out.splice(first, 0, { kind: 'text', text: usedReport(used) });
-    return { state: step, out };
-  };
+  if (used) st.reportedUsed = used;
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
     if (!w.facts.sapsCaseNumber) out.push({ kind: 'saps-instruction' });
     const item = sapsAsk(w.facts);
     out.push({ kind: 'ask', item, simpler: false });
-    return noteUsed({ ...st, phase: 'saps', asking: item.key });
+    return { state: { ...st, phase: 'saps', asking: item.key }, out };
   }
-  return noteUsed(intro(c, w, st, out));
+  return { state: intro(c, w, st, out), out };
 }
 
 /**
@@ -385,6 +535,9 @@ function applyOthers(
       const value = accept(item, o.value);
       // A value that doesn't look right isn't saved on the side: Tina asks the question later and checks it then.
       if (value === undefined || formatProblem(item, value)) continue;
+      // TTTFG-4830: a "no" read from the report is nearly always the absence of a mention ("stole my TV" -> "no phone
+      // stolen", "a break-in at midnight" -> "nobody home"). A wrong "no" goes to the insurer; a missed one costs a question.
+      if (rec.source === 'report' && item.answerType === 'yes/no' && value === false) continue;
       const record: AnswerRecord = { value, status: 'answered', at: rec.at, ...(rec.wamid ? { wamid: rec.wamid } : {}), source: rec.source };
       out.push({ kind: 'save-answer', key: item.key, record });
       w.answers[item.key] = record;
@@ -404,10 +557,11 @@ function applyOthers(
  */
 function applyCorrections(
   c: Ctx, w: Work, sapsRequired: boolean, corrections: readonly OtherAnswer[] | undefined, rec: { at: string; wamid?: string }, out: Out[], except?: string,
-): { changed: number; flagged: number } {
+): { changed: number; flagged: number; ownReading: boolean } {
   let changed = 0;
   let flagged = 0;
-  if (!corrections?.length) return { changed, flagged };
+  let ownReading = 0;
+  if (!corrections?.length) return { changed, flagged, ownReading: false };
   for (const k of corrections) {
     const prev = w.answers[k.key];
     if (k.key === except || isSaps(k.key) || !prev || prev.status === 'not-yet') continue;
@@ -426,6 +580,7 @@ function applyCorrections(
     out.push({ kind: 'save-answer', key: item.key, record });
     w.answers[item.key] = record;
     changed++;
+    if (prev.source === 'report') ownReading++;
     const more = /^(.+)\.more\.(\d+)$/.exec(item.key);
     if (more && value === false) {
       const [, group, n] = more;
@@ -440,7 +595,8 @@ function applyCorrections(
       }
     }
   }
-  return { changed, flagged };
+  // Every change was to Tina's own reading of the report: nothing the client said is being taken back.
+  return { changed, flagged, ownReading: changed > 0 && ownReading === changed };
 }
 
 // ---------------------------------------------------------------------------------------- TTTFG-5184: resuming
@@ -555,10 +711,12 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
   const at = c.now.toISOString();
   // TTTFG-4830: an earlier answer the client changed, then the other questions this message answered, are saved first,
   // so Tina neither carries on from a wrong answer nor asks for something she was just told.
-  const { changed: corrected, flagged } = input.kind === 'file'
-    ? { changed: 0, flagged: 0 }
+  const { changed: corrected, flagged, ownReading } = input.kind === 'file'
+    ? { changed: 0, flagged: 0, ownReading: false }
     : applyCorrections(c, w, st.sapsRequired, input.corrections, { at, wamid: input.wamid }, out, st.asking);
   const noted = input.kind === 'file' ? 0 : applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.asking);
+
+  if (st.phase === 'address') return { state: advanceAddress(c, w, st, input, out, at), out };
 
   if (st.phase === 'saps') {
     let caseNumber = input.kind === 'saps' ? input.caseNumber?.trim() || undefined : undefined;
@@ -598,7 +756,7 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
   const item = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === st.asking);
   if (!item || !applies(item, w.answers, w.facts)) {
     // The correction took away the question Tina was asking (no second car, so no second car's make): on to the next.
-    if (corrected) out.push({ kind: 'text', text: CORRECTED });
+    if (corrected) out.push({ kind: 'text', text: ownReading ? NOTED_OTHERS : CORRECTED });
     return { state: proceed(c, w, { ...st, misses: 0 }, out), out };
   }
 
@@ -651,8 +809,7 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
     }
   }
 
-  // "Not yet" passes over an evidence item or an optional question. A required question is never left on a guess:
-  // "I don't know" is a miss like any other, and the broker confirms it.
+  // "Not yet" passes over an evidence item or an optional question.
   if (input.kind === 'not-yet' && (item.kind === 'evidence' || !item.required)) {
     // Kept on the claim, so a later conversation doesn't ask an optional item again, and asks a required one as "yet?".
     const record: AnswerRecord = { value: null, status: 'not-yet', at, wamid: input.wamid };
@@ -661,10 +818,19 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
     return { state: proceed(c, w, { ...st, skipped: [...st.skipped, item.key] }, out), out };
   }
 
+  // A required question is never left on a guess, but "I don't know" (the thief's name) isn't a miss either: asking
+  // again would go in circles (TTTFG-4830). The broker confirms it with the client, and Tina says so.
+  if (input.kind === 'not-yet' && item.kind === 'question') {
+    const record: AnswerRecord = { value: null, status: 'broker-to-confirm', at, wamid: input.wamid };
+    out.push({ kind: 'save-answer', key: item.key, record }, { kind: 'text', text: BROKER_WILL_CHECK });
+    w.answers[item.key] = record;
+    return { state: proceed(c, w, st, out), out };
+  }
+
   // The message changed an earlier answer or answered other questions, but not this one: that isn't a miss. Say so and
   // ask it again as it was.
   if ((corrected || noted || flagged) && input.kind === 'unparsed') {
-    out.push({ kind: 'ask', item, simpler: false, lead: corrected ? CORRECTED : noted ? NOTED_OTHERS : undefined });
+    out.push({ kind: 'ask', item, simpler: false, lead: corrected ? (ownReading ? NOTED_OTHERS : CORRECTED) : noted ? NOTED_OTHERS : undefined });
     return { state: st, out };
   }
 
@@ -842,6 +1008,12 @@ export async function followOnTurn(
       case 'evidence-complete':
         await ports.setEvidenceComplete(claimId);
         await action(`All required items are in for claim ${claim.reference} (evidence complete).`);
+        break;
+      case 'follow-up':
+        await ports.createAgentAction({
+          kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId,
+          detail: o.detail, at,
+        });
         break;
     }
   }

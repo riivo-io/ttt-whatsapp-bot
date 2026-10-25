@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit 2ec679b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830: answers that don't look right. A phone number with a digit too many, an email address without its "@" or
 // an ID number with a wrong check digit is almost always a typo, and on a claim form it means the insurer can't reach a

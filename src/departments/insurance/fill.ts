@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 2ec679b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: fill an insurer's claim form from its field map (TTTFG-5172), the client's answers (riivo_answers,
 // TTTFG-5176) and the CRM rows. Pure: PDF bytes, config and values in; filled PDF bytes and the blank boxes out.
@@ -145,6 +145,8 @@ export function resolveSource(source: string, form: ClaimForm, answers: ClaimAns
     return readAnswer(answers, key);
   }
   if (source.startsWith('crm:')) return readCrm(crm, source);
+  // TTTFG-4830: a value that is the same on every claim of this form (its reason says why), e.g. "Natural person".
+  if (source.startsWith('fixed:')) return { value: source.slice('fixed:'.length) };
   return { notApplicable: true }; // 'none': office use, signature, broker section
 }
 
@@ -187,6 +189,9 @@ function parts(v: CrmValue): { date?: string; time?: string } | null {
   const s = v.trim();
   const d = DATE_ONLY.exec(s);
   if (d) return { date: `${d[3]}/${d[2]}/${d[1]}` };
+  // TTTFG-4830: a month and year ("when did you buy it?") prints as mm/yyyy.
+  const m = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(s);
+  if (m) return { date: `${m[2]}/${m[1]}` };
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return { date: s };
   const t = /^(\d{1,2}):(\d{2})(:\d{2})?$/.exec(s);
   if (t && +t[1] < 24 && +t[2] < 60) return { time: `${pad(+t[1])}:${t[2]}` };

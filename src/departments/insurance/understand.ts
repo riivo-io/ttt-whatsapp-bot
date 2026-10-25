@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 2ec679b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Claude reads one WhatsApp message from the client and says what it means for the step Tina is on. Code
 // decides what happens next (walkthrough.ts). This is the "use Claude only to understand each answer" half of the
@@ -90,7 +90,9 @@ Rules:
   24:00; "midnight" on its own: 24:00). A rough time or range is a time too: "after 10pm" is 22:00, "between 1 and
   3am" is 01:00. Leave incidentTime null when the client gave no time ("last night" or "in the evening" is not a
   time).
-- place: where it happened, as the client said it.
+- place: where it happened, as the client said it. When they give an address, write it as an address is written on
+  a form, without filler words: "my home 8 kingsbury park road rondebosch" is "8 Kingsbury Park Road, Rondebosch
+  (home)". Never add a word they didn't give.
 - thirdPartyDetails and injuryDetails: the details as the client gave them.
 - If the message doesn't answer the question, or you can't tell, use kind "unclear".
 - wrongFields is empty unless kind is "correct".
