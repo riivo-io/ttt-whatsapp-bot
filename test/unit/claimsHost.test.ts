@@ -160,3 +160,17 @@ test('TTTFG-5168: switched off, or no request could be opened: Tina answers as b
     assert.deepEqual(await claimFromClient(noReq.deps, PHONE, JANE, 'I need to claim, my car was hit', NOW), { handled: false });
     assert.equal(noReq.sent.length, 0);
 });
+
+test('TTTFG-4830: a short opening ("Hi, my phone was stolen") is kept as a hint, so the questions are for a stolen phone', async () => {
+    const { withOpeningFacts } = await import('../../src/domain/claimsHost');
+    const { question } = await import('../../src/departments/insurance/claim');
+    const { missingFor } = await import('../../src/departments/insurance/walkthrough');
+    const model = async () => ({ ...blank, kind: 'facts', claimType: 'Portable possessions', description: 'my phone was stolen' });
+    const start = { contactId: 'c', firstName: 'Jane', policies: [DISCOVERY], policyId: 'p1', step: 'incident' as const, facts: {} };
+    const s = await withOpeningFacts(model as never, start, 'Hi, my phone was stolen', NOW);
+    assert.equal(s.facts.description, undefined); // still asked for the whole story
+    assert.equal(s.opening, 'my phone was stolen');
+    const q = question('incident', missingFor('incident', s.facts), s);
+    assert.match(q, /what was taken/);
+    assert.doesNotMatch(q, /lost/);
+});

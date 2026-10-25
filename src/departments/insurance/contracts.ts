@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -95,6 +95,8 @@ export type FieldTarget = z.infer<typeof FieldTargetSchema>;
 export const FieldSourceSchema = z.union([
   z.string().regex(/^crm:[a-z_]+\.[a-z0-9_]+$/),
   z.string().regex(/^answer:[A-Za-z0-9_.-]+$/),
+  /** TTTFG-4830: the same value on every claim of the form; the entry's `reason` says why ("Natural person"). */
+  z.string().regex(/^fixed:.+$/),
   z.literal('none'),
 ]);
 export type FieldSource = z.infer<typeof FieldSourceSchema>;

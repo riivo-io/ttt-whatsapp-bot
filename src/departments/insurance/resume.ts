@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -75,6 +75,8 @@ export interface ResumeMessage {
   chosenClaim?: string | number;
   /** Claude, for "is this a new claim?": the client's yes or no. */
   yesNo?: boolean;
+  /** TTTFG-4830, Claude: the client said in so many words that this is a new claim ("I'd like to open a new claim"). */
+  newClaim?: true;
   /** Claude, for a file: the missing item it is (an item key from the claim's missing list). */
   forItem?: string;
   /**
@@ -147,7 +149,7 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
 
   if (p?.kind === 'new-claim') {
     const held = [...p.held, ...files];
-    if (message.yesNo === true) return { kind: 'start-new', held, facts: p.facts };
+    if (message.yesNo === true || message.newClaim) return { kind: 'start-new', held, facts: p.facts };
     if (message.yesNo === false) {
       const back = p.back && claims.find((c) => c.id === p.back!.claimId);
       return back ? { kind: 'back', claimId: back.id, files: held, followOn: p.back! } : resumeOrAsk(held, 'Thanks.');
@@ -163,6 +165,7 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
       : typeof message.chosenClaim === 'string' ? asked.find((c) => c.id === message.chosenClaim)
       : undefined;
     if (chosen) return { kind: 'resume', claimId: chosen.id, files: held, lead: 'Welcome back.' };
+    if (message.newClaim) return { kind: 'start-new', held, facts: message.facts };
     if (message.differentIncident) return { kind: 'ask-new', held, facts: message.facts, ask: 'first' };
     // A claim closed while the question was out: the one left, or ask again about the claims open now.
     if (asked.length === 1) return { kind: 'resume', claimId: asked[0].id, files: held, lead: 'Welcome back.' };
@@ -175,6 +178,8 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
   const last = current?.lastClientMessageOn ? Date.parse(current.lastClientMessageOn) : now.getTime();
   const fresh = !!current && now.getTime() - last < resumeAfterHours * HOUR;
 
+  // TTTFG-4830: the client already said it's a new claim, so it isn't asked.
+  if (message.newClaim) return { kind: 'start-new', held: files, facts: message.facts };
   if (message.differentIncident) return { kind: 'ask-new', held: files, facts: message.facts, back: fresh ? f! : undefined, ask: 'first' };
 
   if (current) {

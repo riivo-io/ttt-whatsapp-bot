@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -62,6 +62,17 @@ export interface WalkthroughState {
   policyId?: string;
   step: Step;
   facts: Facts;
+  /**
+   * TTTFG-4830: how often each question has been asked (by askedKey), so Tina never sends the same words twice: the
+   * second time is worded differently, with an example. The date and time count as one question.
+   */
+  asked?: Record<string, number>;
+  /**
+   * TTTFG-4830: the client's first words about it when too short to keep as the description ("Hi, my phone was
+   * stolen"). Never sent to the CRM; read only to tell what kind of claim it is (isTheft), so Tina words her questions
+   * for a stolen phone while she still asks for the whole story.
+   */
+  opening?: string;
 }
 
 /** What Claude understood from the client's message. Code decides what happens next. */
@@ -79,7 +90,8 @@ export type Answer =
 /** Something Tina says. 'ask' is a question Claude may phrase; the rest are fixed text. */
 export type Say =
   /** `correcting`: the client said the summary is wrong; ask for the right value(s) instead of reading it again. */
-  | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true }
+  /** `tries`: how often each question in it was asked before this time (askedKey); absent or 0 is the first time. */
+  | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true; tries?: Record<string, number> }
   | { kind: 'assist'; insurer: string; number: string }
   /** The insurer has no assist number on file: the general emergency number. */
   | { kind: 'emergency' }
@@ -137,13 +149,47 @@ function nextFactStep(f: Facts): Step {
 
 const ask = (step: Step, f: Facts): Say => ({ kind: 'ask', step, missing: missingFor(step, f) });
 
-function merge(f: Facts, more: Facts): Facts {
+/**
+ * The question a fact belongs to. The date and time asked together are "when"; asked for on their own, after part of
+ * "when" came back, they count on from it ("Thanks. Roughly what time was that?", never "At roughly what time…" again).
+ */
+export const askedKey = (f: Fact): string => (f === 'incidentAt' ? 'when' : f === 'incidentTime' ? 'when-time' : f === 'incidentDate' ? 'when-date' : f);
+
+/** TTTFG-4830: an ask, with how often each of its questions was asked before; the state counts this time. */
+function counted(state: WalkthroughState, say: Say): { state: WalkthroughState; say: Say } {
+  if (say.kind !== 'ask' || say.correcting) return { state, say };
+  const keys = say.missing.length ? [...new Set(say.missing.map(askedKey))] : [say.step];
+  // The summary is "the same question" only while it says the same: after a correction it's read out in full again.
+  const counter = (k: string) => (k === 'summary' ? `summary:${JSON.stringify(state.facts)}` : k);
+  const asked = { ...(state.asked ?? {}) };
+  const after = (k: string) => ((k === 'when-time' || k === 'when-date') && (asked.when ?? 0) > 0 ? 1 : 0);
+  const tries = Object.fromEntries(keys.map((k) => [k, (asked[counter(k)] ?? 0) + after(k)]));
+  for (const k of keys) asked[counter(k)] = (asked[counter(k)] ?? 0) + 1;
+  return { state: { ...state, asked }, say: { ...say, tries } };
+}
+
+/** TTTFG-4830: words that say something was stolen (with the claim type, isTheft decides). */
+const THEFT_WORDS = /\b(stole|stolen|steal|theft|thief|thieves|burglar|burglary|broke in|broke into|broken into|break[- ]?in|robbed|robbery|hijack|mugged|pickpocket|snatched|grabbed|took|taken)/i;
+
+/**
+ * TTTFG-4830: a theft, break-in or hijacking. Someone else is always involved, so Tina doesn't ask whether anyone else
+ * was ("for example another driver" makes no sense after a break-in); she asks what the client knows about who did it,
+ * and whether it was reported to the police.
+ */
+export function isTheft(f: Facts, opening?: string): boolean {
+  if (f.claimType === 'Motor theft' || f.claimType === 'Hijacking') return true;
+  return !!f.claimType && ['Property loss or damage', 'Portable possessions', 'Other'].includes(f.claimType)
+    && THEFT_WORDS.test(`${f.description ?? ''} ${opening ?? ''}`);
+}
+
+function merge(f: Facts, more: Facts, opening?: string): Facts {
   const out: Facts = { ...f };
   for (const [k, v] of Object.entries(more) as [Fact, Facts[Fact]][]) {
     if (v === undefined || v === '') continue;
     (out as Record<Fact, unknown>)[k] = typeof v === 'string' ? v.trim() : v;
   }
   if (out.claimType && !CLAIM_TYPES.includes(out.claimType)) delete out.claimType;
+  if (isTheft(out, opening)) out.thirdParties = true;
   // A no clears the details that only a yes needs.
   if (out.thirdParties === false) delete out.thirdPartyDetails;
   if (out.injuries === false) delete out.injuryDetails;
@@ -153,7 +199,17 @@ function merge(f: Facts, more: Facts): Facts {
 
 const SAST = '+02:00'; // South Africa has no daylight saving.
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
-const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+const TIME = /^(([01]\d|2[0-3]):[0-5]\d|24:00)$/;
+
+/**
+ * A South African date and time as an ISO instant. TTTFG-4830: "24:00" is midnight at the end of that date (Claude
+ * writes "yesterday at midnight" as yesterday 24:00), so it becomes 00:00 the next day: the night the client meant.
+ */
+export function sastInstant(date: string, time: string): string {
+  if (time !== '24:00') return `${date}T${time}:00${SAST}`;
+  const next = new Date(Date.parse(`${date}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+  return `${next}T00:00:00${SAST}`;
+}
 
 /** Joins a date and a time given in different messages into incidentAt. A new date alone keeps the time already on
  *  file, and the other way round ("no, it was the 2nd"). A whole incidentAt in `more` wins. */
@@ -167,7 +223,7 @@ function joinWhen(out: Facts, more: Facts): void {
   const date = out.incidentDate ?? prev?.date;
   const time = out.incidentTime ?? prev?.time;
   if (date && DAY.test(date) && time && TIME.test(time)) {
-    out.incidentAt = `${date}T${time}:00${SAST}`;
+    out.incidentAt = sastInstant(date, time);
     delete out.incidentDate;
     delete out.incidentTime;
   }
@@ -193,14 +249,15 @@ export function start(contact: { id: string; firstName: string } | null, policie
       effects: [{ kind: 'follow-up', to: 'team', reason: 'no-active-policy' }],
     };
   }
-  const state: WalkthroughState = { contactId: contact.id, firstName: contact.firstName, policies, step: 'policy', facts: merge({}, known) };
-  return { state, say: [ask('policy', {})], effects: [] };
+  const first = counted({ contactId: contact.id, firstName: contact.firstName, policies, step: 'policy', facts: merge({}, known) }, ask('policy', {}));
+  return { state: first.state, say: [first.say], effects: [] };
 }
 
 /** One client message. */
 export function advance(state: WalkthroughState, answer: Answer): Turn {
-  const same = (): Turn => ({ state, say: [ask(state.step, state.facts)], effects: [] });
-  const goTo = (s: WalkthroughState): Turn => ({ state: s, say: [ask(s.step, s.facts)], effects: [] });
+  const askIn = (s: WalkthroughState): Turn => { const c = counted(s, ask(s.step, s.facts)); return { state: c.state, say: [c.say], effects: [] }; };
+  const same = (): Turn => askIn(state);
+  const goTo = (s: WalkthroughState): Turn => askIn(s);
 
   switch (state.step) {
     case 'policy': {
@@ -241,14 +298,14 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     case 'incident':
     case 'parties': {
       if (answer.kind !== 'facts') return same();
-      const facts = merge(state.facts, answer.facts);
+      const facts = merge(state.facts, answer.facts, state.opening);
       return goTo({ ...state, facts, step: nextFactStep(facts) });
     }
 
     case 'summary': {
       if (answer.kind === 'confirm') return { state: null, say: [], effects: [{ kind: 'open-claim' }] };
       if (answer.kind === 'correct' || answer.kind === 'facts') {
-        const facts = merge(state.facts, answer.facts);
+        const facts = merge(state.facts, answer.facts, state.opening);
         const step = nextFactStep(facts);
         // Only a value that differs from what is on file is a correction. The model may repeat known values alongside
         // "the date is wrong" (seen 21 Oct 2026); that is not a new date, so Tina asks for it.

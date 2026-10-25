@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill-dataverse.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill-dataverse.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the fill's ports (signature-fill.ts ClaimFillPorts) against Dataverse, in the style of TTTFG-5176's
 // followon-dataverse.ts: the host passes its Dataverse call (`Dv`), where the filled form goes (the client's SharePoint
@@ -17,6 +17,7 @@ import { CLAIM_FORM_UNSIGNED, signingStepNotAvailable, type ClaimFillPorts, type
 import type { ClaimAnswers } from './contracts';
 import type { Dv } from './dataverse';
 import type { CrmValues } from './fill';
+import { ADDRESS_KEY } from './followon';
 import { CLAIM_TYPE_VALUES, dataverseFollowOnPorts } from './followon-dataverse';
 import type { ClaimType } from './walkthrough';
 
@@ -140,8 +141,11 @@ export function dataverseFillPorts(o: FillDataverseOptions): ClaimFillPorts {
         ? await dv<{ riivo_policynumber: string | null; riivo_policy_no: string | null; riivo_broker: string | null }>('GET',
           `riivo_policies(${guid(claim.policyId)})?$select=riivo_policynumber,riivo_policy_no,riivo_broker`)
         : null;
+      // TTTFG-4830: an address the client confirmed on WhatsApp is the one on the form; the broker updates the CRM.
+      const confirmed = claim.answers[ADDRESS_KEY];
+      const address = confirmed?.status === 'answered' && typeof confirmed.value === 'string' ? confirmed.value : null;
       return {
-        contact: Object.fromEntries(CONTACT_SELECT.split(',').map((k) => [k, contact[k] ?? null])),
+        contact: { ...Object.fromEntries(CONTACT_SELECT.split(',').map((k) => [k, contact[k] ?? null])), ...(address ? { address1_composite: address } : {}) },
         riivo_policy: policy ? { riivo_policy_no: policy.riivo_policynumber || policy.riivo_policy_no, riivo_broker: policy.riivo_broker } : {},
         riivo_provider: { riivo_providername: claim.insurer },
         riivo_claim: {

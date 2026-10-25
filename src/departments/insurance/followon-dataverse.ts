@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the follow-on's ports (followon.ts FollowOnPorts) against Dataverse, in the style of TTTFG-5168's
 // dataverse.ts: the host passes its Dataverse call (`Dv`), its WhatsApp send and where files go, so this file runs
@@ -85,7 +85,7 @@ interface ClaimRow {
   _riivo_claimform_value: string | null;
   _riivo_contact_value: string | null;
   riivo_Provider: { riivo_providerid: string; riivo_providername?: string } | null;
-  riivo_Contact: { fullname?: string } | null;
+  riivo_Contact: { fullname?: string; address1_composite?: string | null } | null;
   owninguser: { systemuserid: string; firstname?: string; fullname?: string } | null;
   owningteam: { teamid: string; name: string } | null;
 }
@@ -175,7 +175,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
   return {
     async loadClaim(claimId) {
       const r = await dv<ClaimRow>('GET', `riivo_claims(${guid(claimId)})?$select=${CLAIM_SELECT}`
-        + '&$expand=riivo_Provider($select=riivo_providerid,riivo_providername),riivo_Contact($select=fullname),'
+        + '&$expand=riivo_Provider($select=riivo_providerid,riivo_providername),riivo_Contact($select=fullname,address1_composite),'
         + 'owninguser($select=systemuserid,firstname,fullname),owningteam($select=teamid,name)');
       const docs = await dv<{ value: { riivo_claimitem: string | null }[] }>('GET',
         `riivo_clientdocuments?$select=riivo_claimitem&$filter=_riivo_claim_value eq ${guid(claimId)} and riivo_claimitem ne null`);
@@ -208,6 +208,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
         answers: r.riivo_answers ? (JSON.parse(r.riivo_answers) as ClaimAnswers) : {},
         evidence: docs.value.map((d) => ({ key: d.riivo_claimitem! })),
         owner: ownerOf(r),
+        contactAddress: r.riivo_Contact?.address1_composite?.trim() || null,
       };
       return claim;
     },

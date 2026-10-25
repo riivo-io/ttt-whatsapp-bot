@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5172: claim form configs and their validator (TTTFG-5251 steps 5 and 9).
 //
@@ -288,6 +288,10 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
       if (!e.reason) err(`${where}: source "none" needs a reason (office use, signature, broker section, ...)`);
     } else if (e.source.startsWith('crm:')) {
       if (!crmOk(e.source)) err(`${where}: "${e.source}" is not a CRM column`);
+    } else if (e.source.startsWith('fixed:')) {
+      // TTTFG-4830: the same value on every claim; the reason says why it is always true.
+      if (!e.reason) err(`${where}: source "fixed:" needs a reason (why the value is the same on every claim)`);
+      if (e.source === 'fixed:') err(`${where}: source "fixed:" needs a value`);
     } else {
       const ref = answerRef(e.source)!;
       // A grouped key needs an entry number (answer:item.2); a plain key must not have one.

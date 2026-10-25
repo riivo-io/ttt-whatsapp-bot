@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Claude reads one WhatsApp message from the client and says what it means for the step Tina is on. Code
 // decides what happens next (walkthrough.ts). This is the "use Claude only to understand each answer" half of the
@@ -12,7 +12,7 @@
 // Anything that doesn't fit becomes { kind: 'unclear' }, and Tina asks the same question again.
 //
 // Pure, apart from the model port. No zod: the host (the email agent or Tina) may pin a different zod major.
-import { CLAIM_TYPES, sastParts, type Answer, type ClaimType, type Fact, type Facts, type Step, type WalkthroughState } from './walkthrough';
+import { CLAIM_TYPES, isTheft, sastInstant, sastParts, type Answer, type ClaimType, type Fact, type Facts, type Step, type WalkthroughState } from './walkthrough';
 
 /** The model call. The host implements it with structured output (or a forced tool call) against UNDERSTAND_SCHEMA. */
 export type UnderstandModel = (req: { system: string; user: string; schema: typeof UNDERSTAND_SCHEMA }) => Promise<unknown>;
@@ -62,23 +62,37 @@ const STEP_HELP: Record<Step, string> = {
     + '"correct" when they say something is wrong: list the wrong fields in wrongFields and set any new values they gave.',
 };
 
+/** TTTFG-4830: the parties step after a theft, break-in or hijacking (claim.ts asks it differently). */
+const THEFT_PARTIES_HELP = 'Tina asked what the client knows about who did it (a name, a description, or anyone who saw it), whether it '
+  + 'was reported to the police (SAPS) and whether anyone was injured. Use kind "facts". Put what they know about who did it '
+  + 'or who saw it in thirdPartyDetails, in their words; "nothing", "no idea" or "nobody saw" is an answer: thirdPartyDetails '
+  + '"Nothing known". saps is true when they reported it to the police.';
+
 export function understandPrompt(state: WalkthroughState, lastQuestion: string, text: string, now: Date): { system: string; user: string } {
   const today = sastParts(now.toISOString());
   const policies = state.policies.map((p, i) => `${i + 1}. ${p.insurer} ${p.product}`).join('\n');
   const known = Object.entries(state.facts).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => `${k}: ${v}`).join('\n') || 'nothing yet';
+  const help = state.step === 'parties' && isTheft(state.facts, state.opening) ? THEFT_PARTIES_HELP : STEP_HELP[state.step];
   const system = `You read one WhatsApp message from a client of TTT Financial Group, a South African insurance broker. The client
 is reporting a short-term insurance claim to Tina, TTT's assistant. Say what the message means for the question Tina
 asked, by filling the JSON shape.
 
-${STEP_HELP[state.step]}
+${help}
 
 Rules:
 - Only set a field the client actually gave in this message. Never guess, infer or fill in a default. Leave it null.
 - already_known is context only. Never copy a value from it into your answer.
-- description: what happened, in the client's own words, copied rather than summarised.
+- description: what happened, in the client's own words, copied rather than summarised. A short statement is a
+  description too: "my phone was stolen" or "someone hit my car" (without greetings like "Hi").
 - incidentDate: YYYY-MM-DD. incidentTime: HH:MM, 24-hour. Both South African time. Work out "yesterday" or "on Saturday"
-  from today's date. Leave incidentTime null when the client gave no time ("last night" is not a time).
-- place: where it happened, as the client said it.
+  from today's date. A clock word is a time, with "around" or "about" too: noon or midday is 12:00, "around 11pm" is
+  23:00, and midnight is 24:00 on the day whose night it was ("yesterday at around midnight": yesterday's date and
+  24:00; "midnight" on its own: 24:00). A rough time or range is a time too: "after 10pm" is 22:00, "between 1 and
+  3am" is 01:00. Leave incidentTime null when the client gave no time ("last night" or "in the evening" is not a
+  time).
+- place: where it happened, as the client said it. When they give an address, write it as an address is written on
+  a form, without filler words: "my home 8 kingsbury park road rondebosch" is "8 Kingsbury Park Road, Rondebosch
+  (home)". Never add a word they didn't give.
 - thirdPartyDetails and injuryDetails: the details as the client gave them.
 - If the message doesn't answer the question, or you can't tell, use kind "unclear".
 - wrongFields is empty unless kind is "correct".
@@ -117,6 +131,8 @@ export function toAnswer(raw: unknown, state: WalkthroughState, now: Date): Answ
     case 'parties': {
       // A bare yes or no answers the yes/no question Tina asked last (third parties, SAPS or injuries).
       if ((kind === 'yes' || kind === 'no') && state.step === 'parties') {
+        // After a theft Tina's question starts with what they know about who did it: a bare yes or no can't be placed.
+        if (isTheft(state.facts, state.opening) && !state.facts.thirdPartyDetails) return Object.keys(facts).length ? { kind: 'facts', facts } : { kind: 'unclear' };
         const ask = yesNoAsked(state.facts);
         return ask ? { kind: 'facts', facts: { ...facts, [ask]: kind === 'yes' } } : { kind: 'unclear' };
       }
@@ -157,9 +173,9 @@ function factsOf(r: Raw, now: Date): Facts {
   const time = str(r.incidentTime);
   if (date) f.incidentDate = date;
   // A time that came with a date code rejected belongs to that wrong date: drop both, Tina asks again.
-  if (time && /^([01]\d|2[0-3]):[0-5]\d$/.test(time) && (date || !str(r.incidentDate))) f.incidentTime = time;
+  if (time && /^(([01]\d|2[0-3]):[0-5]\d|24:00)$/.test(time) && (date || !str(r.incidentDate))) f.incidentTime = time;
   // A date and time together that lie in the future are dropped together: Tina asks again.
-  if (f.incidentDate && f.incidentTime && new Date(`${f.incidentDate}T${f.incidentTime}:00+02:00`).getTime() > now.getTime() + 5 * 60_000) {
+  if (f.incidentDate && f.incidentTime && Date.parse(sastInstant(f.incidentDate, f.incidentTime)) > now.getTime() + 5 * 60_000) {
     delete f.incidentDate;
     delete f.incidentTime;
   }

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 5bddb94). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -9,7 +9,7 @@
 // into Tina (epic TTTFG-4830).
 import { claimGate } from './gate';
 import {
-  advance, complete, start,
+  advance, askedKey, complete, isTheft, sastParts, start,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
 } from './walkthrough';
 
@@ -118,35 +118,197 @@ const FACT_QUESTIONS: Record<Fact, string> = {
   incidentDate: 'On what date did it happen?',
   incidentTime: 'At roughly what time did it happen?',
   place: 'Where did it happen?',
-  thirdParties: 'Was anyone else involved, for example another driver?',
-  thirdPartyDetails: 'Please send me their details, for example their name, number or vehicle registration.',
+  thirdParties: 'Was anyone else involved?',
+  thirdPartyDetails: 'Please send me their details, for example their name and phone number.',
   saps: 'Were the police (SAPS) involved?',
   injuries: 'Was anyone injured?',
   injuryDetails: 'I am sorry to hear that. Who was hurt, and what happened to them?',
 };
 
+/** TTTFG-4830: the kinds of claim Tina words her questions for. */
+export type ClaimKind = 'motor' | 'windscreen' | 'motor-theft' | 'hijacking' | 'home' | 'home-theft' | 'lost-item' | 'stolen-item' | 'other';
+
+export function claimKind(f: Facts, opening?: string): ClaimKind {
+  switch (f.claimType) {
+    case 'Motor accident': return 'motor';
+    case 'Windscreen': return 'windscreen';
+    case 'Motor theft': return 'motor-theft';
+    case 'Hijacking': return 'hijacking';
+    case 'Property loss or damage': return isTheft(f, opening) ? 'home-theft' : 'home';
+    case 'Portable possessions': return isTheft(f, opening) ? 'stolen-item' : 'lost-item';
+    default: return isTheft(f, opening) ? 'home-theft' : 'other';
+  }
+}
+
+const THEFT_DETAILS = 'What do you know about who did it? For example a name, what they looked like, or anyone who saw it. Say "nothing" if you don\'t know.';
+const REPORTED = 'Have you reported it to the police (SAPS)?';
+const WHEN_THEFT = 'On what date and at roughly what time did it happen? If you only noticed later, when did you notice?';
+
+/**
+ * TTTFG-4830: each question in words that fit the claim. "For example another driver" after a break-in, or "where did
+ * it happen" for a burst geyser, reads as if Tina wasn't listening. Anything not listed uses FACT_QUESTIONS.
+ */
+const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
+  motor: {
+    description: 'Please tell me in your own words what happened, for example how the cars hit each other.',
+    place: 'Where did it happen? For example the street and suburb, or the road and the nearest exit.',
+    thirdParties: 'Was anyone else involved, for example another driver?',
+    thirdPartyDetails: 'Please send me their details, for example their name, phone number and vehicle registration.',
+  },
+  windscreen: {
+    description: 'What happened to the glass? For example a stone hit the windscreen on the highway.',
+    place: 'Where did it happen? For example the road you were on.',
+    thirdParties: 'Was another vehicle involved, for example a truck that threw up a stone?',
+    thirdPartyDetails: 'Do you have any of their details, for example the vehicle registration or the company name?',
+  },
+  'motor-theft': {
+    description: 'Please tell me in your own words what happened, for example where the car was parked and when you noticed it was gone.',
+    incidentAt: WHEN_THEFT,
+    place: 'Where was the car when it was taken?',
+    thirdPartyDetails: THEFT_DETAILS,
+    saps: REPORTED,
+  },
+  hijacking: {
+    description: "I'm sorry this happened to you. Please tell me in your own words what happened.",
+    place: 'Where were you when it happened?',
+    thirdPartyDetails: 'What do you know about the people who did it? For example how many there were, what they looked like, or their vehicle. Say "nothing" if you don\'t know.',
+    saps: REPORTED,
+    injuries: 'Was anyone hurt?',
+  },
+  home: {
+    description: 'Please tell me in your own words what happened and what was damaged.',
+    place: 'What is the address of the property?',
+    thirdParties: 'Was anyone else involved, or did someone else cause it? For example a contractor or a neighbour.',
+  },
+  'home-theft': {
+    description: 'Please tell me in your own words what happened: how they got in and what was taken.',
+    incidentAt: WHEN_THEFT,
+    place: 'What is the address of the property?',
+    thirdPartyDetails: THEFT_DETAILS,
+    saps: REPORTED,
+  },
+  'lost-item': {
+    description: 'Please tell me in your own words what happened and what was lost.',
+    incidentAt: 'On what date and at roughly what time did you last have it?',
+    place: 'Where were you when you lost it?',
+    saps: 'Have you reported the loss to the police (SAPS)?',
+  },
+  'stolen-item': {
+    description: 'Please tell me in your own words what happened and what was taken.',
+    incidentAt: WHEN_THEFT,
+    place: 'Where were you when it was taken?',
+    thirdPartyDetails: THEFT_DETAILS,
+    saps: REPORTED,
+  },
+  other: {},
+};
+
+const EXAMPLE_TIME = 'Your best estimate is fine, for example "about 11pm" or "around 6 in the morning".';
+
+const lowerFirst = (t: string) => t.charAt(0).toLowerCase() + t.slice(1);
+
+/**
+ * TTTFG-4830: the question again, never in the same words. `n`: how often it was asked before (1 = second time). Three
+ * other wordings each, in turn: the first adds an example, the next ones ask for less ("what's the closest you can
+ * say"), so a client stuck on a question gets a different way in each time.
+ */
+function askedAgain(fact: Fact, f: Facts, n: number, opening?: string): string {
+  const base = BY_KIND[claimKind(f, opening)][fact] ?? FACT_QUESTIONS[fact];
+  const yesNo = [`${base} Please just answer yes or no.`, `Sorry, I didn't catch that. ${base} Yes or no?`, `Just a yes or a no, please: ${lowerFirst(base)}`];
+  const ways: Record<Fact, string[]> = {
+    incidentTime: [
+      `Thanks. Roughly what time was that? ${EXAMPLE_TIME}`,
+      'What\'s the closest you can say, for example "after 10pm" or "between 1 and 3am"? A rough time is enough: your broker will confirm it with you.',
+      'Was it in the morning, the afternoon, the evening or at night, and roughly what time? For example "evening, around 7".',
+    ],
+    incidentDate: [
+      'Thanks. And on what date was that? For example "yesterday" or "Saturday the 18th".',
+      'Which day was it? For example "last Friday" or "the 18th".',
+      'Roughly which day was it? For example "last Monday".',
+    ],
+    incidentAt: [
+      `On what date did it happen, and roughly what time? ${EXAMPLE_TIME}`,
+      'When did it happen? The day and a rough time is all I need, for example "Friday night, after 10pm".',
+      'Which day was it, and was it in the morning, the afternoon, the evening or at night?',
+    ],
+    place: [`${base} An address, a street and suburb, or a place like a shopping centre is fine.`, 'Where was it? A street, a suburb or a landmark is fine.', 'Which suburb or town was it in?'],
+    description: [
+      'Could you tell me a bit more about what happened, in a sentence or two?',
+      'In a sentence or two, what happened?',
+      'A short answer is fine, for example "my phone was taken from my bag at the mall". What happened?',
+    ],
+    claimType: [
+      'Which of these is closest: a car accident, a stolen car, a hijacking, a windscreen, damage or loss at home, or something you carry with you that was lost or stolen?',
+      'Is the claim about your car, your home, or something you carry with you?',
+      'In a few words, what is the claim for? For example "my car was hit" or "my phone was stolen".',
+    ],
+    thirdParties: yesNo,
+    saps: yesNo,
+    injuries: yesNo,
+    thirdPartyDetails: [
+      `${base.replace(/^Please send me/, 'Could you send me')}${/nothing/.test(base) ? '' : ' Even a little helps.'}`,
+      'Anything you know helps, for example a name, a phone number or a description. If you know nothing, just say "nothing".',
+      'What do you know about them? A few words is fine, or "nothing".',
+    ],
+    injuryDetails: ['Who was hurt, and how? A short description is fine.', 'Who was hurt? For example "my passenger, a cut on the arm".', 'In a few words, who was hurt and how badly?'],
+  };
+  return ways[fact][(n - 1) % 3];
+}
+
+/** One question, in words for this claim; asked before (`n` > 0): in other words. */
+function factQuestion(fact: Fact, f: Facts, n = 0, opening?: string): string {
+  return n > 0 ? askedAgain(fact, f, n, opening) : BY_KIND[claimKind(f, opening)][fact] ?? FACT_QUESTIONS[fact];
+}
+
 const yesNo = (b: boolean | undefined) => (b ? 'Yes' : 'No');
-const when = (iso: string) =>
-  new Date(iso).toLocaleString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const when = (iso: string) => {
+  const t = Date.parse(iso);
+  const day = (ms: number, o: Intl.DateTimeFormatOptions) => new Date(ms).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', ...o });
+  // TTTFG-4830: midnight said plainly, so the client can see which night was recorded.
+  if (sastParts(iso).time === '00:00') {
+    const before = t - 60_000;
+    const sameMonth = day(before, { month: 'long' }) === day(t, { month: 'long' });
+    return `the night of ${day(before, sameMonth ? { day: 'numeric' } : { day: 'numeric', month: 'long' })} to ${day(t, { day: 'numeric', month: 'long', year: 'numeric' })}, at midnight`;
+  }
+  return new Date(t).toLocaleString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
 
 const describe = (p: Policy) => `${p.insurer} ${p.product} policy (${p.policyNumber})`;
 
-/** Default wording for a question. Plain and short; Claude may phrase it instead (never for the fixed messages). */
-export function question(step: Step, missing: Fact[], state: WalkthroughState, correcting = false): string {
+/**
+ * Default wording for a question. Plain and short; Claude may phrase it instead (never for the fixed messages).
+ * `tries` (TTTFG-4830): how often each question was asked before, so a second ask is never the same words.
+ */
+export function question(step: Step, missing: Fact[], state: WalkthroughState, correcting = false, tries: Record<string, number> = {}): string {
   if (correcting) {
-    return missing.length ? `What should it be? ${missing.map((f) => FACT_QUESTIONS[f]).join(' ')}` : 'Sorry about that. What should I change?';
+    return missing.length ? `What should it be? ${missing.map((f) => factQuestion(f, state.facts, 0, state.opening)).join(' ')}` : 'Sorry about that. What should I change?';
   }
+  const again = tries[step] ?? 0;
   switch (step) {
-    case 'policy':
-      return state.policies.length === 1
-        ? `Is this claim about your ${describe(state.policies[0])}?`
-        : `Which policy is this claim about?\n${state.policies.map((p, i) => `${i + 1}. ${describe(p)}`).join('\n')}`;
+    case 'policy': {
+      const list = state.policies.map((p, i) => `${i + 1}. ${describe(p)}`).join('\n');
+      const one = state.policies.length === 1 ? describe(state.policies[0]) : '';
+      if (one) {
+        return [`Is this claim about your ${one}?`, `Sorry, I just need to check: is this claim about your ${one}? Please answer yes or no.`,
+          `Is it your ${one}? Yes or no?`][again ? ((again - 1) % 2) + 1 : 0];
+      }
+      return [`Which policy is this claim about?\n${list}`, `Which one is it? Please reply with its number:\n${list}`,
+        `Please reply with 1${state.policies.length > 1 ? `, 2${state.policies.length > 2 ? ' or another number' : ''}` : ''}:\n${list}`][again ? ((again - 1) % 2) + 1 : 0];
+    }
     case 'danger':
-      return 'First, is anyone hurt or in danger right now?';
+      return ['First, is anyone hurt or in danger right now?', 'Sorry, I need to check this first: is anyone hurt or in danger right now? Please answer yes or no.',
+        'Is anyone hurt or in danger right now? Yes or no?'][again ? ((again - 1) % 2) + 1 : 0];
     case 'summary':
-      return summary(state);
-    default:
-      return missing.map((f) => FACT_QUESTIONS[f]).join(' ');
+      return again
+        ? ['Is everything in the summary above correct? Please answer yes, or tell me what to change.', 'Is that all correct? Yes, or tell me what to change.'][(again - 1) % 2]
+        : summary(state);
+    default: {
+      // "Thanks." belongs at the start of the message, once, not in the middle of it.
+      const parts = missing.map((f) => factQuestion(f, state.facts, tries[askedKey(f)] ?? 0, state.opening));
+      const thanks = parts.some((p) => p.startsWith('Thanks. '));
+      const text = parts.map((p) => p.replace(/^Thanks\. /, '')).join(' ');
+      return thanks ? `Thanks. ${text}` : text;
+    }
   }
 }
 
@@ -161,8 +323,8 @@ export function summary(state: WalkthroughState): string {
     `When: ${f.incidentAt ? when(f.incidentAt) : ''}`,
     `Where: ${f.place}`,
     `What happened: ${f.description}`,
-    `Anyone else involved: ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
-    `Police (SAPS) involved: ${yesNo(f.saps)}`,
+    isTheft(f, state.opening) ? `Who did it or saw it: ${f.thirdPartyDetails ?? 'not known'}` : `Anyone else involved: ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
+    isTheft(f, state.opening) ? `Reported to the police (SAPS): ${yesNo(f.saps)}` : `Police (SAPS) involved: ${yesNo(f.saps)}`,
     `Anyone injured: ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`,
   ].join('\n');
 }
@@ -239,7 +401,7 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
       return `${why}, so I've passed this to ${passedOn?.owner.name ?? 'our insurance team'}, who will contact you${by}.`;
     }
     case 'ask':
-      return question(say.step, say.missing, state!, say.correcting);
+      return question(say.step, say.missing, state!, say.correcting, say.tries);
   }
 }
 

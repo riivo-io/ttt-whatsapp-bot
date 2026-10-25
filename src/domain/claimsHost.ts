@@ -104,8 +104,15 @@ export async function withOpeningFacts(model: UnderstandModel, state: Walkthroug
     const firstRead = await understand(model, { ...state, step: 'claim-type' }, 'What happened?', text, now);
     if (firstRead.kind !== 'facts') return state;
     const facts = { ...firstRead.facts };
-    if (facts.description && facts.description.split(/\s+/).length < MIN_OPENING_DESCRIPTION_WORDS) delete facts.description;
-    return { ...state, facts: advance({ ...state, step: 'claim-type' }, { kind: 'facts', facts }).state?.facts ?? state.facts };
+    // TTTFG-4830: a short opening isn't the description, but it still says what kind of claim it is ("my phone was
+    // stolen"): kept as the walkthrough's hint, so Tina asks for the whole story in the right words.
+    let opening: string | undefined;
+    if (facts.description && facts.description.split(/\s+/).length < MIN_OPENING_DESCRIPTION_WORDS) {
+        opening = facts.description;
+        delete facts.description;
+    }
+    const hinted: WalkthroughState = opening ? { ...state, opening } : state;
+    return { ...hinted, facts: advance({ ...hinted, step: 'claim-type' }, { kind: 'facts', facts }).state?.facts ?? state.facts };
 }
 
 async function persist(
