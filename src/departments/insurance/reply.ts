@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 039ecda). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 2ec679b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830 (claims on Tina): Claude reads one WhatsApp message from a client who has an open claim and says what it
 // means for resume.ts (a ResumeMessage). It is the follow-on's half of understand.ts: TTTFG-5176 and TTTFG-5184 left
