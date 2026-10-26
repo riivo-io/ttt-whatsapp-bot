@@ -11,6 +11,8 @@
  *   CLAIMS_DEMO_SHAREPOINT_SITE    default tttfinancialgroup.sharepoint.com:/sites/TTTDevelopment (Graph: GRAPH_*)
  *   CLAIMS_BATCH_QUIET_MS          TTTFG-4830: how long Tina waits, after a reply that answers part of her numbered
  *                                  questions, before she lists what's still open (default 45000; 0: lists it at once)
+ *   CLAIMS_FILES_QUIET_MS          TTTFG-4830: how long she waits after a photo for an evidence item before answering
+ *                                  about all of them (the front and back, photos of the scene; default 15000)
  *   CLAIMS_REMINDERS               TTTFG-5212: "off" stops the 08:00 reminder of what each demo client still has to
  *                                  send (on by default; the cron is GET /api/cron/claims-reminders)
  *   CLAIMS_REMINDER_TEMPLATE       TTTFG-5212: the approved WhatsApp template for a reminder outside the 24-hour window
@@ -20,9 +22,12 @@
  *                                  On by default; needs OPENAI_API_KEY. CLAIMS_TRANSCRIBE_MODEL, CLAIMS_TRANSCRIBE_LANGUAGE
  *                                  and CLAIMS_VOICE_MAX_SECONDS: see transcribe.service.ts
  * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql).
+ * TTTFG-4830: every message in and out also goes where Tina keeps her own: Supabase's message log (sessions and
+ * messages) and the demo CRM's timeline (riivo_whatsappcommunications), under the claim, else the request, else the
+ * contact; a voice note with its transcript and the recording attached (writeDemoLog).
  */
 import {
-    batchQuietMs, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
+    batchQuietMs, claimsDemoBatchCheck, filesQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
     type DemoConversation, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
@@ -35,12 +40,13 @@ import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
 import {
-    cachedDv, dataverseCall, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type CrmStats, type DemoChannels, type Graph,
+    cachedDv, dataverseCall, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
+    type CrmStats, type DemoChannels, type DemoLog, type Graph,
 } from './claimsDemoWiring';
 import { enqueueClaimsBatchCheck, enqueueClaimsReminder } from '../queue/whatsappQueue';
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
-import { supabaseService } from './supabase.service';
+import { supabaseService, type ClaimConversationRow } from './supabase.service';
 import { transcribeVoiceNote } from './transcribe.service';
 
 const DEV_URL = 'https://tttdevelopment.crm4.dynamics.com';
@@ -85,34 +91,42 @@ const graph: Graph = async (method, path, body, contentType) => {
     });
 };
 
-const channels = (stats: CrmStats): DemoChannels => ({
+/** TTTFG-4830: every send goes into `log` as well (what WhatsApp didn't deliver says so), for writeDemoLog. */
+const channels = (stats: CrmStats, log: DemoLog): DemoChannels => ({
     dv: dataverse(stats),
     graph,
     site: process.env.CLAIMS_DEMO_SHAREPOINT_SITE || DEV_SITE,
     // A send Meta refuses is tried once more, then logged with Meta's reason. It never stops the turn halfway: the claim
     // is already written, so the conversation state must be saved with it.
     sendText: async (to, text) => {
+        const at = new Date().toISOString();
         for (let attempt = 1; attempt <= 2; attempt++) {
             try {
                 const wamid = await metaWhatsAppService.sendMessage(to, text);
                 if (!wamid) console.warn(`[ClaimsDemo] WhatsApp send to ${to} returned no message id`);
+                log.outbound.push({ text, at, wamid });
                 return;
             } catch (e: any) {
                 console.error(`[ClaimsDemo] WhatsApp send to ${to} refused (attempt ${attempt}):`, JSON.stringify(e?.response?.data ?? e?.message));
                 if (attempt === 1) await new Promise((r) => setTimeout(r, 2000));
             }
         }
+        log.outbound.push({ text: `${text}\n(WhatsApp didn't deliver this message.)`, at });
     },
     sendDocument: async (to, bytes, fileName, caption) => {
+        const at = new Date().toISOString();
         const r = await metaWhatsAppService.sendDocument(to, bytes, fileName, caption);
         if (!r.delivered) console.warn(`[ClaimsDemo] Document ${fileName} to ${to} not delivered: ${r.error ?? (r.dryRun ? 'dry run' : 'unknown')}`);
+        log.outbound.push({ text: `${caption}\n📎 ${fileName}${r.delivered ? '' : "\n(WhatsApp didn't deliver this document.)"}`, at });
     },
     ...(process.env.CLAIMS_REMINDER_TEMPLATE ? {
         sendTemplate: async (to: string, params: string[]) => {
+            const at = new Date().toISOString();
             const r = await metaWhatsAppService.sendTemplate(to, {
                 name: process.env.CLAIMS_REMINDER_TEMPLATE!, languageCode: process.env.CLAIMS_REMINDER_TEMPLATE_LANG || 'en', bodyVariables: params,
             });
             if (!r.delivered) throw new Error(`WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE} to ${to} refused: ${r.error ?? 'unknown'}`);
+            log.outbound.push({ text: `WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE}: ${params.join(' | ')}`, at });
         },
     } : {}),
     mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
@@ -145,26 +159,53 @@ function demoModel(model: string, name: string) {
  * TTTFG-4830: a voice note as text: downloaded from Meta and transcribed. Logged with its length and timing, never its
  * words. A failure is logged and read as "can't listen right now", so the client is asked to type or send it again.
  */
-async function hear(ch: DemoChannels, phone: string, voice: DemoVoice, hint: string): Promise<VoiceHeard> {
+async function hear(ch: DemoChannels, phone: string, voice: DemoVoice, hint: string, log: DemoLog): Promise<VoiceHeard> {
     const started = Date.now();
+    // The recording and what was heard go on the timeline (writeDemoLog), even when it couldn't be used.
+    const kept: NonNullable<NonNullable<DemoLog['inbound']>['voice']> = { seconds: null, mimeType: voice.mimeType };
+    if (log.inbound) log.inbound.voice = kept;
     try {
         const bytes = await ch.mediaBytes(voice.id);
+        kept.bytes = bytes;
         const r = await transcribeVoiceNote(bytes, voice.mimeType, hint);
+        kept.seconds = r.seconds;
         const length = r.seconds === null ? `${Math.round(bytes.length / 1024)} KB` : `${r.seconds}s`;
         if ('problem' in r) {
             console.log(`[ClaimsDemo] ${phone}: voice note (${voice.mimeType}, ${length}) not used: ${r.problem}`);
+            kept.problem = r.problem;
             return { problem: r.problem };
         }
         console.log(`[ClaimsDemo] ${phone}: voice note ${length} heard in ${Date.now() - started}ms (${r.model} ${r.ms}ms, ${r.text.length} chars)`);
+        kept.transcript = r.text;
         return { text: r.text };
     } catch (e: any) {
         console.error(`[ClaimsDemo] ${phone}: voice note not transcribed after ${Date.now() - started}ms:`, e?.response?.data ?? e?.message);
+        kept.problem = 'unavailable';
         return { problem: 'unavailable' };
     }
 }
 
-function deps(phone: string, contactId: string, stats: CrmStats): ClaimsDemoDeps {
-    const ch = channels(stats);
+/**
+ * TTTFG-4830: the job's messages to Supabase's message log and the demo CRM's timeline, filed under the claim the
+ * conversation is on after the job (or was on before it), else its request. Never throws.
+ */
+async function writeLog(ch: DemoChannels, log: DemoLog, phone: string, contactId: string, before: ClaimConversationRow | null): Promise<void> {
+    try {
+        const after = await supabaseService.getClaimConversation(phone).catch(() => null);
+        const claimOf = (row: ClaimConversationRow | null) => (row?.resume as ResumeState | null)?.followOn?.claimId || undefined;
+        await writeDemoLog({
+            dv: ch.dv,
+            saveMessages: async (to, contact, messages) => {
+                const session = await supabaseService.getOrCreateSession(to, contact, 'client');
+                for (const m of messages) await supabaseService.saveMessage(session.id, m.role, m.content);
+            },
+        }, log, { phone, contactId, claimId: claimOf(after) ?? claimOf(before), requestId: after?.request_id || before?.request_id || undefined });
+    } catch (e) {
+        console.error(`[ClaimsDemo] ${phone}: conversation log not written:`, (e as Error).message);
+    }
+}
+
+function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog): ClaimsDemoDeps {
     return {
         async load(phone) {
             const row = await supabaseService.getClaimConversation(phone);
@@ -192,10 +233,10 @@ function deps(phone: string, contactId: string, stats: CrmStats): ClaimsDemoDeps
         lastReminderOn: (claimId) => lastReminderPort(ch.dv).lastReminderOn(claimId),
         ...((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off'
             ? {}
-            : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint) }),
+            : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint, log) }),
         ...(batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS) > 0
-            ? { scheduleBatchCheck: (to: string, token: string) =>
-                enqueueClaimsBatchCheck(to, token, batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
+            ? { scheduleBatchCheck: (to: string, token: string, what: 'answers' | 'files') => enqueueClaimsBatchCheck(to, token,
+                what === 'files' ? filesQuietMs(process.env.CLAIMS_FILES_QUIET_MS) : batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
             : {}),
     };
 }
@@ -216,12 +257,15 @@ export async function handleClaimsDemoBatchCheck(phone: string, token: string): 
     const contactId = claimsDemoContact(phone);
     if (!contactId || !token) return;
     const stats = newCrmStats();
+    const log = newDemoLog();
+    const ch = channels(stats, log);
     try {
-        const outcome = await claimsDemoBatchCheck(deps(phone, contactId, stats), phone, token, new Date());
+        const outcome = await claimsDemoBatchCheck(deps(phone, contactId, ch, log), phone, token, new Date());
         console.log(`[ClaimsDemo] ${phone}: batch check ${outcome}; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} batch check failed:`, (e as Error).message, (e as Error).stack);
     }
+    await writeLog(ch, log, phone, contactId, null);
 }
 
 /**
@@ -243,9 +287,11 @@ export async function handleClaimsDemoReminder(phone: string, o: { test?: boolea
     const contactId = claimsDemoContact(phone);
     if (!contactId) return;
     const stats = newCrmStats();
+    const log = newDemoLog();
+    const ch = channels(stats, log);
     try {
         // A test by hand goes out even if the client wrote in the last 12 hours (still once per claim per day).
-        const r = await claimsDemoReminder(deps(phone, contactId, stats), phone, contactId, new Date(), {
+        const r = await claimsDemoReminder(deps(phone, contactId, ch, log), phone, contactId, new Date(), {
             template: !!process.env.CLAIMS_REMINDER_TEMPLATE, ...(o.test ? { quietHours: 0 } : {}),
         });
         const said = r === 'walkthrough' ? 'reporting a claim, no reminder' : r.map((o) => `${o.reference} ${'sent' in o ? `sent (${o.sent})` : o.skipped}`).join(', ') || 'no open claims';
@@ -253,6 +299,7 @@ export async function handleClaimsDemoReminder(phone: string, o: { test?: boolea
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} morning reminder failed:`, (e as Error).message, (e as Error).stack);
     }
+    await writeLog(ch, log, phone, contactId, null);
 }
 
 /**
@@ -266,14 +313,18 @@ export async function handleClaimsDemoMessage(m: DemoInbound, contactId: string)
     const file: ClientFile | undefined = m.document
         ? { id: m.document.id, fileName: m.document.filename, mimeType: m.document.mimeType, media: m.document.mimeType.startsWith('image/') ? 'photo' : 'document' }
         : undefined;
+    const log = newDemoLog();
+    log.inbound = { text: file ? `${m.text ? `${m.text}\n` : ''}📎 ${file.fileName}` : m.text, wamid: m.wamid, at: new Date().toISOString() };
+    const ch = channels(stats, log);
+    const before = await supabaseService.getClaimConversation(m.from).catch(() => null);
     try {
-        const outcome = await claimsDemoTurn(deps(m.from, contactId, stats), {
+        const outcome = await claimsDemoTurn(deps(m.from, contactId, ch, log), {
             phone: m.from, contactId, text: m.text, file, ...(m.audio ? { voice: m.audio } : {}), wamid: m.wamid || `wamid.local.${Date.now()}`,
         }, new Date());
         console.log(`[ClaimsDemo] ${m.from}: ${outcome} in ${Date.now() - started}ms; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes${stats.throttled ? `, ${stats.throttled} throttled` : ''}`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${m.from} failed after ${Date.now() - started}ms:`, (e as Error).message, (e as Error).stack);
-        await metaWhatsAppService.sendMessage(m.from, 'Sorry, something went wrong on my side. Please send that again in a minute.')
-            .catch((err) => console.error(`[ClaimsDemo] ${m.from} apology not sent:`, err?.response?.data ?? err?.message));
+        await ch.sendText(m.from, 'Sorry, something went wrong on my side. Please send that again in a minute.');
     }
+    await writeLog(ch, log, m.from, contactId, before);
 }

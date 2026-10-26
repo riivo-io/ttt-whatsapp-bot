@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 954c78b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 1254c4f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -9,7 +9,7 @@
 // into Tina (epic TTTFG-4830).
 import { claimGate } from './gate';
 import {
-  advance, askedKey, complete, isTheft, sastParts, start,
+  advance, askedKey, complete, isTheft, sastParts, start, VOICE_OR_TEXT,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
 } from './walkthrough';
 
@@ -442,7 +442,9 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
       const thanks = parts.some((p) => p.startsWith('Thanks. '));
       const clean = parts.map((p) => p.replace(/^Thanks\. /, ''));
       const text = clean.length > 1 ? clean.map((p, i) => `${i + 1}. ${p}`).join('\n') : clean.join(' ');
-      return thanks ? `Thanks.${clean.length > 1 ? '\n' : ' '}${text}` : text;
+      // TTTFG-4830 (voice notes): the first "what happened" says they can answer by voice note.
+      const voice = missing.includes('description') && !(tries[askedKey('description')] ?? 0) ? `${clean.length > 1 ? '\n' : ' '}${VOICE_OR_TEXT}` : '';
+      return `${thanks ? `Thanks.${clean.length > 1 ? '\n' : ' '}` : ''}${text}${voice}`;
     }
   }
 }

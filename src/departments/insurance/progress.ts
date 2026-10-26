@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 954c78b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 1254c4f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -143,8 +143,32 @@ export function formItems(form: ClaimForm, answers: ClaimAnswers, facts?: ClaimF
   return out;
 }
 
+/**
+ * TTTFG-4830: how many files make an evidence item: its `count`, else from the prompt. "The front and back" is 2, "Two
+ * quotes" is 2; a plural ("Photos of the damage", "Any photos", "Anything that shows", "Quotes for") is any number; a
+ * single thing ("A photo of the driver's ID", "The settlement letter", "If damaged: a report") is 1.
+ */
+export function fileCount(item: QuestionItem): number | 'any' {
+  if (item.count !== undefined) return item.count;
+  const p = item.prompt.replace(/^if [^:]*:\s*/i, '');
+  if (/\bfront and back\b/i.test(p)) return 2;
+  const n = /^(two|three|2|3)\s+\w+s\b/i.exec(p);
+  if (n) return /^(two|2)$/i.test(n[1]) ? 2 : 3;
+  if (/^(any|anything|photos|pictures|quotes|receipts|invoices|copies|documents)\b/i.test(p)) return 'any';
+  return 1;
+}
+
+/** TTTFG-4830: the files received for an evidence item. */
+export const filesFor = (item: QuestionItem, evidence: ReceivedEvidence) => evidence.filter((e) => e.key === item.key).length;
+
+/** TTTFG-4830: an evidence item is in once it has its number of files (one for "any number": Tina confirms the rest). */
+export function evidenceIn(item: QuestionItem, evidence: ReceivedEvidence): boolean {
+  const need = fileCount(item);
+  return filesFor(item, evidence) >= (need === 'any' ? 1 : need);
+}
+
 function done(item: QuestionItem, answers: ClaimAnswers, evidence: ReceivedEvidence, facts?: ClaimFacts): boolean {
-  if (item.kind === 'evidence') return evidence.some((e) => e.key === item.key);
+  if (item.kind === 'evidence') return evidenceIn(item, evidence);
   return known(item.key, answers, facts) !== undefined;
 }
 

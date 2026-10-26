@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 954c78b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 1254c4f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830 (claims on Tina): Claude reads one WhatsApp message from a client who has an open claim and says what it
 // means for resume.ts (a ResumeMessage). It is the follow-on's half of understand.ts: TTTFG-5176 and TTTFG-5184 left
@@ -23,7 +23,7 @@
 //
 // Pure, apart from the model port. No zod, as understand.ts.
 import type { QuestionItem } from './contracts';
-import { applies, formItems, missingItems, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY, type ClaimFacts } from './progress';
+import { applies, formItems, itemName, missingItems, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY, type ClaimFacts } from './progress';
 import type { ClaimAnswers } from './contracts';
 import { ADDRESS_KEY, addressItem, BARE_NO, batchLines, type ClientFile, type FollowOnPorts, type OtherAnswer, type StoredClaimForm } from './followon';
 import type { OpenClaim, OpenClaimsPort, Pending, ResumeMessage, ResumeState } from './resume';
@@ -91,8 +91,10 @@ export interface ReplyContext {
    * question open. The message may bring any of it; a SAPS case number or station is read as `saps`.
    */
   stillNeed?: QuestionItem[];
-  /** Evidence items still missing on that claim: what a file could be. */
+  /** Evidence items still missing on that claim: what a file could be (TTTFG-4830: and the one Tina asked for). */
   missingEvidence: QuestionItem[];
+  /** TTTFG-4830: Tina asked whether the files the client sent for this evidence item are all of them. */
+  confirmingFiles?: QuestionItem;
   /** TTTFG-4830: the claim's other open questions (not `asking`): what else the message may answer. */
   openQuestions?: QuestionItem[];
   /** TTTFG-4830: the client's earlier answers on the claim: what a message may correct. */
@@ -143,6 +145,11 @@ function askingHelp(ctx: ReplyContext): string {
   if (ctx.sapsStep) {
     return 'Tina asked for the SAPS (police) case number and/or the police station. Use kind "saps" with sapsCaseNumber and '
       + 'sapsStation as the client gave them. Use kind "not-yet" when the client has no case number yet or hasn\'t reported it.';
+  }
+  if (ctx.confirmingFiles) {
+    return `Tina asked whether the files the client sent are all ${itemName(ctx.confirmingFiles)}. Use kind "value" with valueBool `
+      + 'true when the client says that is all ("yes", "that\'s it", "done"), false when they say they have more. Use kind "not-yet" '
+      + 'when they say they will send the rest later.';
   }
   if (ctx.batch && ctx.batch.length > 1) return BATCH_HELP;
   if (ctx.stillNeed) return STILL_NEED_HELP;
@@ -197,7 +204,9 @@ Also:
 - wantsNewClaim: true only when the client says in so many words that they want to report or open a new claim, or
   that this is a new or different claim ("I'd like to open a new claim"). Otherwise false.
 - forItem: only when the client sent a file. The key of the item in <missing_evidence> the file is, judged from the
-  caption, the file name and Tina's last question. Null if you can't tell.
+  caption, the file name and Tina's last question. When Tina asked for one of them, it is that one unless the caption
+  or the file name clearly says it is another: clients often send several files for one item (the front and the back,
+  several photos). Null if you can't tell.
 - A SAPS case number given at any point (for example "the case number is CAS 123/10/2026"): set sapsCaseNumber.
 - otherAnswers: clients often answer more than one question at once. For every question in <other_open_questions> the
   message clearly answers, add {key, valueText, valueNumber, valueBool} with the value in the field its type needs
@@ -302,6 +311,8 @@ export function toResumeMessage(raw: unknown, ctx: ReplyContext, file: ClientFil
     else if (r.kind === 'not-yet') understood = { kind: 'not-yet', wamid };
     else if (ctx.sapsStep && (caseNumber || station)) understood = { kind: 'saps', caseNumber, station, wamid };
     else if (ctx.sapsStep && r.kind === 'value' && str(r.valueText)) understood = { kind: 'value', value: str(r.valueText)!, wamid };
+    // TTTFG-4830: "Are those all of them?": the client's yes or no.
+    else if (ctx.confirmingFiles && r.kind === 'value' && typeof r.valueBool === 'boolean') understood = { kind: 'value', value: r.valueBool, wamid };
     else if (r.kind === 'value' && ctx.asking && !ctx.sapsStep) {
       const value = valueFor(ctx.asking, r, now);
       if (value !== undefined) understood = { kind: 'value', value, wamid };
@@ -411,6 +422,9 @@ export async function replyContext(
       ? SAPS_ITEMS.find((i) => i.key === st.asking)
       : st.phase === 'address' ? addressItem(claim, st.asking)
       : list.find((i) => i.key === st.asking);
+    // TTTFG-4830: a file sent now may be for the evidence item Tina asked, even once it has its first file.
+    if (ctx.asking?.kind === 'evidence' && !ctx.missingEvidence.some((i) => i.key === ctx.asking!.key)) ctx.missingEvidence = [ctx.asking, ...ctx.missingEvidence];
+    if (ctx.asking?.kind === 'evidence' && st.confirming === ctx.asking.key) ctx.confirmingFiles = ctx.asking;
     // TTTFG-4830: the batch as Tina numbered it, answered questions included (the client's numbers still count).
     const batch = st.phase === 'items' ? (st.batch ?? []).map((k) => list.find((i) => i.key === k)).filter((i): i is QuestionItem => !!i) : [];
     if (batch.length > 1) ctx.batch = batch;

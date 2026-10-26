@@ -16,6 +16,7 @@ import { CLAIM_STATUSES, type ClaimFileStore } from '../departments/insurance/fo
 import type { ResumePorts } from '../departments/insurance/resume';
 import { dataverseResumePorts, OPEN_STATUS_FILTER } from '../departments/insurance/resume-dataverse';
 import { onClaimChanged, requestClaimSignature, type SigningStep } from '../departments/insurance/signature-fill';
+import { voiceNoteNote, whatsappCommunicationRow, type WhatsAppRegarding } from '../domain/whatsappLog';
 
 const OPT = 463630000;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -308,3 +309,94 @@ export async function withdrawOpenClaims(dv: Dv, contactId: string): Promise<str
     for (const c of r.value) await dv('PATCH', `riivo_claims(${c.riivo_claimid})`, { riivo_claimstatus: withdrawn });
     return r.value.map((c) => c.riivo_name);
 }
+
+// ---- TTTFG-4830: the conversation in Tina's message log and on the CRM timeline ----------------------------------------
+
+/**
+ * What one demo job said and heard: the client's message (a voice note with its transcript and recording) and every
+ * message Tina sent. Collected while the job runs and written once it's done (writeDemoLog), so a slow write never
+ * holds up a reply.
+ */
+export interface DemoLog {
+    inbound?: {
+        text: string; wamid?: string; at: string;
+        voice?: { seconds: number | null; mimeType: string; bytes?: Buffer; transcript?: string; problem?: string };
+    };
+    outbound: { text: string; at: string; wamid?: string | null }[];
+}
+export const newDemoLog = (): DemoLog => ({ outbound: [] });
+
+/** The client's message as the log shows it: a voice note says so, with what Tina heard. */
+export function inboundText(i: NonNullable<DemoLog['inbound']>): string {
+    if (!i.voice) return i.text;
+    const length = i.voice.seconds === null ? '' : ` (${i.voice.seconds}s)`;
+    return i.voice.transcript !== undefined
+        ? `🎙️ Voice note${length}: ${i.voice.transcript}`
+        : `🎙️ Voice note${length}, not transcribed (${i.voice.problem ?? 'unknown'})`;
+}
+
+export interface DemoLogPorts {
+    /** The demo's CRM. */
+    dv: Dv;
+    /** Tina's own message log (Supabase sessions and messages), in order. */
+    saveMessages(phone: string, contactId: string, messages: { role: 'user' | 'assistant'; content: string }[]): Promise<void>;
+}
+
+/**
+ * One job's messages, where Tina keeps her own: Supabase's message log, and the CRM timeline (riivo_whatsappcommunications
+ * rows, as dynamicsService.logMessage writes them), with a voice note's recording attached to its row as a note.
+ * Filed under the claim the conversation is on, else its request, else the contact: a claim has no link to its
+ * request, so the claim is where the broker looks. A link the CRM refuses falls back to the next one. Never throws:
+ * the conversation has happened; a failed write is logged.
+ */
+export async function writeDemoLog(
+    ports: DemoLogPorts, log: DemoLog, where: { phone: string; contactId: string; claimId?: string; requestId?: string },
+): Promise<void> {
+    const messages = [
+        ...(log.inbound ? [{ role: 'user' as const, content: inboundText(log.inbound) }] : []),
+        ...log.outbound.map((o) => ({ role: 'assistant' as const, content: o.text })),
+    ];
+    if (!messages.length) return;
+    try {
+        await ports.saveMessages(where.phone, where.contactId, messages);
+    } catch (e) {
+        console.error(`[ClaimsDemo] ${where.phone}: message log not saved:`, (e as Error).message);
+    }
+
+    const regardings: (WhatsAppRegarding | null)[] = [
+        ...(where.claimId ? [{ table: 'riivo_claim' as const, id: where.claimId }] : []),
+        ...(where.requestId ? [{ table: 'riivo_request' as const, id: where.requestId }] : []),
+        { table: 'contact', id: where.contactId },
+        null,
+    ];
+    let tried = 0;
+    const post = async (row: (regarding: WhatsAppRegarding | null) => Record<string, unknown>): Promise<string | null> => {
+        for (; tried < regardings.length; tried++) {
+            try {
+                const r = await ports.dv<{ activityid?: string }>('POST', 'riivo_whatsappcommunicationses?$select=activityid', row(regardings[tried]), { returnRow: true });
+                return r?.activityid ?? null;
+            } catch (e) {
+                console.warn(`[ClaimsDemo] ${where.phone}: timeline row under ${regardings[tried]?.table ?? 'nothing'} refused:`, (e as Error).message);
+            }
+        }
+        return null;
+    };
+
+    if (log.inbound) {
+        const i = log.inbound;
+        const tooBig = !!i.voice?.bytes && !voiceNoteNote({ communicationId: '-', bytes: i.voice.bytes, mimeType: i.voice.mimeType, seconds: null, at: i.at });
+        const text = `${inboundText(i)}${tooBig ? ' (the recording is over the 5 MB attachment limit, so it is not attached)' : ''}`;
+        const id = await post((regarding) => whatsappCommunicationRow({ text, direction: 'Incoming', phone: where.phone, wamid: i.wamid, regarding, at: i.at }));
+        if (id && i.voice?.bytes && !tooBig) {
+            try {
+                await ports.dv('POST', 'annotations', voiceNoteNote({ communicationId: id, bytes: i.voice.bytes, mimeType: i.voice.mimeType, seconds: i.voice.seconds, at: i.at }));
+            } catch (e) {
+                console.error(`[ClaimsDemo] ${where.phone}: voice note recording not attached:`, (e as Error).message);
+            }
+        }
+    }
+    for (const o of log.outbound) {
+        await post((regarding) => whatsappCommunicationRow({ text: o.text, direction: 'Outgoing', phone: where.phone, wamid: o.wamid, regarding, at: o.at }));
+    }
+}
+

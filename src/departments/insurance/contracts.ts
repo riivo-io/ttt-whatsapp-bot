@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 954c78b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 1254c4f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -65,6 +65,11 @@ export const QuestionItemSchema = z.object({
    * without a section is asked on its own, as before.
    */
   section: z.string().min(1).optional(),
+  /**
+   * TTTFG-4830: an evidence item's number of files: 2 for the front and back of a licence, 'any' for photos of the
+   * scene (Tina asks whether that's all of them). Absent: worked out from the prompt (progress.ts fileCount).
+   */
+  count: z.union([z.number().int().min(1).max(10), z.literal('any')]).optional(),
   /**
    * TTTFG-4830 (still need): the client can get this (it's written down somewhere they can look: the registration
    * papers, the SAPS slip, a bank statement) and the form can't go without it. A required question only; a required
