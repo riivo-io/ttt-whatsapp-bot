@@ -7,6 +7,7 @@ import { activateLeadPostLoe } from '../services/loeActivation.service';
 import { dynamicsService } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
 import { pendingIrp5Service } from '../services/pendingIrp5.service';
+import { enqueueClaimsDemoReminders } from '../services/claimsDemo.service';
 console.log('[boot] cron.route: imports done');
 
 // Subscriptions max out at ~70h. Renew anything within 24h of expiry.
@@ -51,6 +52,23 @@ router.get('/case-timeout', async (req: Request, res: Response) => {
         res.json({ ok: true, swept });
     } catch (e: any) {
         console.error('[Cron] case-timeout failed:', e?.message || e);
+        res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+    }
+});
+
+/**
+ * TTTFG-5212 (claims demo, first cut): 08:00 South African time. Queues each demo number's morning reminder of what
+ * it still has to send on its claims; the worker sends them, on each number's own session. CLAIMS_REMINDERS=off: none.
+ */
+router.get('/claims-reminders', async (req: Request, res: Response) => {
+    if (!isAuthorized(req)) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    try {
+        res.json({ ok: true, queued: await enqueueClaimsDemoReminders() });
+    } catch (e: any) {
+        console.error('[Cron] claims-reminders failed:', e?.message || e);
         res.status(500).json({ ok: false, error: e?.message || 'unknown' });
     }
 });

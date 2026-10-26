@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 78a9547). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 240b9bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -26,8 +26,8 @@ export const SAPS_STATION_KEY = 'sapsStation';
 
 /** Added in front of the form's list when the SAPS step applies (unless the form lists the key itself). */
 export const SAPS_ITEMS: readonly QuestionItem[] = [
-  { key: SAPS_CASE_KEY, kind: 'question', prompt: 'What is the SAPS case number?', name: 'the SAPS case number', answerType: 'text', required: true },
-  { key: SAPS_STATION_KEY, kind: 'question', prompt: 'At which police station did you report it?', name: 'the name of the police station', answerType: 'text', required: true },
+  { key: SAPS_CASE_KEY, kind: 'question', prompt: 'What is the SAPS case number?', name: 'the SAPS case number', answerType: 'text', required: true, chase: true },
+  { key: SAPS_STATION_KEY, kind: 'question', prompt: 'At which police station did you report it?', name: 'the police station you reported it at', answerType: 'text', required: true, chase: true },
 ];
 
 /** The claim's own columns that answer form questions: the walkthrough facts and the SAPS step. */
@@ -228,6 +228,14 @@ export function nextBatch(form: ClaimForm, answers: ClaimAnswers, evidence: Rece
   return batch;
 }
 
+/**
+ * TTTFG-4830 (still need): an item the client can get and the form can't go without (contracts.ts `chase`). It goes on
+ * "Things we still need from you" and the morning reminder until it's in; "I don't know" makes it "not yet", not the
+ * broker's. Every required evidence item is; so are the SAPS case number and station, whatever the form calls them.
+ */
+export const chased = (item: QuestionItem): boolean =>
+  item.required && (item.kind === 'evidence' || !!item.chase || item.key === SAPS_CASE_KEY || item.key === SAPS_STATION_KEY);
+
 /** TTTFG-5254 step 14: the required items still missing (skipped ones included). Empty means evidence complete. */
 export function missingItems(form: ClaimForm, answers: ClaimAnswers, evidence: ReceivedEvidence, o: ProgressOptions = {}): QuestionItem[] {
   return open(form, answers, evidence, { ...o, skip: [] }).filter((i) => i.required);
@@ -261,6 +269,9 @@ export function itemName(item: QuestionItem): string {
     if (n) return `the details of ${entryWord(item.group)} ${n}`;
   }
   if (item.name) return item.name;
+  // A form that lists a SAPS item in its own words: still named as the SAPS step names it.
+  const saps = SAPS_ITEMS.find((s) => s.key === item.key);
+  if (saps?.name) return saps.name;
   const first = item.prompt.split(/(?<=[.?!])\s/)[0].trim();
   const m = /^(?:please\s+)?(?:send|upload|share|attach)\s+(?:me\s+|us\s+)?(.+?)(?:,?\s+if you have (?:one|it|them|any))?[.!]?$/i.exec(first);
   if (m) return m[1].replace(/^(?:a|an|any)\s+/i, 'the ');

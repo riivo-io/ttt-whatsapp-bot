@@ -18,6 +18,7 @@ on:
     - cron: '0 */6 * * *'  # graph-renew-subscription (every 6h)
     - cron: '0 3 * * *'    # cleanup-webhook-events   (daily 03:00 UTC)
     - cron: '0 * * * *'    # loe-activation-sweep     (hourly)
+    - cron: '0 6 * * *'    # claims-reminders         (daily 06:00 UTC = 08:00 SAST)
   workflow_dispatch:
     inputs:
       target:
@@ -31,6 +32,7 @@ on:
           - graph-renew-subscription
           - cleanup-webhook-events
           - loe-activation-sweep
+          - claims-reminders
 
 env:
   BOT_BASE_URL: https://ttt-prod-bot-fpbwezdygqbdh8a7.southafricanorth-01.azurewebsites.net
@@ -87,3 +89,16 @@ jobs:
           curl -fsS --max-time 300 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "$BOT_BASE_URL/api/cron/loe-activation-sweep"
+
+  # Not part of a manual "all": it messages the demo clients ("Good morning ...").
+  claims-reminders:
+    if: >-
+      github.event.schedule == '0 6 * * *' ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'claims-reminders')
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /api/cron/claims-reminders
+        run: |
+          curl -fsS --max-time 300 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$BOT_BASE_URL/api/cron/claims-reminders"

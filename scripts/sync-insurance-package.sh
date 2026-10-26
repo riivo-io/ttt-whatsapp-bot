@@ -15,7 +15,7 @@ SRC="$SRC_REPO/src/departments/insurance"
 DEST="$HERE/src/departments/insurance"
 FILES=(walkthrough.ts claim.ts gate.ts understand.ts intent.ts dataverse.ts
   contracts.ts claimform.ts progress.ts templates.ts signature.ts followon.ts followon-dataverse.ts resume.ts resume-dataverse.ts
-  reply.ts formats.ts fill.ts summarysheet.ts signature-fill.ts fill-dataverse.ts)
+  reply.ts formats.ts fill.ts summarysheet.ts signature-fill.ts fill-dataverse.ts reminder.ts)
 
 [ -d "$SRC" ] || { echo "No claims package at $SRC" >&2; exit 2; }
 COMMIT="$(git -C "$SRC_REPO" log -1 --format=%h -- src/departments/insurance)"

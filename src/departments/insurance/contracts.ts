@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 78a9547). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 240b9bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -65,6 +65,14 @@ export const QuestionItemSchema = z.object({
    * without a section is asked on its own, as before.
    */
   section: z.string().min(1).optional(),
+  /**
+   * TTTFG-4830 (still need): the client can get this (it's written down somewhere they can look: the registration
+   * papers, the SAPS slip, a bank statement) and the form can't go without it. A required question only; a required
+   * evidence item is always chased. "I don't know" makes it "not yet" rather than the broker's, and it stays on
+   * "Things we still need from you" and the morning reminder until it's in. Give it a `name`: that is how the list
+   * shows it. A required question without `chase` (who did it, how fast the car was going) goes to the broker as before.
+   */
+  chase: z.boolean().optional(),
 });
 export type QuestionItem = z.infer<typeof QuestionItemSchema>;
 

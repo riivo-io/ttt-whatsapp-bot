@@ -6,7 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
+    batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
+    type ClaimsDemoDeps, type DemoConversation,
 } from '../../src/domain/claimsDemoHost';
 
 import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
@@ -332,4 +333,53 @@ test('TTTFG-4830: with no scheduler (CLAIMS_BATCH_QUIET_MS=0), or when schedulin
     assert.equal(batchQuietMs('0'), 0);
     assert.equal(batchQuietMs('20000'), 20_000);
     assert.equal(batchQuietMs('soon'), 45_000);
+});
+
+test('TTTFG-4830: the end of the questions lists what the client still has to send, and the 08:00 reminder (TTTFG-5212) sends it again', async () => {
+    const w = world();
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
+    await say(w, 'Me, Adriaan', (t = tick(t, 2)));
+    w.since();
+
+    // "Not yet" to the photos: the list, and Tina stays on it.
+    w.replies.push({ kind: 'not-yet' });
+    await say(w, "I'll take them tonight", (t = tick(t, 2)));
+    assert.deepEqual(w.since(), ["Thanks, that's all for now. Things we still need from you:\n- Photos of the damage\nPlease send them here when you have them."]);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'still-need');
+
+    // 08:00 the next day: the reminder, as a message (the client wrote less than 24 hours ago).
+    const morning = new Date('2026-10-24T06:00:00Z');
+    const outcomes = await claimsDemoReminder(w.deps, PHONE, CONTACT, morning);
+    assert.deepEqual(outcomes, [{ reference: 'CLM-000001', sent: 'text', lines: ['Photos of the damage'] }]);
+    const reminder = w.since();
+    assert.deepEqual(reminder, ["Good morning Adriaan, it's Tina from TTT. Things we still need from you for your motor accident claim (CLM-000001):\n"
+        + '- Photos of the damage\nPlease send them here when you have them.']);
+    assert.equal(w.store.get(PHONE)?.lastSent, reminder[0]);
+    assert.match(w.actions.at(-1)!.detail, /^Morning reminder sent on WhatsApp for claim CLM-000001: Photos of the damage\.$/);
+    // A second run the same morning sends nothing (the agent action says it went out today).
+    w.deps.lastReminderOn = async () => morning.toISOString();
+    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, tick(morning, 5)), [{ reference: 'CLM-000001', skipped: 'reminded-today' }]);
+    assert.deepEqual(w.since(), []);
+
+    // The photo half an hour later goes on the list: filed as the photos of the damage, and that's everything.
+    w.replies.push({});
+    assert.equal(await say(w, '', tick(morning, 30), photo), 'follow-on');
+    assert.deepEqual(w.filed.map((f) => f.itemKey), ['damagePhoto']);
+    assert.match(w.since().join('\n'), /That's everything the insurer needs for now\./);
+    assert.equal(w.store.get(PHONE)?.resume.followOn, null);
+});
+
+test('TTTFG-5212: no reminder while the client is reporting a claim; the demo numbers as WhatsApp numbers', async () => {
+    const w = world();
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', DAY1);
+    w.since();
+    assert.equal(await claimsDemoReminder(w.deps, PHONE, CONTACT, tick(DAY1, 22 * 60)), 'walkthrough');
+    assert.deepEqual(w.since(), []);
+    assert.deepEqual(demoPhones(`27723203629:${CONTACT}, +27 83 285 2913:${CONTACT}, bad`), [
+        { phone: '27723203629', contactId: CONTACT }, { phone: '27832852913', contactId: CONTACT },
+    ]);
 });

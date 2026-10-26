@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 78a9547). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 240b9bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5172: claim form configs and their validator (TTTFG-5251 steps 5 and 9).
 //
@@ -266,6 +266,9 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
     if (q.kind === 'question' && MEDIA.has(q.answerType)) err(`${where}: a ${q.answerType} is evidence; set kind "evidence"`);
     if (q.answerType === 'choice' && !(q.choices && q.choices.length >= 2)) err(`${where}: a choice question needs at least two choices`);
     if (q.answerType !== 'choice' && q.choices) err(`${where}: only a choice question has choices`);
+    // TTTFG-4830 (still need): only what the form can't go without is chased, and the client's list shows it by name.
+    if (q.chase && !q.required) err(`${where}: chase on an optional item; only a required item is chased`);
+    if (q.chase && q.kind === 'question' && !q.name) err(`${where}: a chased question needs a name (how "Things we still need from you" lists it)`);
     if (q.group !== undefined) {
       if (!groups.has(q.group)) err(`${where}: group "${q.group}" is not declared in questionGroups`);
       usedGroups.add(q.group);
