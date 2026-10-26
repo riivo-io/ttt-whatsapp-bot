@@ -208,7 +208,7 @@ test('the SAPS step applies when the client describes a theft', () => {
     assert.equal(describedAsTheft(w('Motor accident', 'A taxi drove into me')), false);
 });
 
-test('what the client said while reporting the claim answers the form: Tina says so and skips that question', async () => {
+test('what the client said while reporting the claim answers the form: that question is skipped, without a word about it', async () => {
     const w = world({ reported: [{ key: 'driverName', valueText: 'Adriaan', valueNumber: null, valueBool: null }] });
     let t = DAY1;
     await say(w, 'I was driving my car when someone drove into the back of it at the Claremont robot', t);
@@ -221,7 +221,7 @@ test('what the client said while reporting the claim answers the form: Tina says
     assert.equal(w.rows[0].answers.driverName?.value, 'Adriaan');
     assert.equal(w.rows[0].answers.driverName?.source, 'report');
     const opened = w.since().join('\n');
-    assert.match(opened, /I've filled in one of the insurer's questions from what you've already told me/);
+    assert.doesNotMatch(opened, /filled in|already told me/); // TTTFG-4830: one message less before the questions
     assert.doesNotMatch(opened, /Who was driving the vehicle\?/);
     assert.match(opened, /Please send me photos of the damage/i); // straight on to what's still missing
     assert.deepEqual(w.store.get(PHONE)?.said, []);
@@ -289,7 +289,7 @@ async function openedOnCar(o: { schedule?: (phone: string, token: string) => Pro
     let outcome = '';
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
-    assert.match(w.since().join('\n'), /A few questions about your car\. Answer as best you can, and if you don't know something, just say so\.\n1\. What make is the car\?\n2\. What model is it\?/);
+    assert.match(w.since().join('\n'), /A few questions about your car\. Answer as best you can, and if you don't know something, just say so\. You can type your answers or send a voice note\.\n1\. What make is the car\?\n2\. What model is it\?/);
     return { w, scheduled, t };
 }
 

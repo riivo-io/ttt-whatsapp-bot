@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 954c78b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit ec01101). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -44,7 +44,7 @@ import {
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
 import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, type ClaimTemplate } from './templates';
-import type { ClaimType, Facts } from './walkthrough';
+import { VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
 /**
  * Package settings. `claims.notificationWarningDays`: send the Upcoming note when this many days or fewer are left.
@@ -174,8 +174,6 @@ export interface FollowOnState {
   batchHint?: true;
   /** TTTFG-4830: what the last batch was about, so the next one on the same topic says "a few more questions". */
   topic?: string;
-  /** TTTFG-4830: how many questions the client's report answered; said once, right after the duty of disclosure. */
-  reportedUsed?: number;
   signingRequested: boolean;
   evidenceStarted: boolean;
   /** The deadline note and the duty of disclosure are out (TTTFG-5184: a resume doesn't send them again). */
@@ -274,7 +272,7 @@ export const NOTED_OTHERS = "Thanks, I've noted that.";
 /** TTTFG-4830 (voice notes): around what Tina saved from a voice note, said back first (heardText). */
 export const HEARD = { lead: 'From your voice note I noted:', end: 'If I misheard anything, just tell me.' } as const;
 /** TTTFG-4830 (batches): said with the first batch of a conversation. */
-export const BATCH_HINT = "Answer as best you can, and if you don't know something, just say so.";
+export const BATCH_HINT = `Answer as best you can, and if you don't know something, just say so. ${VOICE_OR_TEXT}`;
 /** TTTFG-4830: what's still open after a reply that answered part of a batch (several, or one). */
 export const STILL_NEED = { many: 'Thanks. I still need these:', one: 'Thanks. I still need this one:' } as const;
 /** TTTFG-4830: a reply that answered none of the batch. One question left is asked "in simpler words", as before. */
@@ -283,9 +281,6 @@ export const SORRY_BATCH = "Sorry, I didn't quite get that. Could you answer the
 export const FILE_SAVED = "Thanks, I've saved that with your claim.";
 /** TTTFG-4830: "Back to my question:" for a batch. */
 const plural = (lead: string) => lead.replace(/my question:$/, 'my questions:');
-/** TTTFG-4830: after the duty of disclosure, when the client's report already answered some of the form's questions. */
-export const usedReport = (n: number) =>
-  `I've filled in ${n === 1 ? 'one of the insurer\'s questions' : `${n} of the insurer's questions`} from what you've already told me, so I won't ask ${n === 1 ? 'it' : 'them'} again.`;
 
 /** TTTFG-5254 step 4: fixed text, sent when the claim has no SAPS case number. */
 export const SAPS_INSTRUCTION = "If you haven't yet, please report this to the SAPS. The insurer needs the case number.";
@@ -467,11 +462,6 @@ function intro(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | 
     out.push({ kind: 'template', template, text: template.render(vars) });
   }
   out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
-  // TTTFG-4830: after the duty of disclosure, just before the first of the insurer's questions.
-  if (st.reportedUsed) {
-    out.push({ kind: 'text', text: usedReport(st.reportedUsed) });
-    st = { ...st, reportedUsed: undefined };
-  }
   // TTTFG-4830: the client's home address goes on every form; confirmed first when it's missing or looks out of date.
   const check = addressAsk(c.claim, w.answers);
   if (check) {
@@ -617,9 +607,9 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
   if (st.sapsRequired) out.push({ kind: 'saps-required' });
   // Files kept from before the claim opened: filed now, so Tina never asks for one the client already sent.
   fileHeld(c, w, files, out, st.sapsRequired);
-  // TTTFG-4830: what the client already said while reporting the claim answers those questions; they aren't asked.
-  const used = applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
-  if (used) st.reportedUsed = used;
+  // TTTFG-4830: what the client already said while reporting the claim answers those questions; they aren't asked, and
+  // Tina doesn't announce it (one message less before the first question).
+  applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
     if (!w.facts.sapsCaseNumber) out.push({ kind: 'saps-instruction' });
     const item = sapsAsk(w.facts);

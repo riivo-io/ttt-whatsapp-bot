@@ -1,5 +1,6 @@
 console.log('[boot] dynamics.service: before axios');
 import axios from 'axios';
+import { whatsappCommunicationRow, type WhatsAppRegarding } from '../domain/whatsappLog';
 console.log('[boot] dynamics.service: before msal');
 import * as msal from '@azure/msal-node';
 console.log('[boot] dynamics.service: before dotenv');
@@ -1605,37 +1606,15 @@ export class DynamicsService {
         requestId?: string | null,
         messageId?: string | null
     ): Promise<void> {
-        const directionValue = direction === 'Incoming' ? 463630000 : 463630001;
-
-        const payload: any = {
-            "subject": `WhatsApp ${direction}: ${phoneNumber}`,
-            "description": messageContent,
-            "riivo_messagedirection": directionValue,
-            "riivo_from": direction === 'Incoming' ? phoneNumber : 'Bot',
-            "riivo_to": direction === 'Incoming' ? 'Bot' : phoneNumber,
-            "riivo_timestamp": new Date().toISOString()
-        };
-
-        // Meta's message id (wamid.xxx) for this exact message: the client's
-        // inbound message, or the reply we sent. Lets CRM link replies and
-        // delivery/read receipts back to the message. Omitted when unknown
-        // (synthetic/internal messages), so the row is written exactly as before.
-        if (messageId) {
-            payload["riivo_messageid"] = messageId;
-        }
-
         // Prefer threading under the request so staff can see the full
         // conversation on the request record in CRM. Fall back to the
         // contact/lead binding only when no request exists.
-        if (requestId) {
-            payload['regardingobjectid_riivo_request@odata.bind'] = `/riivo_requests(${requestId})`;
-        } else if (entity) {
-            if (entity.type === 'client') {
-                payload['regardingobjectid_contact@odata.bind'] = `/contacts(${entity.id})`;
-            } else if (entity.type === 'lead') {
-                payload['regardingobjectid_new_lead@odata.bind'] = `/new_leads(${entity.id})`;
-            }
-        }
+        const regarding: WhatsAppRegarding | null = requestId ? { table: 'riivo_request', id: requestId }
+            : entity?.type === 'client' ? { table: 'contact', id: entity.id }
+            : entity?.type === 'lead' ? { table: 'new_lead', id: entity.id }
+            : null;
+        // The row itself is built in src/domain/whatsappLog.ts, so the claims demo writes the same one (TTTFG-4830).
+        const payload = whatsappCommunicationRow({ text: messageContent, direction, phone: phoneNumber, wamid: messageId, regarding });
 
         try {
             await this.crmPost('riivo_whatsappcommunicationses', payload, entity?.id || phoneNumber);
