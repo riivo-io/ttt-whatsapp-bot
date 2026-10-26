@@ -11,6 +11,8 @@
  *   CLAIMS_DEMO_SHAREPOINT_SITE    default tttfinancialgroup.sharepoint.com:/sites/TTTDevelopment (Graph: GRAPH_*)
  *   CLAIMS_BATCH_QUIET_MS          TTTFG-4830: how long Tina waits, after a reply that answers part of her numbered
  *                                  questions, before she lists what's still open (default 45000; 0: lists it at once)
+ *   CLAIMS_FILES_QUIET_MS          TTTFG-4830: how long she waits after a photo for an evidence item before answering
+ *                                  about all of them (the front and back, photos of the scene; default 15000)
  *   CLAIMS_REMINDERS               TTTFG-5212: "off" stops the 08:00 reminder of what each demo client still has to
  *                                  send (on by default; the cron is GET /api/cron/claims-reminders)
  *   CLAIMS_REMINDER_TEMPLATE       TTTFG-5212: the approved WhatsApp template for a reminder outside the 24-hour window
@@ -25,7 +27,7 @@
  * contact; a voice note with its transcript and the recording attached (writeDemoLog).
  */
 import {
-    batchQuietMs, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
+    batchQuietMs, claimsDemoBatchCheck, filesQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
     type DemoConversation, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
@@ -233,8 +235,8 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
             ? {}
             : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint, log) }),
         ...(batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS) > 0
-            ? { scheduleBatchCheck: (to: string, token: string) =>
-                enqueueClaimsBatchCheck(to, token, batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
+            ? { scheduleBatchCheck: (to: string, token: string, what: 'answers' | 'files') => enqueueClaimsBatchCheck(to, token,
+                what === 'files' ? filesQuietMs(process.env.CLAIMS_FILES_QUIET_MS) : batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
             : {}),
     };
 }
