@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit 05d65be). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit bf96618). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -262,7 +262,8 @@ export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallb
   const actionBase: Omit<AgentActionRow, 'kind' | 'detail'> = {
     department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at: cb.audit.signedAt,
   };
-  if (claim.unsignedHash && claim.unsignedHash !== cb.audit.documentHash) {
+  // No unsigned form on record, or another one: this signature isn't on the claim's current form, so nothing is filed.
+  if (claim.unsignedHash !== cb.audit.documentHash) {
     await ports.createAgentAction({
       ...actionBase, kind: 'Follow-up',
       detail: `The client signed an earlier version of the claim form for ${claim.reference} (signing request ${cb.requestId}); the form was filled again after that link went out. It was not filed. Please check the client got the latest link.`,

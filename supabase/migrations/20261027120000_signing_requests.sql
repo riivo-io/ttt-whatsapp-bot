@@ -12,7 +12,9 @@
 --   audit          what was recorded with the signature: time, IP, browser,
 --                  channel, sent to, both hashes
 --   callback_*     the signed PDF's delivery to the caller; the signing-sweep
---                  cron retries 'pending' and 'failed' rows
+--                  cron retries 'pending' and 'failed' rows once
+--                  callback_next_at is due (a delivery running holds it as
+--                  a lease, so one callback never runs twice at once)
 -- The PDFs are in the private storage bucket "signing": <id>/unsigned.pdf and
 -- <id>/signed.pdf. Service role only (RLS on, no policies).
 -- =============================================================================
@@ -39,13 +41,14 @@ create table if not exists signing_requests (
     audit               jsonb,
     callback_status     text check (callback_status in ('pending', 'done', 'failed')),
     callback_attempts   integer not null default 0,
-    callback_error      text
+    callback_error      text,
+    callback_next_at    timestamptz
 );
 
 create index if not exists signing_requests_open_by_caller
     on signing_requests (caller, caller_record_id) where status = 'open';
 create index if not exists signing_requests_callbacks
-    on signing_requests (signed_at) where callback_status in ('pending', 'failed');
+    on signing_requests (callback_next_at) where callback_status in ('pending', 'failed');
 
 alter table signing_requests enable row level security;
 

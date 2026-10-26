@@ -6,6 +6,18 @@
 import type { Refusal } from './signing';
 
 const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174';
+/** cdnjs's published hash of pdf.min.js 3.11.174: the browser refuses the script if the CDN serves anything else. */
+const PDFJS_SRI = 'sha512-q+4liFwdPC/bNdhUpZx6aXDx/h77yEQtn4I1slHydcbZK34nLaR3cAeYSJshoxIOq3mjEf7xJE8YWIUHMn+oCQ==';
+
+/**
+ * The page's Content-Security-Policy: scripts only from itself and cdnjs (pdf.js runs its worker from a blob), data
+ * only from itself, never framed.
+ */
+export const SIGNING_PAGE_CSP = [
+    "default-src 'none'", "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com", 'worker-src blob: https://cdnjs.cloudflare.com',
+    "connect-src 'self' https://cdnjs.cloudflare.com", "img-src 'self' data: blob:", "style-src 'unsafe-inline'", 'font-src data:',
+    "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+].join('; ');
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
@@ -52,7 +64,7 @@ export function signingPage(title: string): string {
     <p class="msg" id="msg"></p>
   </section>
 </main>
-<script src="${PDFJS}/pdf.min.js"></script>
+<script src="${PDFJS}/pdf.min.js" integrity="${PDFJS_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 (function () {
   var token = location.pathname.split('/').filter(Boolean).pop();
@@ -119,7 +131,8 @@ export function signingPage(title: string): string {
   window.addEventListener('resize', function () { if (!inked) sizePad(); });
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = '${PDFJS}/pdf.worker.min.js';
-  pdfjsLib.getDocument({ url: location.pathname + '/document' }).promise.then(function (pdf) {
+  // isEvalSupported off: a crafted font can't run script (CVE-2024-4367).
+  pdfjsLib.getDocument({ url: location.pathname + '/document', isEvalSupported: false }).promise.then(function (pdf) {
     var chain = Promise.resolve(), canvases = [];
     for (var i = 1; i <= pdf.numPages; i++) (function (n) {
       chain = chain.then(function () { return pdf.getPage(n); }).then(function (page) {

@@ -57,24 +57,35 @@ export interface SigningRequestRow {
     callback_status: 'pending' | 'done' | 'failed' | null;
     callback_attempts: number;
     callback_error: string | null;
+    /**
+     * When the callback may next be tried. While one delivery runs it holds a lease (a time in the future), so the
+     * sweep can't send the same callback at the same time. Null once delivered, or given up.
+     */
+    callback_next_at: string | null;
 }
 
 export type NewSigningRequest = Omit<SigningRequestRow,
-    'document_path' | 'status' | 'opened_at' | 'signed_at' | 'signed_path' | 'audit' | 'callback_status' | 'callback_attempts' | 'callback_error'>;
+    'document_path' | 'status' | 'opened_at' | 'signed_at' | 'signed_path' | 'audit' | 'callback_status' | 'callback_attempts' | 'callback_error' | 'callback_next_at'>;
 
 export interface SigningStore {
     insert(row: NewSigningRequest, pdf: Uint8Array): Promise<SigningRequestRow>;
     byTokenHash(tokenHash: string): Promise<SigningRequestRow | null>;
     unsignedPdf(row: SigningRequestRow): Promise<Uint8Array>;
     signedPdf(row: SigningRequestRow): Promise<Uint8Array>;
-    /** Marks the caller record's open requests superseded (all but `exceptId`); returns how many. */
-    supersedeOpen(caller: string, callerRecordId: string, exceptId: string): Promise<number>;
+    /**
+     * Marks the caller record's open requests made before `createdBefore` superseded; returns how many. Only older ones:
+     * two requests made at once leave the later one open rather than closing each other.
+     */
+    supersedeOpen(caller: string, callerRecordId: string, createdBefore: string): Promise<number>;
     update(id: string, patch: Partial<SigningRequestRow>): Promise<void>;
-    saveSignedPdf(row: SigningRequestRow, pdf: Uint8Array): Promise<string>;
+    /** Saves a signed copy under a name of its own (its hash), never over another: the row says which one counts. */
+    saveSignedPdf(row: SigningRequestRow, pdf: Uint8Array, hash: string): Promise<string>;
     /** open to used, only if still open: false when another signature got there first. */
     markUsed(id: string, patch: Partial<SigningRequestRow>): Promise<boolean>;
-    /** Signed requests whose callback hasn't been answered, oldest first. */
-    pendingCallbacks(maxAttempts: number): Promise<SigningRequestRow[]>;
+    /** Signed requests whose callback is due (not delivered, not given up, no lease running), oldest first. */
+    pendingCallbacks(now: Date): Promise<SigningRequestRow[]>;
+    /** Takes the delivery lease: sets callback_next_at to `until` only if it is still `expected`. False when taken. */
+    leaseCallback(id: string, expected: string | null, until: string): Promise<boolean>;
     /** Open requests past their expiry become expired; returns how many. */
     expireOpen(now: Date): Promise<number>;
 }
@@ -93,7 +104,7 @@ export function memorySigningStore(): SigningStore & { rows: Map<string, Signing
             files.set(document_path, pdf);
             const full: SigningRequestRow = {
                 ...row, document_path, status: 'open', opened_at: null, signed_at: null, signed_path: null, audit: null,
-                callback_status: null, callback_attempts: 0, callback_error: null,
+                callback_status: null, callback_attempts: 0, callback_error: null, callback_next_at: null,
             };
             rows.set(row.id, full);
             return copy(full);
@@ -104,17 +115,17 @@ export function memorySigningStore(): SigningStore & { rows: Map<string, Signing
         },
         async unsignedPdf(r) { return files.get(r.document_path)!; },
         async signedPdf(r) { return files.get(r.signed_path!)!; },
-        async supersedeOpen(caller, recordId, exceptId) {
+        async supersedeOpen(caller, recordId, createdBefore) {
             let n = 0;
             for (const r of rows.values()) {
-                if (r.caller === caller && r.caller_record_id === recordId && r.status === 'open' && r.id !== exceptId) { r.status = 'superseded'; n++; }
+                if (r.caller === caller && r.caller_record_id === recordId && r.status === 'open' && r.created_at < createdBefore) { r.status = 'superseded'; n++; }
             }
             return n;
         },
         async update(id, patch) { Object.assign(rows.get(id)!, patch); },
-        async saveSignedPdf(r, pdf) {
-            const p = `${r.id}/signed.pdf`;
-            files.set(p, pdf);
+        async saveSignedPdf(r, pdf, hash) {
+            const p = `${r.id}/signed-${hash.slice(0, 16)}.pdf`;
+            if (!files.has(p)) files.set(p, pdf);
             return p;
         },
         async markUsed(id, patch) {
@@ -123,8 +134,16 @@ export function memorySigningStore(): SigningStore & { rows: Map<string, Signing
             Object.assign(r, patch, { status: 'used' });
             return true;
         },
-        async pendingCallbacks(max) {
-            return [...rows.values()].filter((r) => (r.callback_status === 'pending' || r.callback_status === 'failed') && r.callback_attempts < max).map(copy);
+        async pendingCallbacks(now) {
+            return [...rows.values()]
+                .filter((r) => (r.callback_status === 'pending' || r.callback_status === 'failed') && r.callback_next_at !== null && Date.parse(r.callback_next_at) <= now.getTime())
+                .map(copy);
+        },
+        async leaseCallback(id, expected, until) {
+            const r = rows.get(id);
+            if (!r || r.callback_next_at !== expected) return false;
+            r.callback_next_at = until;
+            return true;
         },
         async expireOpen(now) {
             let n = 0;
@@ -144,8 +163,9 @@ export function supabaseSigningStore(client: SupabaseClient = createClient(proce
         if (e) throw new Error(`[Signing] ${what}: ${e.message}`);
     };
     const upload = async (path: string, pdf: Uint8Array) => {
-        const { error } = await client.storage.from(BUCKET).upload(path, pdf, { contentType: 'application/pdf', upsert: true });
-        fail(`upload ${path}`, error);
+        const { error } = await client.storage.from(BUCKET).upload(path, pdf, { contentType: 'application/pdf', upsert: false });
+        // The same name is the same content (named by its hash), so a file that is already there is fine.
+        if (error && !/exists|duplicate/i.test(error.message)) fail(`upload ${path}`, error);
         return path;
     };
     const download = async (path: string) => {
@@ -167,9 +187,9 @@ export function supabaseSigningStore(client: SupabaseClient = createClient(proce
         },
         unsignedPdf: (r) => download(r.document_path),
         signedPdf: (r) => download(r.signed_path!),
-        async supersedeOpen(caller, recordId, exceptId) {
+        async supersedeOpen(caller, recordId, createdBefore) {
             const { data, error } = await client.from(TABLE).update({ status: 'superseded' })
-                .eq('caller', caller).eq('caller_record_id', recordId).eq('status', 'open').neq('id', exceptId).select('id');
+                .eq('caller', caller).eq('caller_record_id', recordId).eq('status', 'open').lt('created_at', createdBefore).select('id');
             fail('supersedeOpen', error);
             return data?.length ?? 0;
         },
@@ -177,17 +197,24 @@ export function supabaseSigningStore(client: SupabaseClient = createClient(proce
             const { error } = await client.from(TABLE).update(patch).eq('id', id);
             fail('update', error);
         },
-        saveSignedPdf: (r, pdf) => upload(`${r.id}/signed.pdf`, pdf),
+        saveSignedPdf: (r, pdf, hash) => upload(`${r.id}/signed-${hash.slice(0, 16)}.pdf`, pdf),
         async markUsed(id, patch) {
             const { data, error } = await client.from(TABLE).update({ ...patch, status: 'used' }).eq('id', id).eq('status', 'open').select('id');
             fail('markUsed', error);
             return (data?.length ?? 0) === 1;
         },
-        async pendingCallbacks(max) {
+        async pendingCallbacks(now) {
             const { data, error } = await client.from(TABLE).select('*').in('callback_status', ['pending', 'failed'])
-                .lt('callback_attempts', max).order('signed_at', { ascending: true }).limit(50);
+                .lte('callback_next_at', now.toISOString()).order('signed_at', { ascending: true }).limit(20);
             fail('pendingCallbacks', error);
             return (data as SigningRequestRow[]) ?? [];
+        },
+        async leaseCallback(id, expected, until) {
+            let q = client.from(TABLE).update({ callback_next_at: until }).eq('id', id);
+            q = expected === null ? q.is('callback_next_at', null) : q.eq('callback_next_at', expected);
+            const { data, error } = await q.select('id');
+            fail('leaseCallback', error);
+            return (data?.length ?? 0) === 1;
         },
         async expireOpen(now) {
             const { data, error } = await client.from(TABLE).update({ status: 'expired' }).eq('status', 'open').lte('expires_at', now.toISOString()).select('id');

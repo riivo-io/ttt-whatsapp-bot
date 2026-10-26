@@ -15,7 +15,7 @@ import { PDFDocument, PDFTextField, StandardFonts } from 'pdf-lib';
 import { signingRouter } from '../../src/routes/signing.route';
 import { signingPage } from '../../src/signing/page';
 import {
-    callbackSignature, createSigningRequest, formatDate, LINK_DAYS, openSigningRequest, sha256, signaturePng, signRequest, SIGNATURE_HEADER,
+    callbackSignature, callerCallbackKey, createSigningRequest, formatDate, LINK_DAYS, openSigningRequest, sha256, signaturePng, signRequest, SIGNATURE_HEADER,
     stampPdf, sweepSigning, type CreateRequestInput, type SigningDeps,
 } from '../../src/signing/signing';
 import { memorySigningStore, type SignStamp } from '../../src/signing/store';
@@ -37,9 +37,9 @@ async function samplePdf(text = 'Claim form'): Promise<Uint8Array> {
     return doc.save();
 }
 
-/** A small RGBA PNG with a pen stroke. */
-function pngSignature(): string {
-    const W = 120, H = 40, raw = Buffer.alloc((W * 4 + 1) * H);
+/** A small RGBA PNG with a pen stroke (or as wide as `W`). */
+function pngSignature(W = 120): string {
+    const H = 40, raw = Buffer.alloc((W * 4 + 1) * H);
     for (let x = 5; x < W - 5; x++) {
         const y = Math.round(20 + Math.sin(x / 8) * 10);
         const i = y * (W * 4 + 1) + 1 + x * 4;
@@ -127,7 +127,7 @@ test('check 5: the signature pad is off until the end of the last page has been 
     assert.match(html, /if \(!enabled\) return;/);
 });
 
-test('checks 6 and 7: signing stamps the signature and date, flattens the form, records the audit and calls back, signed with the secret', async () => {
+test('checks 6 and 7: signing stamps the signature and date, flattens the form, records the audit and calls back, signed with the caller\'s key', async () => {
     const w = world();
     const created = await createSigningRequest(w.deps, await w.input());
     const token = w.tokenOf(created.link);
@@ -153,7 +153,10 @@ test('checks 6 and 7: signing stamps the signature and date, flattens the form, 
     assert.equal(w.posts.length, 1);
     const post = w.posts[0];
     assert.equal(post.url, 'https://tina.example/webhook/claim-signed');
-    assert.ok(verifyHmacSha256(Buffer.from(post.body), post.headers[SIGNATURE_HEADER], SECRET));
+    assert.ok(verifyHmacSha256(Buffer.from(post.body), post.headers[SIGNATURE_HEADER], callerCallbackKey(SECRET, 'claim')));
+    // Neither the base key nor another caller's key makes this signature.
+    assert.ok(!verifyHmacSha256(Buffer.from(post.body), post.headers[SIGNATURE_HEADER], SECRET));
+    assert.ok(!verifyHmacSha256(Buffer.from(post.body), post.headers[SIGNATURE_HEADER], callerCallbackKey(SECRET, 'tax-approval')));
     const body = JSON.parse(post.body);
     assert.equal(body.caller, 'claim');
     assert.equal(body.callerRecordId, 'claim-1');
@@ -183,6 +186,7 @@ test('check 8: any caller works, with no claim involved', async () => {
 test('check 9: a new request for the same record supersedes the open one; the first link is refused, the second works', async () => {
     const w = world();
     const first = w.tokenOf((await createSigningRequest(w.deps, await w.input())).link);
+    w.at(new Date(NOW.getTime() + 1000));
     const second = w.tokenOf((await createSigningRequest(w.deps, await w.input({ document: await samplePdf('Filled again') }))).link);
     assert.deepEqual(await openSigningRequest(w.deps, first), { ok: false, reason: 'superseded' });
     assert.ok((await signRequest(w.deps, second, { signature: pngSignature(), ip: null, userAgent: null })).ok);
@@ -214,6 +218,20 @@ test('a callback the caller does not take is retried by the sweep, which also ex
     assert.equal(w.store.rows.get(created.id)!.callback_status, 'done');
 });
 
+test('two sweeps at once send a callback once: the first takes the lease', async () => {
+    const w = world({ postOk: false });
+    const created = await createSigningRequest(w.deps, await w.input());
+    const r = await signRequest(w.deps, w.tokenOf(created.link), { signature: pngSignature(), ip: null, userAgent: null });
+    assert.ok(r.ok && !(await r.delivery));
+    let sent = 0;
+    w.deps.post = async () => { sent++; return { ok: true, status: 200, text: '' }; };
+    w.at(new Date(NOW.getTime() + 3_600_000));
+    const [a, b] = await Promise.all([sweepSigning(w.deps), sweepSigning(w.deps)]);
+    assert.equal(sent, 1);
+    assert.equal(a.delivered + b.delivered, 1);
+    assert.equal(w.store.rows.get(created.id)!.callback_status, 'done');
+});
+
 test('the stamped date and signature land where the stamps say; a date that does not fit is made smaller', async () => {
     const pdf = await samplePdf();
     const png = signaturePng(pngSignature())!;
@@ -224,6 +242,7 @@ test('the stamped date and signature land where the stamps say; a date that does
     assert.equal(formatDate(new Date('2026-09-07T10:00:00Z'), 'month'), 'September');
     assert.equal(formatDate(new Date('2026-09-07T10:00:00Z'), 'yy'), '26');
     assert.equal(signaturePng('data:image/jpeg;base64,AAAA'), null);
+    assert.equal(signaturePng(pngSignature(6000)), null, 'a picture bigger than the pad is refused before it is unpacked');
 });
 
 // ------------------------------------------------------------------------------------------------- the routes
@@ -255,13 +274,16 @@ test('routes: the API needs the key; the page, the PDF and signing answer by the
     const w = world();
     const s = await serve({ ...w.deps, apiKey: 'k' });
     try {
-        const body = await w.input();
+        const body = await w.input({ caller: 'test', callerRecordId: 'x-1', callbackUrl: 'https://example.org/hook' });
         const json = { ...body, document: Buffer.from(body.document).toString('base64') };
-        const post = (key?: string) => fetch(`${s.base}/sign/api/requests`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify(json),
+        const post = (key?: string, over: object = {}) => fetch(`${s.base}/sign/api/requests`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify({ ...json, ...over }),
         });
         assert.equal((await post()).status, 401);
         assert.equal((await post('wrong')).status, 401);
+        // The key can't act as the claims flow: not its caller, not a callback to Tina.
+        assert.equal((await post('k', { caller: 'claim' })).status, 400);
+        assert.equal((await post('k', { callbackUrl: 'https://tina.example/webhook/claim-signed' })).status, 400);
         const created = await (await post('k')).json() as { link: string };
         const path = new URL(created.link).pathname;
 
@@ -269,13 +291,15 @@ test('routes: the API needs the key; the page, the PDF and signing answer by the
         assert.equal(page.status, 200);
         assert.equal(page.headers.get('cache-control'), 'no-store');
         assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
+        assert.match(page.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
         assert.match(await page.text(), /Claim form for Discovery \(CLM-000201\)/);
         const pdf = await fetch(`${s.base}${path}/document`);
         assert.equal(pdf.headers.get('content-type'), 'application/pdf');
         assert.equal(sha256(new Uint8Array(await pdf.arrayBuffer())), body.documentHash);
 
         const sign = (signature: string) => fetch(`${s.base}${path}`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '196.25.1.2:51234, 10.0.0.1' }, body: JSON.stringify({ signature }),
+            // What the client sends comes first; Azure's front end adds the real address last.
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '6.6.6.6, 196.25.1.2:51234' }, body: JSON.stringify({ signature }),
         });
         assert.equal((await sign('not a picture')).status, 400);
         assert.deepEqual(await (await sign(pngSignature())).json(), { ok: true });

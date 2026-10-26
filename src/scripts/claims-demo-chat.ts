@@ -39,7 +39,7 @@ import {
     cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
 } from '../services/claimsDemoWiring';
 import { signingRouter } from '../routes/signing.route';
-import { createSigningRequest, SIGNATURE_HEADER, type SigningDeps } from '../signing/signing';
+import { callerCallbackKey, createSigningRequest, SIGNATURE_HEADER, type SigningDeps } from '../signing/signing';
 import { memorySigningStore } from '../signing/store';
 import { verifyHmacSha256 } from '../utils/hmac';
 
@@ -139,7 +139,7 @@ function localSigning(port: number): DemoSigning {
     const app = express();
     app.use('/sign', signingRouter(() => deps));
     app.post('/webhook/claim-signed', express.raw({ type: 'application/json', limit: '40mb' }), async (req, res) => {
-        if (!verifyHmacSha256(req.body, req.header(SIGNATURE_HEADER), deps.callbackSecret)) return void res.status(401).end();
+        if (!verifyHmacSha256(req.body, req.header(SIGNATURE_HEADER), callerCallbackKey(deps.callbackSecret, 'claim'))) return void res.status(401).end();
         const b = JSON.parse(req.body.toString('utf8'));
         try {
             dv = cachedDv(rawDv, newCrmStats());

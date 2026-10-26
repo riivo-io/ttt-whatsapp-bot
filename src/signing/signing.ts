@@ -13,25 +13,32 @@
  * - Each signature records when, the IP address and browser, the channel and number or address the link went to, and
  *   both hashes (ECTA: an ordinary electronic signature with this record). The signed copy is flattened, so the
  *   signature can't be lifted off it.
- * - The callback is a POST of JSON signed with HMAC-SHA256 (header x-signing-signature). It goes once the signature is
- *   stored, without the client waiting for it (the caller files the copy and writes its records, which can take a
- *   while), and is retried until the caller answers 2xx: a few times straight away, then by the signing-sweep cron.
+ * - The callback is a POST of JSON signed with HMAC-SHA256 (header x-signing-signature) under a key of the caller's
+ *   own (callerCallbackKey), so one caller can't forge another's callback. It goes once the signature is stored,
+ *   without the client waiting for it (the caller files the copy and writes its records, which can take a while), and
+ *   is retried until the caller answers 2xx: three times straight away, then by the signing-sweep cron, backing off
+ *   for about 3 days. A delivery holds a lease (callback_next_at), so the same callback never runs twice at once.
  */
 import crypto from 'crypto';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import type { NewSigningRequest, SignatureAudit, SignChannel, SigningRequestRow, SigningStore, SignStamp } from './store';
 
 export const LINK_DAYS = 7;
-/** The callback is tried this often in all (straight away and by the cron) before it's left for a person. */
-export const MAX_CALLBACK_ATTEMPTS = 10;
+/** The callback is tried this often in all (three straight away, the rest by the cron, backing off) before it gives up. */
+export const MAX_CALLBACK_ATTEMPTS = 20;
+/** How long one delivery may take before the sweep may try the callback again. */
+const CALLBACK_LEASE_MS = 10 * 60_000;
+const CALLBACK_TIMEOUT_MS = 120_000;
 const MAX_SIGNATURE_BYTES = 1_000_000;
+/** The pad is at most about 1300 x 180 CSS pixels at 3x; anything bigger isn't from the page. */
+const MAX_SIGNATURE_SIDE = 5000;
 export const SIGNATURE_HEADER = 'x-signing-signature';
 
 export interface SigningDeps {
     store: SigningStore;
     /** Where the page is served, for the link (https://host, no trailing slash). */
     publicUrl: string;
-    /** The HMAC key the callback is signed with; the caller checks it. */
+    /** The base key the callbacks are signed with; each caller's key is derived from it (callerCallbackKey). */
     callbackSecret: string;
     now?: () => Date;
     /** The callback POST (fetch by default). */
@@ -79,7 +86,7 @@ export async function createSigningRequest(d: SigningDeps, input: CreateRequestI
         stamps: input.stamps, expires_at: new Date(created.getTime() + LINK_DAYS * 86_400_000).toISOString(), created_at: created.toISOString(),
     };
     await d.store.insert(row, input.document);
-    await d.store.supersedeOpen(row.caller, row.caller_record_id, row.id);
+    await d.store.supersedeOpen(row.caller, row.caller_record_id, row.created_at);
     return { id: row.id, link: `${d.publicUrl.replace(/\/$/, '')}/sign/${token}`, expiresAt: row.expires_at };
 }
 
@@ -128,11 +135,17 @@ export async function signRequest(d: SigningDeps, token: string, s: { signature:
         channel: row.channel, sentTo: row.sent_to, documentHash: row.document_hash, signedHash: sha256(signed),
         linkCreatedAt: row.created_at, openedAt: row.opened_at,
     };
-    const signedPath = await d.store.saveSignedPdf(row, signed);
-    if (!(await d.store.markUsed(row.id, { signed_at: audit.signedAt, signed_path: signedPath, audit, callback_status: 'pending' }))) {
-        return { ok: false, reason: 'used' };
+    // A copy of its own: a second signature at the same moment (two tabs) can't overwrite the one the row names.
+    const signedPath = await d.store.saveSignedPdf(row, signed, audit.signedHash);
+    // The delivery below holds the lease, so the sweep leaves this callback alone while it runs.
+    const lease = new Date(signedAt.getTime() + CALLBACK_LEASE_MS).toISOString();
+    const patch: Partial<SigningRequestRow> = { signed_at: audit.signedAt, signed_path: signedPath, audit, callback_status: 'pending', callback_next_at: lease };
+    if (!(await d.store.markUsed(row.id, patch))) {
+        // Another signature, a newer request or the expiry got there first: say which.
+        const now = await openSigningRequest(d, token, { record: false });
+        return { ok: false, reason: now.ok ? 'used' : now.reason };
     }
-    const delivery = deliverCallback(d, { ...row, status: 'used', signed_at: audit.signedAt, signed_path: signedPath, audit, callback_status: 'pending' }, signed, 3)
+    const delivery = deliverCallback(d, { ...row, ...patch, status: 'used' }, signed, 3)
         .catch((e) => { console.error(`[Signing] callback for ${row.id} failed: ${(e as Error).message}`); return false; });
     return { ok: true, requestId: row.id, delivery };
 }
@@ -144,6 +157,9 @@ export function signaturePng(dataUrl: string): Uint8Array | null {
     const bytes = Buffer.from(m[1], 'base64');
     const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
     if (bytes.length < 100 || bytes.length > MAX_SIGNATURE_BYTES || PNG.some((b, i) => bytes[i] !== b)) return null;
+    // The size it says it is (IHDR), before pdf-lib unpacks every pixel: a small file can claim to be enormous.
+    const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+    if (bytes.toString('latin1', 12, 16) !== 'IHDR' || !width || !height || width > MAX_SIGNATURE_SIDE || height > MAX_SIGNATURE_SIDE) return null;
     return new Uint8Array(bytes);
 }
 
@@ -195,49 +211,76 @@ export async function stampPdf(pdf: Uint8Array, stamps: SignStamp[], png: Uint8A
 // ------------------------------------------------------------------------------------------------- the callback
 
 const defaultPost: NonNullable<SigningDeps['post']> = async (url, body, headers) => {
-    const res = await fetch(url, { method: 'POST', body, headers, signal: AbortSignal.timeout(60_000) });
+    const res = await fetch(url, { method: 'POST', body, headers, signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS) });
     return { ok: res.ok, status: res.status, text: (await res.text().catch(() => '')).slice(0, 500) };
 };
 
-export const callbackSignature = (body: string, secret: string) => crypto.createHmac('sha256', secret).update(body).digest('hex');
+/** A caller's own callback key: what signs (and checks) its callbacks. Another caller's key can't make one. */
+export const callerCallbackKey = (secret: string, caller: string) => crypto.createHmac('sha256', secret).update(`caller:${caller}`).digest('hex');
+export const callbackSignature = (body: string, key: string) => crypto.createHmac('sha256', key).update(body).digest('hex');
 
-/** POSTs the signed PDF and the audit to the caller, up to `attempts` times now. Returns whether the caller took it. */
+/** After the n-th failed attempt, the wait before the next: 5 minutes, doubling, at most 6 hours (about 3 days in all). */
+const backoffMs = (attempts: number) => Math.min(6 * 3_600_000, 5 * 60_000 * 2 ** Math.max(0, attempts - 3));
+
+/**
+ * POSTs the signed PDF and the audit to the caller, up to `attempts` times now (the caller holds the lease). Returns
+ * whether the caller took it. A failure sets when to try next; after MAX_CALLBACK_ATTEMPTS it gives up and says so.
+ */
 export async function deliverCallback(d: SigningDeps, row: SigningRequestRow, signed?: Uint8Array, attempts = 1): Promise<boolean> {
-    const pdf = signed ?? (await d.store.signedPdf(row));
-    const body = JSON.stringify({
-        requestId: row.id, caller: row.caller, callerRecordId: row.caller_record_id, fileName: row.file_name,
-        signedPdf: Buffer.from(pdf).toString('base64'), audit: row.audit,
-    });
-    const headers = { 'Content-Type': 'application/json', [SIGNATURE_HEADER]: callbackSignature(body, d.callbackSecret) };
     let tried = row.callback_attempts;
     let error = '';
-    for (let i = 0; i < attempts && tried < MAX_CALLBACK_ATTEMPTS; i++) {
-        if (i > 0) await new Promise((r) => setTimeout(r, (d.retryDelayMs ?? 2000) * i));
-        tried++;
-        try {
-            const res = await (d.post ?? defaultPost)(row.callback_url, body, headers);
-            if (res.ok) {
-                await d.store.update(row.id, { callback_status: 'done', callback_attempts: tried, callback_error: null });
-                return true;
+    try {
+        const pdf = signed ?? (await d.store.signedPdf(row));
+        const body = JSON.stringify({
+            requestId: row.id, caller: row.caller, callerRecordId: row.caller_record_id, fileName: row.file_name,
+            signedPdf: Buffer.from(pdf).toString('base64'), audit: row.audit,
+        });
+        const headers = { 'Content-Type': 'application/json', [SIGNATURE_HEADER]: callbackSignature(body, callerCallbackKey(d.callbackSecret, row.caller)) };
+        for (let i = 0; i < attempts && tried < MAX_CALLBACK_ATTEMPTS; i++) {
+            if (i > 0) await new Promise((r) => setTimeout(r, (d.retryDelayMs ?? 2000) * i));
+            tried++;
+            try {
+                const res = await (d.post ?? defaultPost)(row.callback_url, body, headers);
+                if (res.ok) {
+                    await d.store.update(row.id, { callback_status: 'done', callback_attempts: tried, callback_error: null, callback_next_at: null });
+                    return true;
+                }
+                error = `HTTP ${res.status} ${res.text}`;
+            } catch (e) {
+                error = (e as Error).message;
             }
-            error = `HTTP ${res.status} ${res.text}`;
-        } catch (e) {
-            error = (e as Error).message;
         }
+    } catch (e) {
+        error = `could not read the signed copy: ${(e as Error).message}`;
     }
-    console.error(`[Signing] callback for ${row.id} not taken after ${tried} attempts: ${error}`);
-    await d.store.update(row.id, { callback_status: 'failed', callback_attempts: tried, callback_error: error.slice(0, 500) });
+    const givenUp = tried >= MAX_CALLBACK_ATTEMPTS;
+    const next = givenUp ? null : new Date(nowOf(d).getTime() + backoffMs(tried)).toISOString();
+    console.error(givenUp
+        ? `[Signing] GAVE UP on the callback for ${row.id} (${row.caller} ${row.caller_record_id}) after ${tried} attempts: ${error}. The client has signed; the caller never took it.`
+        : `[Signing] callback for ${row.id} not taken (${tried} attempts, next ${next}): ${error}`);
+    await d.store.update(row.id, { callback_status: 'failed', callback_attempts: tried, callback_error: error.slice(0, 500), callback_next_at: next });
     return false;
 }
 
-/** The signing-sweep cron: open requests past 7 days expire, and callbacks not yet taken are tried again. */
+/**
+ * The signing-sweep cron: open requests past 7 days expire, and callbacks that are due are tried again, each under its
+ * own lease (an overlapping sweep or a delivery still running skips it). One that fails doesn't stop the rest.
+ */
 export async function sweepSigning(d: SigningDeps): Promise<{ expired: number; delivered: number; failed: number }> {
-    const expired = await d.store.expireOpen(nowOf(d));
+    const now = nowOf(d);
+    const expired = await d.store.expireOpen(now);
     let delivered = 0;
     let failed = 0;
-    for (const row of await d.store.pendingCallbacks(MAX_CALLBACK_ATTEMPTS)) {
-        if (await deliverCallback(d, row)) delivered++;
-        else failed++;
+    for (const row of await d.store.pendingCallbacks(now)) {
+        try {
+            const lease = new Date(now.getTime() + CALLBACK_LEASE_MS).toISOString();
+            if (!(await d.store.leaseCallback(row.id, row.callback_next_at, lease))) continue;
+            if (await deliverCallback(d, { ...row, callback_next_at: lease })) delivered++;
+            else failed++;
+        } catch (e) {
+            failed++;
+            console.error(`[Signing] sweep: ${row.id}: ${(e as Error).message}`);
+        }
     }
     return { expired, delivered, failed };
 }
