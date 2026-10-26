@@ -49,10 +49,17 @@ export function parseDemoNumbers(raw: string | undefined): Map<string, string> {
  * TTTFG-4830: CLAIMS_BATCH_QUIET_MS, how long Tina waits after a reply that answers part of a batch before she lists
  * what's still open. Default 45 seconds; 0 lists it at once. Read on every message, so a changed setting needs no deploy.
  */
-export function batchQuietMs(raw: string | undefined): number {
-    const ms = raw === undefined || raw.trim() === '' ? 45_000 : Number(raw);
-    return Number.isFinite(ms) && ms >= 0 ? ms : 45_000;
+export function batchQuietMs(raw: string | undefined, fallback = 45_000): number {
+    const ms = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
+    return Number.isFinite(ms) && ms >= 0 ? ms : fallback;
 }
+
+/**
+ * TTTFG-4830: CLAIMS_FILES_QUIET_MS, how long Tina waits after a photo or document for an evidence item before she
+ * answers about all of them (the front and back, several photos of the scene). Default 15 seconds: photos picked
+ * together arrive within seconds of each other.
+ */
+export const filesQuietMs = (raw: string | undefined): number => batchQuietMs(raw, 15_000);
 
 /**
  * TTTFG-5212: the demo numbers as WhatsApp numbers (27 and nine digits, as Meta sends them and the conversation is kept
@@ -122,10 +129,11 @@ export interface ClaimsDemoDeps {
     signUpLink: string;
     /**
      * TTTFG-4830: calls claimsDemoBatchCheck(phone, token) after a quiet spell, on the phone's own queue, so it comes
-     * after anything the client sends meanwhile. With it, Tina waits for the rest of a part-answered batch of questions;
-     * without it, she lists what's still open straight away.
+     * after anything the client sends meanwhile. With it, Tina waits for the rest of a part-answered batch of questions,
+     * and for the rest of the photos for an evidence item (`what` 'files': a shorter spell); without it, she answers
+     * straight away.
      */
-    scheduleBatchCheck?(phone: string, token: string): Promise<void>;
+    scheduleBatchCheck?(phone: string, token: string, what: 'answers' | 'files'): Promise<void>;
     /** TTTFG-5212: when the claim's last morning reminder went out (its agent action). Absent: never. */
     lastReminderOn?(claimId: string): Promise<string | null>;
     /**
@@ -267,7 +275,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         const token = r.state.followOn?.waiting;
         if (token && deps.scheduleBatchCheck) {
             try {
-                await deps.scheduleBatchCheck(m.phone, token);
+                await deps.scheduleBatchCheck(m.phone, token, r.state.followOn?.waitingFor === 'files' ? 'files' : 'answers');
             } catch (e) {
                 console.warn('[ClaimsDemo] Scheduling the batch check failed; listing what is open now:', (e as Error).message);
                 const listed = await followOnTurn(ports, conv(), r.state.followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit bf96618). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit da163a4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -247,6 +247,12 @@ function joinWhen(out: Facts, more: Facts): void {
     delete out.incidentTime;
   }
 }
+
+/**
+ * TTTFG-4830 (voice notes): the client can answer by voice note as well as by typing. Said once in the walkthrough (with
+ * the first "what happened" question) and once in the follow-on (with the first batch of the insurer's questions).
+ */
+export const VOICE_OR_TEXT = 'You can type your answers or send a voice note.';
 
 /**
  * TTTFG-4830 (voice notes): told to Claude with a message that is the transcript of a WhatsApp voice note (the host

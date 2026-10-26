@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
-    VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
+    filesQuietMs, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
 } from '../../src/domain/claimsDemoHost';
 import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
@@ -172,6 +172,11 @@ test('the whole claim: walkthrough, the form after the last question, then the p
     w.replies.push({});
     assert.equal(await say(w, '', (t = tick(t, 2)), photo), 'follow-on');
     assert.deepEqual(w.filed.map((f) => [f.file.id, f.claimId, f.itemKey]), [['media-1', 'claim-1', 'damagePhoto']]);
+    // TTTFG-4830: photos of the damage are any number, so Tina asks whether that's all of them before she finishes.
+    assert.deepEqual(w.since(), ["Thanks, I've got that one. Is that all the photos of the damage, or do you have more?"]);
+    w.replies.push({ kind: 'value', valueBool: true });
+    assert.equal(await say(w, 'Yes', (t = tick(t, 1))), 'follow-on');
+    assert.match(w.since()[0], /^Thanks, I've got the photos of the damage\./);
     assert.equal(w.store.get(PHONE)?.resume.followOn, null); // nothing more to ask
     assert.equal(w.signatureCalls.length, 1);
 });
@@ -208,7 +213,7 @@ test('the SAPS step applies when the client describes a theft', () => {
     assert.equal(describedAsTheft(w('Motor accident', 'A taxi drove into me')), false);
 });
 
-test('what the client said while reporting the claim answers the form: Tina says so and skips that question', async () => {
+test('what the client said while reporting the claim answers the form: that question is skipped, without a word about it', async () => {
     const w = world({ reported: [{ key: 'driverName', valueText: 'Adriaan', valueNumber: null, valueBool: null }] });
     let t = DAY1;
     await say(w, 'I was driving my car when someone drove into the back of it at the Claremont robot', t);
@@ -221,7 +226,7 @@ test('what the client said while reporting the claim answers the form: Tina says
     assert.equal(w.rows[0].answers.driverName?.value, 'Adriaan');
     assert.equal(w.rows[0].answers.driverName?.source, 'report');
     const opened = w.since().join('\n');
-    assert.match(opened, /I've filled in one of the insurer's questions from what you've already told me/);
+    assert.doesNotMatch(opened, /filled in|already told me/); // TTTFG-4830: one message less before the questions
     assert.doesNotMatch(opened, /Who was driving the vehicle\?/);
     assert.match(opened, /Please send me photos of the damage/i); // straight on to what's still missing
     assert.deepEqual(w.store.get(PHONE)?.said, []);
@@ -289,7 +294,7 @@ async function openedOnCar(o: { schedule?: (phone: string, token: string) => Pro
     let outcome = '';
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
-    assert.match(w.since().join('\n'), /A few questions about your car\. Answer as best you can, and if you don't know something, just say so\.\n1\. What make is the car\?\n2\. What model is it\?/);
+    assert.match(w.since().join('\n'), /A few questions about your car\. Answer as best you can, and if you don't know something, just say so\. You can type your answers or send a voice note\.\n1\. What make is the car\?\n2\. What model is it\?/);
     return { w, scheduled, t };
 }
 
@@ -464,5 +469,44 @@ test('TTTFG-4830: the transcription hint says who is speaking and ends with what
     const long = voiceHint(`A few questions about your car.\n1. ${'What make is the car? '.repeat(100)}`);
     assert.match(long, /Tina asked: A few questions about your car\. 1\. What make/);
     assert.ok(long.length < 1200);
+});
+
+// ---- TTTFG-4830: photos for one item, sent together ----
+
+test('TTTFG-4830: the front and back of the licence: both filed as the licence, one answer after the photos stop', async () => {
+    const LICENCE: StoredClaimForm = {
+        ...MOTOR, id: 'cf-licence',
+        questionList: [
+            q('driverName', 'Who was driving the vehicle?'),
+            q('driversLicence', "A photo of the front and back of the driver's licence.", { kind: 'evidence', answerType: 'photo', name: "the photo of the driver's licence" }),
+            q('driverId', "A photo of the driver's ID document or ID card.", { kind: 'evidence', answerType: 'photo', name: "the photo of the driver's ID" }),
+        ],
+    };
+    const w = world({ form: LICENCE });
+    const scheduled: [string, string, string][] = [];
+    w.deps.scheduleBatchCheck = async (phone, token, what) => void scheduled.push([phone, token, what]);
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    w.replies.push({ kind: 'value', valueText: 'Me' });
+    await say(w, 'Me', (t = tick(t, 1)));
+    assert.match(w.since().at(-1)!, /front and back of the driver's licence/);
+
+    // Two photos in a row; Claude guesses the second is the ID (the licence looks in): it is still the licence.
+    const front: ClientFile = { ...photo, id: 'media-front' };
+    const back: ClientFile = { ...photo, id: 'media-back' };
+    w.replies.push({});
+    await say(w, '', (t = tick(t, 1)), front);
+    w.replies.push({ forItem: 'driverId' });
+    await say(w, '', (t = tick(t, 0.1)), back);
+    assert.deepEqual(w.since(), []); // nothing while the photos come in
+    assert.deepEqual(w.filed.map((f) => [f.file.id, f.itemKey]), [['media-front', 'driversLicence'], ['media-back', 'driversLicence']]);
+    assert.deepEqual(scheduled.map(([, , what]) => what), ['files', 'files']);
+    assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, scheduled[0][1], tick(t, 1)), 'stale'); // the first photo's check: the second came since
+    assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, scheduled[1][1], tick(t, 1)), 'listed');
+    assert.deepEqual(w.since(), ["Thanks, I've got the photo of the driver's licence.", "Please send me a photo of the driver's ID document or ID card."]);
+    assert.equal(filesQuietMs(undefined), 15_000);
+    assert.equal(filesQuietMs('5000'), 5_000);
 });
 

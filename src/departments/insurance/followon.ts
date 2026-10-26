@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit bf96618). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit da163a4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -40,11 +40,12 @@ import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimS
 import { formatProblem } from './formats';
 import { claimGate } from './gate';
 import {
-  applies, chased, deferred, formItems, itemName, missingItems, nextBatch, nextItem, sapsStepApplies, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
+  applies, chased, deferred, evidenceIn, fileCount, filesFor, formItems, itemName, missingItems, nextBatch, nextItem, sapsStepApplies, SAPS_CASE_KEY,
+  SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
 import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, type ClaimTemplate } from './templates';
-import type { ClaimType, Facts } from './walkthrough';
+import { VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
 /**
  * Package settings. `claims.notificationWarningDays`: send the Upcoming note when this many days or fewer are left.
@@ -170,12 +171,20 @@ export interface FollowOnState {
    * host's `nudge` with this wamid lists what's still open. A later message replaces it, so an older nudge does nothing.
    */
   waiting?: string;
+  /**
+   * TTTFG-4830: what Tina is `waiting` for: 'files' when files are coming in for the evidence item she asked (`asking`).
+   * Every file sent belongs to it, and she answers once they stop coming (the host waits less long than for answers).
+   */
+  waitingFor?: 'files';
+  /**
+   * TTTFG-4830: the evidence item of any number of files (photos of the scene) whose files Tina asked "Are those all of
+   * them?" about. A yes takes her on; a no, or more files, keeps her on it.
+   */
+  confirming?: string;
   /** TTTFG-4830: Tina has said "if you don't know something, just say so" in this conversation. */
   batchHint?: true;
   /** TTTFG-4830: what the last batch was about, so the next one on the same topic says "a few more questions". */
   topic?: string;
-  /** TTTFG-4830: how many questions the client's report answered; said once, right after the duty of disclosure. */
-  reportedUsed?: number;
   signingRequested: boolean;
   evidenceStarted: boolean;
   /** The deadline note and the duty of disclosure are out (TTTFG-5184: a resume doesn't send them again). */
@@ -274,18 +283,28 @@ export const NOTED_OTHERS = "Thanks, I've noted that.";
 /** TTTFG-4830 (voice notes): around what Tina saved from a voice note, said back first (heardText). */
 export const HEARD = { lead: 'From your voice note I noted:', end: 'If I misheard anything, just tell me.' } as const;
 /** TTTFG-4830 (batches): said with the first batch of a conversation. */
-export const BATCH_HINT = "Answer as best you can, and if you don't know something, just say so.";
+export const BATCH_HINT = `Answer as best you can, and if you don't know something, just say so. ${VOICE_OR_TEXT}`;
 /** TTTFG-4830: what's still open after a reply that answered part of a batch (several, or one). */
 export const STILL_NEED = { many: 'Thanks. I still need these:', one: 'Thanks. I still need this one:' } as const;
 /** TTTFG-4830: a reply that answered none of the batch. One question left is asked "in simpler words", as before. */
 export const SORRY_BATCH = "Sorry, I didn't quite get that. Could you answer these?";
+/**
+ * TTTFG-4830: files for an evidence item of any number (photos of the scene), once they stop coming: Tina asks whether
+ * that's all of them before she moves on.
+ */
+export const allOfThem = (n: number, item: QuestionItem) =>
+  `Thanks, I've got ${n === 1 ? 'that one' : `those ${n}`}. ${n === 1 ? 'Is that' : 'Are those'} all ${itemName(item)}, or do you have more?`;
+/** TTTFG-4830: the same, asked again after a reply that wasn't a yes or a no. */
+export const allOfThemAgain = (item: QuestionItem) => `Is that all ${itemName(item)}? Please just answer yes or no.`;
+/** TTTFG-4830: "No, there are more" to allOfThem. */
+export const SEND_THE_REST = "No problem, send the rest here when you're ready.";
+/** TTTFG-4830: an evidence item of a set number of files (the front and back): fewer came. */
+export const theOthers = (have: number, need: number) =>
+  `Thanks, I've got ${have} of the ${need}. Please send me the other${need - have > 1 ? 's' : ' one'} too.`;
 /** TTTFG-4830: a file in the middle of a batch, acknowledged while Tina waits for the rest. */
 export const FILE_SAVED = "Thanks, I've saved that with your claim.";
 /** TTTFG-4830: "Back to my question:" for a batch. */
 const plural = (lead: string) => lead.replace(/my question:$/, 'my questions:');
-/** TTTFG-4830: after the duty of disclosure, when the client's report already answered some of the form's questions. */
-export const usedReport = (n: number) =>
-  `I've filled in ${n === 1 ? 'one of the insurer\'s questions' : `${n} of the insurer's questions`} from what you've already told me, so I won't ask ${n === 1 ? 'it' : 'them'} again.`;
 
 /** TTTFG-5254 step 4: fixed text, sent when the claim has no SAPS case number. */
 export const SAPS_INSTRUCTION = "If you haven't yet, please report this to the SAPS. The insurer needs the case number.";
@@ -395,7 +414,7 @@ export function accept(item: QuestionItem, v: string | number | boolean): string
 }
 
 /** The state without what belongs to the question (or batch) Tina was on. */
-const moveOn = ({ waitingOn: _o, batch: _b, relisted: _r, waiting: _w, ...st }: FollowOnState): FollowOnState => st;
+const moveOn = ({ waitingOn: _o, batch: _b, relisted: _r, waiting: _w, waitingFor: _f, confirming: _c, ...st }: FollowOnState): FollowOnState => st;
 
 /**
  * The next question (or batch of questions, TTTFG-4830) or evidence item, the signing step between them, and the end.
@@ -467,11 +486,6 @@ function intro(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | 
     out.push({ kind: 'template', template, text: template.render(vars) });
   }
   out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
-  // TTTFG-4830: after the duty of disclosure, just before the first of the insurer's questions.
-  if (st.reportedUsed) {
-    out.push({ kind: 'text', text: usedReport(st.reportedUsed) });
-    st = { ...st, reportedUsed: undefined };
-  }
   // TTTFG-4830: the client's home address goes on every form; confirmed first when it's missing or looks out of date.
   const check = addressAsk(c.claim, w.answers);
   if (check) {
@@ -617,9 +631,9 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
   if (st.sapsRequired) out.push({ kind: 'saps-required' });
   // Files kept from before the claim opened: filed now, so Tina never asks for one the client already sent.
   fileHeld(c, w, files, out, st.sapsRequired);
-  // TTTFG-4830: what the client already said while reporting the claim answers those questions; they aren't asked.
-  const used = applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
-  if (used) st.reportedUsed = used;
+  // TTTFG-4830: what the client already said while reporting the claim answers those questions; they aren't asked, and
+  // Tina doesn't announce it (one message less before the first question).
+  applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
     if (!w.facts.sapsCaseNumber) out.push({ kind: 'saps-instruction' });
     const item = sapsAsk(w.facts);
@@ -744,12 +758,12 @@ function resumedSaps(c: Ctx): boolean {
 function fileHeld(c: Ctx, w: Work, files: readonly ResumeFile[], out: Out[], sapsRequired: boolean) {
   for (const f of files) {
     const open = formItems(c.form, w.answers, w.facts, sapsRequired)
-      .filter((i) => i.kind === 'evidence' && applies(i, w.answers, w.facts) && !w.evidence.some((e) => e.key === i.key));
+      .filter((i) => i.kind === 'evidence' && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence));
     const item = open.find((i) => i.key === f.forItem) ?? (open.length === 1 ? open[0] : undefined);
     out.push({ kind: 'file', file: f.file, itemKey: item?.key });
     if (item) {
-      out.push({ kind: 'received', item });
       w.evidence.push({ key: item.key });
+      if (evidenceIn(item, w.evidence)) out.push({ kind: 'received', item });
     }
   }
 }
@@ -913,6 +927,28 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
     return { state: proceed(c, w, { ...st, misses: 0 }, out), out };
   }
 
+  // TTTFG-4830: "Are those all of them?" (an evidence item of any number of files): a yes takes Tina on, a no keeps her
+  // waiting for the rest, "later" moves on with what came; anything else is asked once more, then she moves on.
+  if (item.kind === 'evidence' && st.confirming === item.key && input.kind !== 'file') {
+    const s = { ...st, waiting: undefined, waitingFor: undefined };
+    if (input.kind === 'value' && input.value === false) {
+      out.push({ kind: 'text', text: SEND_THE_REST });
+      return { state: s, out };
+    }
+    if (input.kind === 'unparsed' && st.misses < 1) {
+      out.push({ kind: 'text', text: allOfThemAgain(item) });
+      return { state: { ...s, misses: st.misses + 1 }, out };
+    }
+    out.push({ kind: 'received', item });
+    return { state: proceed(c, w, s, out), out };
+  }
+  // TTTFG-4830: files were coming in for this item and the client wrote before the quiet spell was over: Tina answers
+  // about the files now. "I don't have the back" passes over what's missing, as "not yet" does.
+  if (item.kind === 'evidence' && st.waitingFor === 'files' && input.kind !== 'file') {
+    st = { ...st, waiting: undefined, waitingFor: undefined };
+    if (input.kind !== 'not-yet') return { state: filesIn(c, w, st, item, out), out };
+  }
+
   if (input.kind === 'saps' && input.caseNumber) {
     // The case number the client didn't have earlier: saved, and the current item stands.
     out.push({ kind: 'save-saps', caseNumber: input.caseNumber.trim(), station: input.station?.trim() || undefined });
@@ -923,20 +959,29 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
   if (input.kind === 'file') {
     // TTTFG-5184: Claude reads the file as another open evidence item: filed and thanked as that item. Tina's question
     // stands; on an evidence item she just waits (asking again straight away would ask the same thing twice).
-    const other = input.forItem && input.forItem !== item.key
+    // TTTFG-4830: while Tina asks for an evidence item, every file sent belongs to it (the front and the back, several
+    // photos of the scene); she answers once they stop coming. Only a file the client named themself (a document's own
+    // file name, "quote.pdf") can be another item: a camera photo's name is Tina's (image-<time>), so Claude's reading of
+    // it is a guess from her question.
+    const other = (item.kind === 'question' || clientNamed(input.file)) && input.forItem && input.forItem !== item.key
       ? formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === input.forItem && i.kind === 'evidence'
-        && applies(i, w.answers, w.facts) && !w.evidence.some((e) => e.key === i.key))
+        && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence))
       : undefined;
     if (other) {
-      out.push({ kind: 'file', file: input.file, itemKey: other.key }, { kind: 'received', item: other });
+      out.push({ kind: 'file', file: input.file, itemKey: other.key });
       w.evidence.push({ key: other.key });
-      if (item.kind === 'question') out.push({ kind: 'ask', item, simpler: false, lead: 'Back to my question:' });
+      const complete = evidenceIn(other, w.evidence);
+      if (complete) out.push({ kind: 'received', item: other });
+      // On a question Tina asks it again; on an evidence item she just waits (asking again would ask the same thing twice).
+      if (item.kind === 'question') out.push({ kind: 'ask', item, simpler: false, lead: complete ? 'Back to my question:' : SAVED_FILE });
+      else if (!complete) out.push({ kind: 'text', text: FILE_SAVED });
       return { state: st, out };
     }
     if (item.kind === 'evidence') {
-      out.push({ kind: 'file', file: input.file, itemKey: item.key }, { kind: 'received', item });
+      out.push({ kind: 'file', file: input.file, itemKey: item.key });
       w.evidence.push({ key: item.key });
-      return { state: proceed(c, w, st, out), out };
+      if (c.waitForMore) return { state: { ...st, waiting: input.wamid, waitingFor: 'files', misses: 0 }, out };
+      return { state: filesIn(c, w, st, item, out), out };
     }
     // A file in the middle of the questions still goes to the pipeline against the claim; the question stands.
     out.push({ kind: 'file', file: input.file }, { kind: 'ask', item, simpler: false, lead: SAVED_FILE });
@@ -1124,12 +1169,12 @@ function advanceBatch(
   if (input.kind === 'file') {
     // Filed against the claim, as the evidence item Claude read it as when that one is still missing.
     const item = input.forItem
-      ? list().find((i) => i.key === input.forItem && i.kind === 'evidence' && applies(i, w.answers, w.facts) && !w.evidence.some((e) => e.key === i.key))
+      ? list().find((i) => i.key === input.forItem && i.kind === 'evidence' && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence))
       : undefined;
     out.push({ kind: 'file', file: input.file, itemKey: item?.key });
-    if (item) {
+    if (item) w.evidence.push({ key: item.key });
+    if (item && evidenceIn(item, w.evidence)) {
       out.push({ kind: 'received', item });
-      w.evidence.push({ key: item.key });
       back = BACK;
     } else back = { many: plural(SAVED_FILE), one: SAVED_FILE, count: false };
   } else if (input.kind === 'saps' && input.caseNumber) {
@@ -1231,9 +1276,41 @@ function relist(c: Ctx, w: Work, st: FollowOnState, out: Out[], lead: Relist, at
 }
 
 /** The host's nudge: when Tina is still waiting on that message, what's open is listed again. */
+/** TTTFG-4830: a file whose name the client gave (a document), not one Tina's host named (image-<time>.jpeg). */
+export const clientNamed = (file: ClientFile) => !/^(image|document|video|audio)-\d+(\.\w+)?$/i.test(file.fileName);
+
+/**
+ * TTTFG-4830: Tina's one answer about the files the client sent for the evidence item she asked: all its files are in
+ * (the front and back): thanked and on to the next item; fewer than it needs: asks for the rest; an item of any number
+ * (photos of the scene): "Are those all of them?" and she waits for the yes.
+ */
+function filesIn(c: Ctx, w: Work, st: FollowOnState, item: QuestionItem, out: Out[]): FollowOnState | null {
+  const have = filesFor(item, w.evidence);
+  const need = fileCount(item);
+  if (need === 'any') {
+    out.push({ kind: 'text', text: allOfThem(have, item) });
+    return { ...st, confirming: item.key, misses: 0 };
+  }
+  if (have < need) {
+    out.push({ kind: 'text', text: theOthers(have, need) });
+    return st;
+  }
+  out.push({ kind: 'received', item });
+  return proceed(c, w, st, out);
+}
+
 function nudged(c: Ctx, st: FollowOnState, wamid: string): Step {
   if (st.waiting !== wamid) return { state: st, out: [] };
   if (st.phase === 'still-need') return stillNeedNudged(c, st);
+  if (st.waitingFor === 'files') {
+    // TTTFG-4830: the files for the evidence item have stopped coming: one answer about all of them.
+    const w = work(c.claim);
+    const item = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === st.asking && i.kind === 'evidence');
+    const s = { ...st, waiting: undefined, waitingFor: undefined };
+    if (!item) return { state: s, out: [] };
+    const out: Out[] = [];
+    return { state: filesIn(c, w, s, item, out), out };
+  }
   if (!st.batch) return { state: st, out: [] };
   const out: Out[] = [];
   return { state: relist(c, work(c.claim), st, out, { ...STILL_NEED, count: true }, c.now.toISOString(), wamid), out };
@@ -1265,13 +1342,12 @@ function advanceStillNeed(
   } else if (input.kind === 'file') {
     // As the evidence item Claude read it as, else the only one missing, else against the claim for the pipeline to sort.
     const open = formItems(c.form, w.answers, w.facts, st.sapsRequired)
-      .filter((i) => i.kind === 'evidence' && applies(i, w.answers, w.facts) && !w.evidence.some((e) => e.key === i.key));
+      .filter((i) => i.kind === 'evidence' && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence));
     const item = open.find((i) => i.key === input.forItem) ?? (open.length === 1 ? open[0] : undefined);
     out.push({ kind: 'file', file: input.file, itemKey: item?.key });
-    if (item) {
-      out.push({ kind: 'received', item });
-      w.evidence.push({ key: item.key });
-    } else out.push({ kind: 'text', text: FILE_SAVED });
+    if (item) w.evidence.push({ key: item.key });
+    if (item && evidenceIn(item, w.evidence)) out.push({ kind: 'received', item });
+    else out.push({ kind: 'text', text: FILE_SAVED });
     got = filed = true;
   } else if (input.kind === 'not-yet' && !got) {
     out.push({ kind: 'text', text: WHEN_YOU_HAVE_THEM });
