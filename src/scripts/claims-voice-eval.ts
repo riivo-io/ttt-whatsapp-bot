@@ -3,8 +3,9 @@
  *
  * Each case is one of Tina's batches from the Discovery motor damage form, and what a client might say to it in a
  * voice note (numbers and letters spoken, filler words, a self-correction). For each case it
- *  1. makes the voice note: macOS `say` with Tessa (South African English), or a real recording from --audio
- *     (<dir>/<case>.ogg, .m4a, .mp3 or .wav: record them on WhatsApp and export, to hear real accents);
+ *  1. makes the voice note: macOS `say` with Tessa (South African English), or real recordings from --audio: one
+ *     person's in <dir>/<case>.ogg (or .opus, .m4a, .mp3, .wav), or one folder per person, <dir>/<name>/<case>.ogg,
+ *     each scored on its own (RECORDING-GUIDE.md in handovers/claims-voice-notes-1026 says what each person says);
  *  2. transcribes it with each model in --models, with the hint Tina gives (claimsDemoHost voiceHint);
  *  3. has Claude read the transcript against the batch as Tina does (reply.ts readReply, spoken), and checks every
  *     answer against what the client said;
@@ -108,11 +109,24 @@ function right(want: string | number | boolean | RegExp, got: unknown): boolean 
     return want === got;
 }
 
-function voiceNote(c: Case): { file: string; mimeType: string } {
-    for (const [ext, mimeType] of [['ogg', 'audio/ogg'], ['m4a', 'audio/mp4'], ['mp3', 'audio/mpeg'], ['wav', 'audio/wav']] as const) {
-        const p = audioDir && path.join(audioDir, `${c.id}.${ext}`);
-        if (p && fs.existsSync(p)) return { file: p, mimeType };
-    }
+const RECORDINGS = [['ogg', 'audio/ogg'], ['opus', 'audio/ogg'], ['m4a', 'audio/mp4'], ['mp3', 'audio/mpeg'], ['wav', 'audio/wav']] as const;
+const recording = (dir: string, id: string) => {
+    for (const [ext, mimeType] of RECORDINGS) if (fs.existsSync(path.join(dir, `${id}.${ext}`))) return { file: path.join(dir, `${id}.${ext}`), mimeType };
+    return null;
+};
+
+/** Whose voice notes: Tessa without --audio; else the folder itself, or each folder in it that holds a recording. */
+function speakers(): { name: string; dir?: string }[] {
+    if (!audioDir) return [{ name: 'Tessa (macOS say)' }];
+    const dirs = [audioDir, ...fs.readdirSync(audioDir).map((d) => path.join(audioDir, d)).filter((d) => fs.statSync(d).isDirectory())];
+    const found = dirs.filter((d) => CASES.some((c) => recording(d, c.id))).map((d) => ({ name: path.basename(d), dir: d }));
+    if (!found.length) throw new Error(`No recordings in ${audioDir}: expected car.ogg, finance.ogg, ... (or one folder per person).`);
+    return found;
+}
+
+/** The case's voice note: the speaker's recording, Tessa when there is no --audio, null when the speaker has none. */
+function voiceNote(c: Case, dir?: string): { file: string; mimeType: string } | null {
+    if (dir) return recording(dir, c.id);
     const file = path.join(keep, `${c.id}.m4a`);
     if (!fs.existsSync(file)) execFileSync('say', ['-v', 'Tessa', '-o', file, '--file-format=m4af', '--data-format=aac', c.say]);
     return { file, mimeType: 'audio/mp4' };
@@ -151,16 +165,25 @@ async function main() {
     const form: ClaimForm = expandRows(JSON.parse(fs.readFileSync(file, 'utf8'))).find((r) => r.claimType === 'Motor accident')!;
     const now = new Date('2026-10-26T12:00:00Z');
     const cases = CASES.filter((c) => !only || only.includes(c.id));
-    const totals = new Map<string, { right: number; of: number; ms: number; claudeMs: number; seconds: number }>();
+    const totals = new Map<string, { right: number; of: number; ms: number; claudeMs: number; seconds: number; notes: number }>();
+    const add = (key: string, x: { right: number; of: number; ms: number; claudeMs: number; seconds: number }) => {
+        const t = totals.get(key) ?? { right: 0, of: 0, ms: 0, claudeMs: 0, seconds: 0, notes: 0 };
+        totals.set(key, { right: t.right + x.right, of: t.of + x.of, ms: t.ms + x.ms, claudeMs: t.claudeMs + x.claudeMs, seconds: t.seconds + x.seconds, notes: t.notes + 1 });
+    };
     const results: unknown[] = [];
+    const who = speakers();
 
-    for (const c of cases) {
+    for (const speaker of who) for (const c of cases) {
         const items = c.keys.map((k) => formItems(form, answered(c.before ?? {}), FACTS).find((i) => i.key === k))
             .filter((i): i is QuestionItem => !!i);
         const asked = batchText(items, { intro: { hint: false, same: false } });
-        const audio = voiceNote(c);
+        const audio = voiceNote(c, speaker.dir);
+        if (!audio) {
+            console.log(`\n=== ${speaker.name} / ${c.id}: no recording, skipped`);
+            continue;
+        }
         const length = seconds(audio.file);
-        console.log(`\n=== ${c.id} (${length ?? '?'}s, ${path.basename(audio.file)})\nTina: ${asked.replace(/\n/g, '\n      ')}\nSaid: ${c.say}`);
+        console.log(`\n=== ${speaker.name} / ${c.id} (${length ?? '?'}s, ${path.basename(audio.file)})\nTina: ${asked.replace(/\n/g, '\n      ')}\nScript: ${c.say}`);
         if (items.length !== c.keys.length) console.log(`  (not on this form: ${c.keys.filter((k) => !items.some((i) => i.key === k)).join(', ')})`);
         for (const model of dry ? [] : models) {
             process.env.CLAIMS_TRANSCRIBE_MODEL = model;
@@ -176,14 +199,15 @@ async function main() {
             const got = new Map((reading.understood.kind === 'batch' ? reading.understood.answers : []).map((a) => [a.key, a.value] as const));
             const checks = Object.entries(c.expect).map(([key, want]) => ({ key, want: String(want), got: got.get(key), ok: right(want, got.get(key)) }));
             const ok = checks.filter((x) => x.ok).length;
-            const tot = totals.get(model) ?? { right: 0, of: 0, ms: 0, claudeMs: 0, seconds: 0 };
-            totals.set(model, { right: tot.right + ok, of: tot.of + checks.length, ms: tot.ms + t.ms, claudeMs: tot.claudeMs + claudeMs, seconds: tot.seconds + (length ?? 0) });
+            const scored = { right: ok, of: checks.length, ms: t.ms, claudeMs, seconds: length ?? 0 };
+            add(model, scored);
+            if (who.length > 1) add(`${model}, ${speaker.name}`, scored);
             const st = { phase: 'items', asking: items[0].key, batch: c.keys } as FollowOnState;
             const echo = heardText([...got].map(([key, value]) => ({ key, value, item: items.find((i) => i.key === key) })), st);
             console.log(`  ${model}: ${ok}/${checks.length} right; heard in ${t.ms}ms, read in ${claudeMs}ms\n    heard: ${t.text}`);
             for (const x of checks.filter((y) => !y.ok)) console.log(`    WRONG ${x.key}: wanted ${x.want}, got ${x.got === undefined ? '(nothing)' : JSON.stringify(x.got)}`);
             if (echo) console.log(`    Tina says back:\n      ${echo.replace(/\n/g, '\n      ')}`);
-            results.push({ case: c.id, model, seconds: length, transcript: t.text, transcribeMs: t.ms, claudeMs, checks });
+            results.push({ speaker: speaker.name, case: c.id, model, seconds: length, transcript: t.text, transcribeMs: t.ms, claudeMs, checks });
         }
     }
 
@@ -194,7 +218,7 @@ async function main() {
         const minutes = s.seconds / 60;
         const cost = PER_MINUTE[model] !== undefined ? `$${(minutes * PER_MINUTE[model]).toFixed(4)} for ${minutes.toFixed(1)} min` : 'price unknown';
         console.log(`${model}: ${s.right}/${s.of} answers right (${Math.round((100 * s.right) / Math.max(1, s.of))}%); `
-            + `transcription ${Math.round(s.ms / cases.length)}ms a note, Claude ${Math.round(s.claudeMs / cases.length)}ms a note; transcription ${cost}`);
+            + `transcription ${Math.round(s.ms / s.notes)}ms a note, Claude ${Math.round(s.claudeMs / s.notes)}ms a note; transcription ${cost}`);
     }
     const claudeCost = (usage.input * inPrice + usage.output * outPrice) / 1e6;
     console.log(`Claude (${UNDERSTAND_MODEL}): ${usage.input} tokens in, ${usage.output} out${Number.isFinite(claudeCost) ? `, $${claudeCost.toFixed(4)}` : ''} for every reading above`);
