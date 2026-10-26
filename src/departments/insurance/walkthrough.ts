@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 240b9bb). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit a9611ed). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -228,6 +228,22 @@ function joinWhen(out: Facts, more: Facts): void {
     delete out.incidentTime;
   }
 }
+
+/**
+ * TTTFG-4830 (voice notes): told to Claude with a message that is the transcript of a WhatsApp voice note (the host
+ * transcribes it). Speech recognition mishears letters and digits, so a registration or ID number that came out garbled
+ * is left for Tina to ask again rather than read into a value; followon.ts says back what was saved.
+ */
+export const SPOKEN_HELP = `The client recorded this message as a voice note; <client_message> is what speech recognition made of it.
+- Read it for what the client meant: it may have no punctuation, filler words ("um", "ja", "so ja"), a misheard word or
+  numbers written as words.
+- A client who corrects themselves while speaking ("on the Tuesday, no sorry, the Wednesday") means the last value.
+- Write numbers, amounts and letters the usual way: "C A one two three four five six" is "CA 123456", "twelve thousand
+  five hundred rand" is 12500, "C for Charlie" is C.
+- Copy a registration, ID, policy, account or phone number exactly as the transcript has it; never add or change a
+  character. When one is plainly incomplete or garbled, leave it out (null), so Tina asks for it again.
+- The client may speak Afrikaans or another South African language, or mix languages. Give a text answer in English,
+  with names, places and numbers as they said them.`;
 
 /** The South African date and time of an ISO instant. */
 export function sastParts(iso: string): { date: string; time: string } {
