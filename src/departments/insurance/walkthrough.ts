@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit bdccfa6). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 05d65be). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -10,6 +10,8 @@
 //
 // Steps, in the story's order: find client -> confirm policy -> hurt or in danger -> claim type -> what, when and
 // where -> third parties, SAPS and injuries -> summary -> confirmed (the claim opens, status FNOL logged).
+// TTTFG-4830: once the client has answered "hurt or in danger" and Tina knows the kind of claim, she sends what to
+// gather while they are still at the scene (claim.ts onSceneText), once, before the questions about what happened.
 //
 // Only a WhatsApp number on the CRM can open a claim (decided 9 October 2026): an unknown number gets the
 // unknown-number reply, no claim and no follow-up. Tina never asks for an ID number or a policy number.
@@ -73,6 +75,8 @@ export interface WalkthroughState {
    * for a stolen phone while she still asks for the whole story.
    */
   opening?: string;
+  /** TTTFG-4830: the on-scene checklist has gone out (it goes once). */
+  onSceneSent?: true;
 }
 
 /** What Claude understood from the client's message. Code decides what happens next. */
@@ -93,6 +97,11 @@ export type Say =
   /** `tries`: how often each question in it was asked before this time (askedKey); absent or 0 is the first time. */
   | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true; tries?: Record<string, number> }
   | { kind: 'assist'; insurer: string; number: string }
+  /**
+   * TTTFG-4830: what to gather while still at the scene, for the kind of claim (claim.ts onSceneText). `safeFirst`:
+   * the client said someone is hurt or in danger, so it starts "Once everyone is safe".
+   */
+  | { kind: 'on-scene'; safeFirst?: true }
   /** The insurer has no assist number on file: the general emergency number. */
   | { kind: 'emergency' }
   | { kind: 'unknown-number' }
@@ -148,6 +157,16 @@ function nextFactStep(f: Facts): Step {
 }
 
 const ask = (step: Step, f: Facts): Say => ({ kind: 'ask', step, missing: missingFor(step, f) });
+
+/**
+ * TTTFG-4830: the on-scene checklist, when it is due: the client has just answered "hurt or in danger" (or the claim
+ * type, when that came later), the kind of claim is known, and it hasn't gone out yet. Only then, so a conversation
+ * already further on never gets it in the middle of its questions.
+ */
+function onScene(prev: WalkthroughState, next: WalkthroughState, safeFirst = false): { state: WalkthroughState; say: Say[] } {
+  if (next.onSceneSent || !next.facts.claimType || (prev.step !== 'danger' && prev.step !== 'claim-type')) return { state: next, say: [] };
+  return { state: { ...next, onSceneSent: true }, say: [{ kind: 'on-scene', ...(safeFirst ? { safeFirst: true as const } : {}) }] };
+}
 
 /**
  * The question a fact belongs to. The date and time asked together are "when"; asked for on their own, after part of
@@ -229,6 +248,22 @@ function joinWhen(out: Facts, more: Facts): void {
   }
 }
 
+/**
+ * TTTFG-4830 (voice notes): told to Claude with a message that is the transcript of a WhatsApp voice note (the host
+ * transcribes it). Speech recognition mishears letters and digits, so a registration or ID number that came out garbled
+ * is left for Tina to ask again rather than read into a value; followon.ts says back what was saved.
+ */
+export const SPOKEN_HELP = `The client recorded this message as a voice note; <client_message> is what speech recognition made of it.
+- Read it for what the client meant: it may have no punctuation, filler words ("um", "ja", "so ja"), a misheard word or
+  numbers written as words.
+- A client who corrects themselves while speaking ("on the Tuesday, no sorry, the Wednesday") means the last value.
+- Write numbers, amounts and letters the usual way: "C A one two three four five six" is "CA 123456", "twelve thousand
+  five hundred rand" is 12500, "C for Charlie" is C.
+- Copy a registration, ID, policy, account or phone number exactly as the transcript has it; never add or change a
+  character. When one is plainly incomplete or garbled, leave it out (null), so Tina asks for it again.
+- The client may speak Afrikaans or another South African language, or mix languages. Give a text answer in English,
+  with names, places and numbers as they said them.`;
+
 /** The South African date and time of an ISO instant. */
 export function sastParts(iso: string): { date: string; time: string } {
   const local = new Date(new Date(iso).getTime() + 2 * 3600_000).toISOString();
@@ -257,7 +292,12 @@ export function start(contact: { id: string; firstName: string } | null, policie
 export function advance(state: WalkthroughState, answer: Answer): Turn {
   const askIn = (s: WalkthroughState): Turn => { const c = counted(s, ask(s.step, s.facts)); return { state: c.state, say: [c.say], effects: [] }; };
   const same = (): Turn => askIn(state);
-  const goTo = (s: WalkthroughState): Turn => askIn(s);
+  // TTTFG-4830: the on-scene checklist goes in front of the next question when it is due.
+  const goTo = (s: WalkthroughState): Turn => {
+    const o = onScene(state, s);
+    const t = askIn(o.state);
+    return { ...t, say: [...o.say, ...t.say] };
+  };
 
   switch (state.step) {
     case 'policy': {
@@ -282,14 +322,16 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
       if (answer.kind !== 'yes' && answer.kind !== 'no') return same();
       const next = { ...state, step: nextFactStep(state.facts) };
       if (answer.kind === 'no') return goTo(next);
-      // AC: the assist number is the first reply, on its own, before any other claim question.
+      // AC: the assist number is the first reply, on its own, before any other claim question. TTTFG-4830: the
+      // on-scene checklist after it, as "Once everyone is safe".
       const policy = state.policies.find((p) => p.id === state.policyId)!;
       const number = policy.assistNumber?.trim();
+      const o = onScene(state, next, true);
       return number
-        ? { state: next, say: [{ kind: 'assist', insurer: policy.insurer, number }, ask(next.step, next.facts)], effects: [] }
+        ? { state: o.state, say: [{ kind: 'assist', insurer: policy.insurer, number }, ...o.say, ask(next.step, next.facts)], effects: [] }
         : {
-            state: next,
-            say: [{ kind: 'emergency' }, ask(next.step, next.facts)],
+            state: o.state,
+            say: [{ kind: 'emergency' }, ...o.say, ask(next.step, next.facts)],
             effects: [{ kind: 'follow-up', to: 'broker', reason: 'no-assist-number' }],
           };
     }

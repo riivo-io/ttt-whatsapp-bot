@@ -16,6 +16,9 @@
  *   CLAIMS_REMINDER_TEMPLATE       TTTFG-5212: the approved WhatsApp template for a reminder outside the 24-hour window
  *                                  (body: REMINDER_TEMPLATE.whatsappBody, 3 variables). Unset: those clients are skipped
  *   CLAIMS_REMINDER_TEMPLATE_LANG  its language code (default en)
+ *   CLAIMS_VOICE_NOTES             TTTFG-4830: "off" stops voice notes being transcribed (Tina asks the client to type).
+ *                                  On by default; needs OPENAI_API_KEY. CLAIMS_TRANSCRIBE_MODEL, CLAIMS_TRANSCRIBE_LANGUAGE
+ *                                  and CLAIMS_VOICE_MAX_SECONDS: see transcribe.service.ts
  *   CLAIMS_SIGN_TEMPLATE_SIGNED_OFF  TTTFG-5196: "yes" lets the "ready to sign" message go out (draft-1 wording until
  *                                  Insurance and Advice signs it off). Otherwise the claim owner gets a Follow-up and
  *                                  the client no link. Needs the signing page set up (src/signing/env.ts: SIGNING_*)
@@ -23,7 +26,7 @@
  */
 import {
     batchQuietMs, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
-    type DemoConversation,
+    type DemoConversation, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
 import type { ClientFile, ResumeFile } from '../departments/insurance/followon';
@@ -45,6 +48,7 @@ import { enqueueClaimsBatchCheck, enqueueClaimsReminder } from '../queue/whatsap
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService } from './supabase.service';
+import { transcribeVoiceNote } from './transcribe.service';
 
 const DEV_URL = 'https://tttdevelopment.crm4.dynamics.com';
 const DEV_SITE = 'tttfinancialgroup.sharepoint.com:/sites/TTTDevelopment';
@@ -158,6 +162,28 @@ function demoModel(model: string, name: string) {
     };
 }
 
+/**
+ * TTTFG-4830: a voice note as text: downloaded from Meta and transcribed. Logged with its length and timing, never its
+ * words. A failure is logged and read as "can't listen right now", so the client is asked to type or send it again.
+ */
+async function hear(ch: DemoChannels, phone: string, voice: DemoVoice, hint: string): Promise<VoiceHeard> {
+    const started = Date.now();
+    try {
+        const bytes = await ch.mediaBytes(voice.id);
+        const r = await transcribeVoiceNote(bytes, voice.mimeType, hint);
+        const length = r.seconds === null ? `${Math.round(bytes.length / 1024)} KB` : `${r.seconds}s`;
+        if ('problem' in r) {
+            console.log(`[ClaimsDemo] ${phone}: voice note (${voice.mimeType}, ${length}) not used: ${r.problem}`);
+            return { problem: r.problem };
+        }
+        console.log(`[ClaimsDemo] ${phone}: voice note ${length} heard in ${Date.now() - started}ms (${r.model} ${r.ms}ms, ${r.text.length} chars)`);
+        return { text: r.text };
+    } catch (e: any) {
+        console.error(`[ClaimsDemo] ${phone}: voice note not transcribed after ${Date.now() - started}ms:`, e?.response?.data ?? e?.message);
+        return { problem: 'unavailable' };
+    }
+}
+
 function deps(phone: string, contactId: string, stats: CrmStats): ClaimsDemoDeps {
     const ch = channels(stats);
     return {
@@ -185,6 +211,9 @@ function deps(phone: string, contactId: string, stats: CrmStats): ClaimsDemoDeps
         say: (phone, text) => ch.sendText(phone, text),
         signUpLink: SIGN_UP_LINK,
         lastReminderOn: (claimId) => lastReminderPort(ch.dv).lastReminderOn(claimId),
+        ...((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off'
+            ? {}
+            : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint) }),
         ...(batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS) > 0
             ? { scheduleBatchCheck: (to: string, token: string) =>
                 enqueueClaimsBatchCheck(to, token, batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
@@ -195,6 +224,8 @@ export interface DemoInbound {
     from: string;
     text: string;
     document?: { id: string; filename: string; mimeType: string };
+    /** TTTFG-4830: a voice note or audio file. */
+    audio?: { id: string; mimeType: string };
     wamid?: string;
 }
 
@@ -257,7 +288,9 @@ export async function handleClaimsDemoMessage(m: DemoInbound, contactId: string)
         ? { id: m.document.id, fileName: m.document.filename, mimeType: m.document.mimeType, media: m.document.mimeType.startsWith('image/') ? 'photo' : 'document' }
         : undefined;
     try {
-        const outcome = await claimsDemoTurn(deps(m.from, contactId, stats), { phone: m.from, contactId, text: m.text, file, wamid: m.wamid || `wamid.local.${Date.now()}` }, new Date());
+        const outcome = await claimsDemoTurn(deps(m.from, contactId, stats), {
+            phone: m.from, contactId, text: m.text, file, ...(m.audio ? { voice: m.audio } : {}), wamid: m.wamid || `wamid.local.${Date.now()}`,
+        }, new Date());
         console.log(`[ClaimsDemo] ${m.from}: ${outcome} in ${Date.now() - started}ms; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes${stats.throttled ? `, ${stats.throttled} throttled` : ''}`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${m.from} failed after ${Date.now() - started}ms:`, (e as Error).message, (e as Error).stack);

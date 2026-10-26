@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit bdccfa6). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 05d65be). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -212,24 +212,27 @@ export type FollowOnInput =
   }
   /**
    * The value for the item being asked. `also`: values the same message gave for other open questions. `corrections`:
-   * new values for questions the client answered earlier ("actually no, there was no other car").
+   * new values for questions the client answered earlier ("actually no, there was no other car"). `spoken`
+   * (TTTFG-4830, here and on the replies below): the message was a voice note, so what is saved from it is said back.
    */
-  | { kind: 'value'; value: string | number | boolean; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  | { kind: 'value'; value: string | number | boolean; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true }
   /**
    * TTTFG-4830: the reply to a batch. `answers`: values for questions of the batch; `dontKnow`: questions of the batch
    * the client says they don't know or don't have; `also` and `corrections` as for 'value'.
    */
-  | { kind: 'batch'; answers: OtherAnswer[]; dontKnow: string[]; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  | {
+    kind: 'batch'; answers: OtherAnswer[]; dontKnow: string[]; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true;
+  }
   /**
    * TTTFG-4830: from the host, not the client: the quiet spell after the message `wamid` is over. Tina lists what's still
    * open in the batch, if she is still waiting on that message (FollowOnState.waiting).
    */
   | { kind: 'nudge'; wamid: string }
-  | { kind: 'saps'; caseNumber?: string; station?: string; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  | { kind: 'saps'; caseNumber?: string; station?: string; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true }
   /** "I don't have it yet." */
-  | { kind: 'not-yet'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  | { kind: 'not-yet'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true }
   /** Claude could not get a value from the reply (for the item asked; `also` and `corrections` may still apply). */
-  | { kind: 'unparsed'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  | { kind: 'unparsed'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true }
   /** `forItem`: Claude's reading of which evidence item the file is, when it can tell (TTTFG-5184). */
   | { kind: 'file'; file: ClientFile; wamid: string; forItem?: string }
   /**
@@ -268,6 +271,8 @@ export const ALL_FOR_NOW = "Thanks, that's all for now.";
 export const CORRECTED = "No problem, I've changed that.";
 /** TTTFG-4830: the reply answered other questions but not the one Tina asked. */
 export const NOTED_OTHERS = "Thanks, I've noted that.";
+/** TTTFG-4830 (voice notes): around what Tina saved from a voice note, said back first (heardText). */
+export const HEARD = { lead: 'From your voice note I noted:', end: 'If I misheard anything, just tell me.' } as const;
 /** TTTFG-4830 (batches): said with the first batch of a conversation. */
 export const BATCH_HINT = "Answer as best you can, and if you don't know something, just say so.";
 /** TTTFG-4830: what's still open after a reply that answered part of a batch (several, or one). */
@@ -844,6 +849,11 @@ function fitted(st: FollowOnState, input: ClientReply): ClientReply {
 }
 
 export function advanceFollowOn(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>): Step {
+  const step = advanceReply(c, st, raw);
+  return 'spoken' in raw && raw.spoken ? withHeard(c, st, raw.wamid, step) : step;
+}
+
+function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>): Step {
   if (raw.kind === 'nudge') return nudged(c, st, raw.wamid);
   const input = fitted(st, raw);
   const w = work(c.claim);
@@ -990,6 +1000,72 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, raw: Exclude<FollowOn
   out.push({ kind: 'save-answer', key: item.key, record });
   w.answers[item.key] = record;
   return { state: proceed(c, w, st, out), out };
+}
+
+// ------------------------------------------------------------------------------------ TTTFG-4830: voice notes
+
+/** A saved value as the client reads it back: yes or no, a date in words ("12 October 2026"), otherwise as saved. */
+export function heardValue(item: QuestionItem | undefined, v: string | number | boolean): string {
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  if (typeof v === 'number') return String(v);
+  if (item?.answerType === 'date' && /^\d{4}-\d{2}(-\d{2})?$/.test(v)) {
+    const month = v.length === 7;
+    return new Date(`${month ? `${v}-01` : v}T00:00:00Z`)
+      .toLocaleDateString('en-GB', { timeZone: 'UTC', ...(month ? {} : { day: 'numeric' }), month: 'long', year: 'numeric' });
+  }
+  return v;
+}
+
+/**
+ * What Tina saved from a voice note, as she says it back: a value of the question she asked alone; otherwise one line
+ * each, by its number in the batch Tina asked (the list the client just answered), then the others by their question.
+ * Null when nothing was saved (only "don't know", or nothing understood).
+ */
+export function heardText(entries: ReadonlyArray<{ item?: QuestionItem; key: string; value: string | number | boolean }>, st: FollowOnState): string | null {
+  if (!entries.length) return null;
+  const batch = st.phase === 'items' ? st.batch ?? [] : [];
+  if (entries.length === 1 && entries[0].key === st.asking && !batch.length) {
+    return `${HEARD.lead} ${heardValue(entries[0].item, entries[0].value)}. ${HEARD.end}`;
+  }
+  const at = (key: string) => (batch.includes(key) ? batch.indexOf(key) : batch.length);
+  const lines = [...entries].sort((a, b) => at(a.key) - at(b.key)).map((e) => {
+    const value = heardValue(e.item, e.value);
+    if (batch.includes(e.key)) return `${batch.indexOf(e.key) + 1}. ${value}`;
+    // The question in Tina's words when it is one ("What make is the car? VW"), otherwise its name ("Your home address:").
+    const asked = e.item?.prompt.split(/(?<=[.?!])\s/)[0].trim();
+    if (asked?.endsWith('?')) return `- ${asked} ${value}`;
+    return `- ${e.item ? capital(itemName(e.item)) : e.key}: ${value}`;
+  });
+  return [HEARD.lead, ...lines, HEARD.end].join('\n');
+}
+
+/** Out items Tina says to the client (the others are writes). */
+const SAYS = new Set<Out['kind']>(['saps-instruction', 'ask', 'ask-batch', 'text', 'template', 'received', 'closing', 'still-missing']);
+
+/**
+ * TTTFG-4830 (voice notes): the step for a voice note, with what it saved said back before anything else Tina says, so
+ * a misheard registration or date is caught by the client rather than the insurer.
+ */
+function withHeard(c: Ctx, st: FollowOnState, wamid: string, step: Step): Step {
+  const w = work(c.claim);
+  const answers = { ...w.answers };
+  for (const o of step.out) if (o.kind === 'save-answer') answers[o.key] = o.record;
+  const list = formItems(c.form, answers, w.facts, st.sapsRequired);
+  const entries: Array<{ item?: QuestionItem; key: string; value: string | number | boolean }> = [];
+  for (const o of step.out) {
+    if (o.kind === 'save-answer' && o.record.status === 'answered' && o.record.value !== null && o.record.wamid === wamid) {
+      entries.push({ item: list.find((i) => i.key === o.key) ?? addressItem(c.claim, o.key), key: o.key, value: o.record.value });
+    } else if (o.kind === 'save-saps') {
+      if (o.caseNumber) entries.push({ item: SAPS_ITEMS.find((i) => i.key === SAPS_CASE_KEY), key: SAPS_CASE_KEY, value: o.caseNumber });
+      if (o.station) entries.push({ item: SAPS_ITEMS.find((i) => i.key === SAPS_STATION_KEY), key: SAPS_STATION_KEY, value: o.station });
+    }
+  }
+  const text = heardText(entries.filter((e, i) => entries.findIndex((f) => f.key === e.key) === i), st);
+  if (!text) return step;
+  const first = step.out.findIndex((o) => SAYS.has(o.kind));
+  const out = [...step.out];
+  out.splice(first < 0 ? out.length : first, 0, { kind: 'text', text });
+  return { ...step, out };
 }
 
 // -------------------------------------------------------------------------------- TTTFG-4830: questions in batches

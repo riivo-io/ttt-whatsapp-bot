@@ -6,6 +6,8 @@
  * Only these are swapped out:
  *  - WhatsApp: Tina's replies print here; the filled claim form is written to .work/claims-demo/out/;
  *  - files: "/file <path> [caption]" sends a local photo or PDF as if it came from WhatsApp;
+ *  - voice notes (TTTFG-4830): "/voice <path>" sends a local recording (.ogg, .m4a, .mp3, .wav) as a voice note. It
+ *    is transcribed for real (OPENAI_API_KEY) and the transcript is printed before Tina's reply;
  *  - Supabase: the conversation is kept in .work/claims-demo/<phone>.json.
  * The claims, documents, agent actions and SharePoint files are real DEV rows and files ("#reset" withdraws the claims).
  *
@@ -30,8 +32,9 @@ import readline from 'readline';
 import type { Dv } from '../departments/insurance/dataverse';
 import type { ClientFile } from '../departments/insurance/followon';
 import {
-    claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
+    claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation, type DemoVoice,
 } from '../domain/claimsDemoHost';
+import { transcribeVoiceNote } from '../services/transcribe.service';
 import {
     cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
 } from '../services/claimsDemoWiring';
@@ -190,13 +193,29 @@ const deps: ClaimsDemoDeps = {
     withdrawOpenClaims: (c) => withdrawOpenClaims(dv, c),
     say: async (_p, text) => show('Tina', text),
     signUpLink: 'https://www.ttt-tax.co.za/client-onboarding',
+    // TTTFG-4830: the voice note's "media id" is the local file's path.
+    transcribe: async (voice, hint) => {
+        const r = await transcribeVoiceNote(fs.readFileSync(voice.id), voice.mimeType, hint);
+        if ('problem' in r) return { problem: r.problem };
+        console.log(`  (heard in ${r.ms}ms by ${r.model}${r.seconds === null ? '' : `, ${r.seconds}s of audio`}: "${r.text}")`);
+        return { text: r.text };
+    },
 };
 
 const MIME: Record<string, string> = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.pdf': 'application/pdf' };
+const AUDIO: Record<string, string> = { '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.m4a': 'audio/mp4', '.mp3': 'audio/mpeg', '.wav': 'audio/wav' };
 let n = 0;
 async function say(line: string) {
     let text = line;
     let file: ClientFile | undefined;
+    let voice: DemoVoice | undefined;
+    const v = line.match(/^\/voice\s+(\S+)\s*$/);
+    if (v) {
+        const p = path.resolve(v[1]);
+        if (!fs.existsSync(p)) { console.error(`  No such file: ${p}`); return; }
+        voice = { id: p, mimeType: AUDIO[path.extname(p).toLowerCase()] ?? 'application/octet-stream' };
+        text = '';
+    }
     const m = line.match(/^\/file\s+(\S+)\s*(.*)$/);
     if (m) {
         const p = path.resolve(m[1]);
@@ -205,10 +224,12 @@ async function say(line: string) {
         file = { id: p, fileName: path.basename(p), mimeType, media: mimeType.startsWith('image/') ? 'photo' : 'document' };
         text = m[2];
     }
-    show(`Client (${phone})`, file ? `📎 ${file.fileName}${text ? ` - ${text}` : ''}` : text);
+    show(`Client (${phone})`, voice ? `🎙️ ${path.basename(voice.id)}` : file ? `📎 ${file.fileName}${text ? ` - ${text}` : ''}` : text);
     const stats = newCrmStats();
     dv = cachedDv(rawDv, stats);
-    const outcome = await claimsDemoTurn(deps, { phone: phone!, contactId: contactId!, text, file, wamid: `wamid.rehearsal.${Date.now()}.${++n}` }, new Date());
+    const outcome = await claimsDemoTurn(deps, {
+        phone: phone!, contactId: contactId!, text, file, ...(voice ? { voice } : {}), wamid: `wamid.rehearsal.${Date.now()}.${++n}`,
+    }, new Date());
     console.log(`  (${outcome}; CRM ${stats.reads} reads, ${stats.cached} from cache, ${stats.writes} writes)`);
 }
 
@@ -229,7 +250,7 @@ async function main() {
         return waitForSignature();
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    console.log(`Chatting as ${phone} (DEV contact ${contactId}) with the claims demo. "/file <path> [caption]" sends a file; "exit" stops.`);
+    console.log(`Chatting as ${phone} (DEV contact ${contactId}) with the claims demo. "/file <path> [caption]" sends a file; "/voice <path>" a voice note; "exit" stops.`);
     process.stdout.write('\nYou: ');
     for await (const line of rl) {
         const t = line.trim();

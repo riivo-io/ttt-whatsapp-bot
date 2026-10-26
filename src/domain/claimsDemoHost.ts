@@ -13,6 +13,9 @@
  *    rest and the queue brings back a check after a quiet spell (claimsDemoBatchCheck);
  *  - no open claim: a claim report starts the walkthrough under a new riivo_request; anything else gets the demo hello.
  * "#reset" withdraws the demo client's open claims and forgets the conversation, so a demo can start clean.
+ * A voice note (TTTFG-4830) is transcribed first (deps.transcribe, with Tina's last message as the hint) and read as
+ * what the client said, with Claude told it is a transcript; the package says back what it saved from it. One that
+ * can't be heard is answered here, and nothing is read or saved.
  * Every morning at 08:00 (TTTFG-5212, first cut) claimsDemoReminder() sends each demo number what it still has to send
  * on its open claims ("Things we still need from you"), and puts the conversation back on that list.
  *
@@ -83,11 +86,22 @@ export interface DemoConversation {
 export interface DemoMessage {
     phone: string;
     contactId: string;
-    /** The text, or a photo's or document's caption ('' when there is none). */
+    /** The text, or a photo's or document's caption ('' when there is none, and for a voice note). */
     text: string;
     file?: ClientFile;
+    /** TTTFG-4830: a WhatsApp voice note (or audio file): Meta's media id and its type. */
+    voice?: DemoVoice;
     wamid: string;
 }
+
+export interface DemoVoice { id: string; mimeType: string }
+
+/**
+ * TTTFG-4830: what the transcription made of a voice note. `unclear`: nothing came out (silence, noise); `too-long`:
+ * over CLAIMS_VOICE_MAX_SECONDS; `unsupported`: an audio type speech recognition can't take; `unavailable`: voice
+ * notes are off, or the service failed.
+ */
+export type VoiceHeard = { text: string } | { problem: 'unclear' | 'too-long' | 'unsupported' | 'unavailable' };
 
 export interface ClaimsDemoDeps {
     load(phone: string): Promise<DemoConversation | null>;
@@ -114,10 +128,16 @@ export interface ClaimsDemoDeps {
     scheduleBatchCheck?(phone: string, token: string): Promise<void>;
     /** TTTFG-5212: when the claim's last morning reminder went out (its agent action). Absent: never. */
     lastReminderOn?(claimId: string): Promise<string | null>;
+    /**
+     * TTTFG-4830: a voice note as text. `hint`: what the client is answering (voiceHint), so names and numbers are
+     * heard as they're likely meant. Absent: voice notes are off, and Tina asks the client to type.
+     */
+    transcribe?(voice: DemoVoice, hint: string): Promise<VoiceHeard>;
 }
 
 export type DemoOutcome =
-    | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request' | 'busy';
+    | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request' | 'busy'
+    | 'voice-unheard';
 
 export const helloText = (firstName: string) =>
     `Hi ${firstName}, it's Tina from TTT. On this number I'm set up to help with insurance claims. Tell me what happened `
@@ -133,13 +153,33 @@ export const FILE_KEPT = "Thanks, I've kept that for your claim. I'll add it onc
  */
 export const BUSY = "Sorry, I'm a bit slow right now and couldn't read that. Please send it again in a minute.";
 
+/** TTTFG-4830: a voice note Tina couldn't use, by what went wrong (VoiceHeard). */
+export const VOICE_PROBLEM: Record<Exclude<VoiceHeard, { text: string }>['problem'], string> = {
+    unclear: "Sorry, I couldn't make out that voice note. Could you send it again, or type your answer?",
+    'too-long': 'That voice note is a bit long for me. Could you send it in shorter parts, or type your answer?',
+    unsupported: "Sorry, I can't play that kind of audio file. Could you record a WhatsApp voice note instead, or type your answer?",
+    unavailable: "Sorry, I can't listen to voice notes right now. Please type your answer, or send the voice note again in a few minutes.",
+};
+
+/**
+ * TTTFG-4830: the transcription's hint: who is speaking and what they're answering (Tina's last message, the numbered
+ * questions of a batch), so the insurer's words, makes and names come out spelt as they're meant. The questions go
+ * last and the hint is kept short: a speech model may keep only the end of a long prompt (Whisper: 224 tokens).
+ */
+export function voiceHint(lastSent: string | null): string {
+    const asked = (lastSent ?? '').replace(/\s+/g, ' ').trim().slice(0, 900);
+    return 'A South African client answers Tina, TTT Financial Group\'s assistant, about a short-term insurance claim '
+        + '(insurers Discovery Insure, Hybrid, Momentum, Old Mutual; SAPS case number; registration number).'
+        + (asked ? ` Tina asked: ${asked}` : '');
+}
+
 const THEFT = /\b(stol(e|en)|theft|thie(f|ves)|burglar|broke into|break[- ]in|robbed|robbery|hijack)/i;
 /** The follow-on's `describedAsTheft`: the claim type says so, or the client's description does. */
 export const describedAsTheft = (w: WalkthroughState) =>
     w.facts.claimType === 'Motor theft' || w.facts.claimType === 'Hijacking' || THEFT.test(w.facts.description ?? '');
 
 export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: Date): Promise<DemoOutcome> {
-    if (!m.file && m.text.trim().toLowerCase() === RESET_COMMAND) {
+    if (!m.file && !m.voice && m.text.trim().toLowerCase() === RESET_COMMAND) {
         const refs = await deps.withdrawOpenClaims(m.contactId);
         await deps.remove(m.phone);
         await deps.say(m.phone, resetText(refs));
@@ -171,6 +211,18 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     };
     const conv = (): Conversation => ({ phone: m.phone, requestId: c.requestId, signUpLink: deps.signUpLink });
 
+    // ---- TTTFG-4830: a voice note is read as what the client said ----
+    const spoken = !!m.voice;
+    if (m.voice) {
+        const heard = deps.transcribe ? await deps.transcribe(m.voice, voiceHint(c.lastSent)) : { problem: 'unavailable' as const };
+        if ('problem' in heard) {
+            // Nothing is read or saved, and Tina's last message stays what the next reply is read against.
+            await deps.say(m.phone, VOICE_PROBLEM[heard.problem]);
+            return 'voice-unheard';
+        }
+        m = { ...m, text: heard.text };
+    }
+
     // ---- a 5168 walkthrough in progress ----
     if (c.walk) {
         if (m.file && !m.text.trim()) {
@@ -180,7 +232,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         }
         const ports = deps.ports(c.requestId, sent);
         const walk = c.walk;
-        const answer = await understand(watch(deps.understandModel), walk, c.lastSent ?? '', m.text, now);
+        const answer = await understand(watch(deps.understandModel), walk, c.lastSent ?? '', m.text, now, { spoken });
         if (unavailable) return busy();
         const r = await claimTurn(ports, conv(), walk, answer, now);
         if (m.file) c.held = [...c.held, { file: m.file }];
@@ -205,7 +257,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     // ---- no walkthrough: which open claim is this about? ----
     const ports = deps.ports(c.requestId, sent);
     const ctx = await replyContext(ports, m.contactId, c.resume, c.lastSent ?? undefined);
-    const reading = await readReply(watch(deps.replyModel), ctx, m.text, m.file, m.wamid, now);
+    const reading = await readReply(watch(deps.replyModel), ctx, m.text, m.file, m.wamid, now, { spoken });
     if (unavailable) return busy();
     const r = await resumeTurn(ports, conv(), c.resume, reading, now, deps.scheduleBatchCheck ? { waitForMore: true } : {});
     if (r.route === 'claim') {

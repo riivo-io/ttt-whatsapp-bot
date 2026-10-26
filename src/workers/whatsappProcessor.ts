@@ -164,6 +164,8 @@ export type IncomingMessage = {
     text: string;
     interactiveId?: string;
     document?: { id: string; filename: string; mimeType: string };
+    /** TTTFG-4830: a voice note (`voice`) or an audio file. Only the claims demo handles it; everyone else is unchanged. */
+    audio?: { id: string; mimeType: string; voice: boolean };
     flowResponse?: SignUpFlowResponse;
     // Meta's message id (wamid.xxx). Absent on synthetic messages built in-process.
     wamid?: string;
@@ -233,6 +235,12 @@ function parseIncoming(metaMessage: any): IncomingMessage | null {
                 mimeType: doc.mime_type || 'application/pdf',
             },
         };
+    }
+
+    if (metaMessage.type === 'audio') {
+        const audio = metaMessage.audio;
+        if (!audio?.id) return null;
+        return { from, text: '', audio: { id: audio.id, mimeType: audio.mime_type || 'audio/ogg', voice: audio.voice === true } };
     }
 
     if (metaMessage.type === 'image') {
@@ -771,13 +779,18 @@ async function evaluateBadDebt(
 }
 
 async function processMessage(incoming: IncomingMessage, outboundPrefix?: string): Promise<void> {
-    const { from, text, interactiveId, document, flowResponse, wamid } = incoming;
+    const { from, text, interactiveId, document, audio, flowResponse, wamid } = incoming;
 
     // TTTFG-4830 claims demo: a number in CLAIMS_DEMO_NUMBERS talks only to the claims flow, against the demo CRM
     // (TTT DEV). Nothing below runs for it. Every other number skips this (unset: no demo numbers at all).
     const demoContact = claimsDemoContact(from);
     if (demoContact) {
-        await handleClaimsDemoMessage({ from, text, document, wamid }, demoContact);
+        await handleClaimsDemoMessage({ from, text, document, ...(audio ? { audio: { id: audio.id, mimeType: audio.mimeType } } : {}), wamid }, demoContact);
+        return;
+    }
+    // TTTFG-4830: voice notes are read on the claims demo only. For everyone else, as before: no reply.
+    if (audio) {
+        console.log(`[Processor] ${from}: ${audio.voice ? 'voice note' : 'audio file'} ignored (voice notes are claims-demo only)`);
         return;
     }
 
