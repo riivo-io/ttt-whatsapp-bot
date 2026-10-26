@@ -7,8 +7,10 @@
  *  - client files in the client's SharePoint claim folder: Contact library / <client folder> / Claims / CLM-… (the
  *    store-and-register stand-in until the WhatsApp document pipeline, TTTFG-4945);
  *  - the filled claim form (TTTFG-5192, fill-dataverse.ts), re-filled when a form answer changes before signing (AC 6);
- *  - the signing step: until the signing page (TTTFG-5196), the demo sends the filled PDF on WhatsApp for the client to
- *    look at and answers notAvailable, so the claim status doesn't change and Tina moves on to the evidence.
+ *  - the signing step (TTTFG-5196): with the signing page set up (`signing`), the client gets the "ready to sign" link
+ *    and the claim goes to Form sent; the page's callback files the signed copy (demoClaimSigned). Without it, the
+ *    filled PDF goes to the client on WhatsApp to look at and the step answers notAvailable, so the claim status doesn't
+ *    change and Tina moves on to the evidence.
  */
 import type { Dv } from '../departments/insurance/dataverse';
 import { dataverseFillPorts, type ClaimFormFiles } from '../departments/insurance/fill-dataverse';
@@ -16,6 +18,10 @@ import { CLAIM_STATUSES, type ClaimFileStore } from '../departments/insurance/fo
 import type { ResumePorts } from '../departments/insurance/resume';
 import { dataverseResumePorts, OPEN_STATUS_FILTER } from '../departments/insurance/resume-dataverse';
 import { onClaimChanged, requestClaimSignature, type SigningStep } from '../departments/insurance/signature-fill';
+import {
+    claimSigningStep, onClaimFormSigned, type SignedCallback, type SigningRequestCreated, type SigningRequestInput,
+} from '../departments/insurance/signing';
+import { dataverseSigningPorts } from '../departments/insurance/signing-dataverse';
 
 const OPT = 463630000;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -145,6 +151,16 @@ export interface DemoChannels {
     blankFormFallback?(formUrl: string): Promise<Uint8Array | null>;
     /** The rehearsal prints what happens; Tina logs it. */
     note?(text: string): void;
+    /**
+     * TTTFG-5196: the signing page (src/signing/), when it's set up. `signedOff`: the "ready to sign" message may go out
+     * (the demo runs on draft wording, like its other claims messages, once this is switched on).
+     */
+    signing?: DemoSigning;
+}
+
+export interface DemoSigning {
+    create(input: SigningRequestInput): Promise<SigningRequestCreated>;
+    signedOff: boolean;
 }
 
 export const FORM_CAPTION = "Here's your claim form, filled in from your answers. Please have a look. "
@@ -240,12 +256,39 @@ export const demoSigningStep = (ch: DemoChannels, phone: string, sent?: (text: s
 };
 
 /**
+ * TTTFG-5196: the real signing step. The link goes to the demo number, the client's WhatsApp (a DEV demo contact's
+ * mobile number may be someone else's, or missing), as text: the client has just answered, so Tina is inside
+ * WhatsApp's 24-hour window.
+ */
+export function demoClaimSigningStep(ch: DemoChannels, signing: DemoSigning, phone: string, sent?: (text: string) => void): SigningStep {
+    const dvPorts = dataverseSigningPorts({ dv: ch.dv, files: claimFolders(ch).forms });
+    return claimSigningStep({
+        ...dvPorts,
+        signingClaim: async (claimId) => ({ ...(await dvPorts.signingClaim(claimId)), whatsApp: phone }),
+        signedOff: () => signing.signedOff,
+        createSigningRequest: (input) => signing.create(input),
+        send: {
+            whatsapp: async (to, m) => {
+                await ch.sendText(to, m.text);
+                sent?.(m.text);
+                ch.note?.(`WhatsApp: signing link sent (${m.template.name}, ${m.template.version})`);
+            },
+        },
+    });
+}
+
+/** TTTFG-5196: the signing page's callback for a demo claim: the signed copy filed and the claim set to Signed. */
+export const demoClaimSigned = (ch: DemoChannels, cb: SignedCallback) =>
+    onClaimFormSigned(dataverseSigningPorts({ dv: ch.dv, files: claimFolders(ch).forms }), cb);
+
+/**
  * The package's ports for one conversation. `contactId` is the demo number's contact: the number lookup is replaced,
  * because a demo number may sit on several test contacts in DEV (an ambiguous number opens no claim).
  */
 export function demoPorts(ch: DemoChannels, phone: string, contactId: string, sent: (text: string) => void): ResumePorts {
     const { files, forms } = claimFolders(ch);
-    const fill = dataverseFillPorts({ dv: ch.dv, files: forms, blankForm: (url) => blankForm(ch, url), signingStep: demoSigningStep(ch, phone, sent) });
+    const signingStep = ch.signing ? demoClaimSigningStep(ch, ch.signing, phone, sent) : demoSigningStep(ch, phone, sent);
+    const fill = dataverseFillPorts({ dv: ch.dv, files: forms, blankForm: (url) => blankForm(ch, url), signingStep });
     const sign = requestClaimSignature(fill);
     const base = dataverseResumePorts({
         dv: ch.dv,

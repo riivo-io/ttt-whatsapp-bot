@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 240b9bb). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit bdccfa6). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -22,6 +22,9 @@
 //   one-box-per-digit ID number), and `height` on a position target for the flat Hybrid forms' multi-line boxes.
 // - `overflow`: a long answer that Discovery prints as several one-line fields fills them in order.
 // - The generic row (no provider) has no claim type either: it serves every claim type an unmapped insurer gets.
+//
+// Added by TTTFG-5196 (optional, so rows loaded before it still parse): `sign` and `dateFormat` on a field map entry,
+// the boxes the signing page stamps.
 import { z } from 'zod';
 
 /** TTTFG-5251 step 3: how an answer is captured. Evidence items are photo, document or video. */
@@ -143,6 +146,14 @@ export const FieldMapEntrySchema = z.object({
   /** Human label for the blank-fields list and reviews. Required on position targets (they have no field name). */
   label: z.string().optional(),
   reason: z.string().optional(),
+  /**
+   * TTTFG-5196: a box the signing page stamps when the client signs (source `none` only): `signature`, their drawn
+   * signature, or `date`, the day they signed. On a flat form a signature's x, y is the start of the line signed on,
+   * `maxWidth` its length and `height` the room above it; a date's x, y is where the text sits, as for any value.
+   * `dateFormat` prints part of the date, for a form that splits it ("on this __ day of ______ 20__").
+   */
+  sign: z.enum(['signature', 'date']).optional(),
+  dateFormat: z.enum(['date', 'day', 'month', 'yy']).optional(),
 });
 export type FieldMapEntry = z.infer<typeof FieldMapEntrySchema>;
 

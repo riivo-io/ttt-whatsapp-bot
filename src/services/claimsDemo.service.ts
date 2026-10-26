@@ -16,7 +16,10 @@
  *   CLAIMS_REMINDER_TEMPLATE       TTTFG-5212: the approved WhatsApp template for a reminder outside the 24-hour window
  *                                  (body: REMINDER_TEMPLATE.whatsappBody, 3 variables). Unset: those clients are skipped
  *   CLAIMS_REMINDER_TEMPLATE_LANG  its language code (default en)
- * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql).
+ *   CLAIMS_SIGN_TEMPLATE_SIGNED_OFF  TTTFG-5196: "yes" lets the "ready to sign" message go out (draft-1 wording until
+ *                                  Insurance and Advice signs it off). Otherwise the claim owner gets a Follow-up and
+ *                                  the client no link. Needs the signing page set up (src/signing/env.ts: SIGNING_*)
+ * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql); signing_requests (20261027120000).
  */
 import {
     batchQuietMs, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
@@ -32,8 +35,12 @@ import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
 import {
-    cachedDv, dataverseCall, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type CrmStats, type DemoChannels, type Graph,
+    cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type CrmStats, type DemoChannels,
+    type DemoSigning, type Graph,
 } from './claimsDemoWiring';
+import type { SignedCallback } from '../departments/insurance/signing';
+import { signingFromEnv } from '../signing/env';
+import { createSigningRequest } from '../signing/signing';
 import { enqueueClaimsBatchCheck, enqueueClaimsReminder } from '../queue/whatsappQueue';
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
@@ -113,7 +120,21 @@ const channels = (stats: CrmStats): DemoChannels => ({
     } : {}),
     mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
     note: (text) => console.log(`[ClaimsDemo] ${text}`),
+    signing: signing(),
 });
+
+/** TTTFG-5196: the signing page, when it's set up. Its callback comes back to /webhook/claim-signed (handleClaimSigned). */
+function signing(): DemoSigning | undefined {
+    const d = signingFromEnv();
+    if (!d) return undefined;
+    return {
+        create: (input) => createSigningRequest(d, { ...input, callbackUrl: `${d.publicUrl}/webhook/claim-signed` }),
+        signedOff: process.env.CLAIMS_SIGN_TEMPLATE_SIGNED_OFF === 'yes',
+    };
+}
+
+/** TTTFG-5196: the client signed a demo claim's form (routes/claimSigned.route.ts). */
+export const handleClaimSigned = (cb: SignedCallback) => demoClaimSigned(channels(newCrmStats()), cb);
 
 /** Every outside call gets a deadline, so one slow call can't hold the client's queue. */
 const DEADLINE_MS = 20_000;

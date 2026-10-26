@@ -1,10 +1,12 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit 240b9bb). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit bdccfa6). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the fill half of the requestClaimSignature seam (TTTFG-5248 steps 6 to 8). TTTFG-5176 (WhatsApp) and
 // TTTFG-5188 (email) call it when no form answer is missing. It fills the insurer's form, or the summary sheet for the
 // generic row, files it as the claim's one unsigned claim form, writes riivo_blankfields and calls the signing step
-// (TTTFG-5196), returning that step's result. Until TTTFG-5196 exists the signing step is the stub
-// `signingStepNotAvailable`: the form is still filed, and TTTFG-5176 moves on to the evidence without a status change.
+// (TTTFG-5196), returning that step's result. The step gets the filed PDF with its SHA-256 and where the signature and
+// date go (signing.ts signatureStamps, or the summary sheet's lines). TTTFG-5196's step is signing.ts
+// claimSigningStep, which the host passes in; a host without the signing page keeps the stub `signingStepNotAvailable`:
+// the form is still filed, and TTTFG-5176 moves on to the evidence without a status change.
 //
 // signature.ts (TTTFG-5176) owns the default seam; this module is wired in when the branches merge.
 //
@@ -21,6 +23,7 @@
 import { createHash } from 'node:crypto';
 import type { ClaimAnswers, ClaimForm, RequestClaimSignature, SignatureResult } from './contracts';
 import { blankFieldsText, fillClaimForm, splitKey, type BlankField, type CrmValues } from './fill';
+import { signatureStamps, type SignStamp } from './signing';
 import { summarySheet } from './summarysheet';
 
 /** riivo_clientdocument document type for the filled, unsigned form. */
@@ -55,6 +58,10 @@ export interface UnsignedDocument {
   fileRef: string;
   clientDocumentId: string;
   bytes: Uint8Array;
+  /** SHA-256 of `bytes`, as filed (riivo_filehash). */
+  fileHash: string;
+  /** TTTFG-5196: where the signing page stamps the signature and the date. */
+  stamps: SignStamp[];
 }
 
 export interface ClientDocumentRow {
@@ -91,10 +98,10 @@ export interface ClaimFillPorts {
   signingStep: SigningStep;
 }
 
-/** `Claim form - [insurer] - [claim type] - unsigned.pdf`, without characters SharePoint refuses in a file name. */
-export function claimFormFileName(insurer: string, claimType: string): string {
+/** `Claim form - [insurer] - [claim type] - unsigned.pdf` (`signed.pdf` for TTTFG-5196's copy), without characters SharePoint refuses. */
+export function claimFormFileName(insurer: string, claimType: string, state: 'unsigned' | 'signed' = 'unsigned'): string {
   const clean = (s: string) => s.replace(/["*:<>?/\\|#%]/g, '-').replace(/\s+/g, ' ').trim();
-  return `Claim form - ${clean(insurer)} - ${clean(claimType)} - unsigned.pdf`;
+  return `Claim form - ${clean(insurer)} - ${clean(claimType)} - ${state}.pdf`;
 }
 
 export interface FillOutcome {
@@ -112,9 +119,11 @@ export async function fillAndFile(ports: ClaimFillPorts, claimId: string): Promi
 
   const form = await ports.claimForm(claim);
   const crm = await ports.crmValues(claim);
-  const { bytes, blankFields } = form.formPdf
+  const filled = form.formPdf
     ? await fillClaimForm(await ports.blankForm(form.formPdf), form, claim.answers, crm)
     : await summarySheet(form, claim.answers, crm);
+  const { bytes, blankFields } = filled;
+  const stamps = 'stamps' in filled ? filled.stamps : await signatureStamps(form, bytes);
 
   const fileName = claimFormFileName(claim.insurer, claim.claimType);
   const existing = await ports.findClientDocument(claim.id, CLAIM_FORM_UNSIGNED);
@@ -130,7 +139,7 @@ export async function fillAndFile(ports: ClaimFillPorts, claimId: string): Promi
   }
   await ports.writeBlankFields(claim.id, blankFieldsText(blankFields));
 
-  const document: UnsignedDocument = { fileName, fileRef, clientDocumentId, bytes };
+  const document: UnsignedDocument = { fileName, fileRef, clientDocumentId, bytes, fileHash, stamps };
   return { result: await ports.signingStep(claim.id, document), document, blankFields };
 }
 

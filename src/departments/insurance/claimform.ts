@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 240b9bb). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit bdccfa6). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5172: claim form configs and their validator (TTTFG-5251 steps 5 and 9).
 //
@@ -313,6 +313,12 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
       }
     }
     if (e.when) checkCondition(where, e.when, questions);
+    // TTTFG-5196: the signing page stamps these; nothing else may fill them.
+    if (e.sign && e.source !== 'none') err(`${where}: sign "${e.sign}" is stamped by the signing page; use source "none"`);
+    if (e.sign === 'signature' && !('pdfField' in t) && (t.maxWidth === undefined || t.height === undefined)) {
+      err(`${where}: a signature on a position needs maxWidth (the line's length) and height (the room above it)`);
+    }
+    if (e.dateFormat && e.sign !== 'date') err(`${where}: dateFormat is for a sign "date" box`);
     if (e.format === 'tick' && e.tickWhen === undefined && e.source !== 'none') err(`${where}: a tick needs tickWhen`);
     if (e.format === 'char' && e.charIndex === undefined) err(`${where}: format "char" needs charIndex`);
 
@@ -351,6 +357,10 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
     const fallbacks = entries.filter((e) => !e.when).length;
     if (entries.length === 0) err(`field "${name}": no field map entry (map it, or use source "none" with a reason)`);
     else if (fallbacks > 1) err(`field "${name}": ${fallbacks} entries without a condition; a box has one`);
+  }
+  // TTTFG-5196: without one, the client's signature has nowhere to go.
+  if (row.formPdf && !row.fieldMap.some((e) => e.sign === 'signature')) {
+    err('no signature box: mark the box the client signs with sign "signature" (the signing page stamps it)');
   }
 
   return { ok: errors.length === 0, errors };
