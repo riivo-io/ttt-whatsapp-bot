@@ -16,7 +16,8 @@
 --                  callback_next_at is due (a delivery running holds it as
 --                  a lease, so one callback never runs twice at once)
 -- The PDFs are in the private storage bucket "signing": <id>/unsigned.pdf and
--- <id>/signed.pdf. Service role only (RLS on, no policies).
+-- <id>/signed-<first 16 of its SHA-256>.pdf. Service role only (RLS on, no
+-- policies). Safe to run again.
 -- =============================================================================
 
 create table if not exists signing_requests (
@@ -44,6 +45,8 @@ create table if not exists signing_requests (
     callback_error      text,
     callback_next_at    timestamptz
 );
+-- In case an earlier draft of this migration (without the lease) was run.
+alter table signing_requests add column if not exists callback_next_at timestamptz;
 
 create index if not exists signing_requests_open_by_caller
     on signing_requests (caller, caller_record_id) where status = 'open';
