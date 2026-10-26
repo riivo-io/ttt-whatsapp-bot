@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import express from 'express';
 import { handleClaimSigned } from '../services/claimsDemo.service';
+import { callbackSecretFromEnv } from '../signing/env';
 import { SIGNATURE_HEADER } from '../signing/signing';
 import { verifyHmacSha256 } from '../utils/hmac';
 
@@ -10,14 +11,14 @@ const router = Router();
  * POST /webhook/claim-signed
  *
  * TTTFG-5196: the signing page's callback for a claim form (caller "claim"). Signed with HMAC-SHA256 of the raw body
- * under SIGNING_CALLBACK_SECRET (header x-signing-signature). The claims package files the signed copy in the claim
- * folder, adds its "Claim form (signed)" row and sets the claim to Signed (onClaimFormSigned). Today every claim Tina
- * runs is a demo claim in the demo CRM.
+ * under the signing page's callback key (src/signing/env.ts; header x-signing-signature). The claims package files the
+ * signed copy in the claim folder, adds its "Claim form (signed)" row and sets the claim to Signed (onClaimFormSigned).
+ * Today every claim Tina runs is a demo claim in the demo CRM.
  *
  * Idempotent: the page retries until it gets a 2xx, and a claim already Signed answers 200 with nothing written.
  */
 router.post('/', express.raw({ type: 'application/json', limit: '40mb' }), async (req: Request, res: Response) => {
-    const secret = process.env.SIGNING_CALLBACK_SECRET;
+    const secret = callbackSecretFromEnv();
     if (!secret) {
         res.status(500).json({ error: 'webhook_not_configured' });
         return;

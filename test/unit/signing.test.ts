@@ -295,3 +295,22 @@ test('the callback signature is HMAC-SHA256 of the body, as utils/hmac checks it
     assert.ok(verifyHmacSha256(Buffer.from(body), callbackSignature(body, SECRET), SECRET));
     assert.ok(!verifyHmacSha256(Buffer.from(body + ' '), callbackSignature(body, SECRET), SECRET));
 });
+
+test('settings: off without SIGNING_PUBLIC_URL; the callback key falls back to one derived from the Supabase service key', async () => {
+    const keep = { ...process.env };
+    try {
+        delete process.env.SIGNING_CALLBACK_SECRET;
+        process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-key';
+        const { callbackSecretFromEnv } = await import('../../src/signing/env');
+        const derived = callbackSecretFromEnv();
+        assert.match(derived ?? '', /^[0-9a-f]{64}$/);
+        assert.notEqual(derived, 'service-key');
+        process.env.SIGNING_CALLBACK_SECRET = 'explicit';
+        assert.equal(callbackSecretFromEnv(), 'explicit');
+        delete process.env.SIGNING_CALLBACK_SECRET;
+        delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+        assert.equal(callbackSecretFromEnv(), null);
+    } finally {
+        process.env = keep;
+    }
+});

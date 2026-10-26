@@ -21,7 +21,7 @@
  *                                  and CLAIMS_VOICE_MAX_SECONDS: see transcribe.service.ts
  *   CLAIMS_SIGN_TEMPLATE_SIGNED_OFF  TTTFG-5196: "yes" lets the "ready to sign" message go out (draft-1 wording until
  *                                  Insurance and Advice signs it off). Otherwise the claim owner gets a Follow-up and
- *                                  the client no link. Needs the signing page set up (src/signing/env.ts: SIGNING_*)
+ *                                  the client no link. Needs the signing page set up (src/signing/env.ts: SIGNING_PUBLIC_URL)
  * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql); signing_requests (20261027120000).
  */
 import {
