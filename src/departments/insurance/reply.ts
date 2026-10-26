@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 78a9547). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 240b9bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830 (claims on Tina): Claude reads one WhatsApp message from a client who has an open claim and says what it
 // means for resume.ts (a ResumeMessage). It is the follow-on's half of understand.ts: TTTFG-5176 and TTTFG-5184 left
@@ -86,6 +86,11 @@ export interface ReplyContext {
   batch?: QuestionItem[];
   /** Tina's SAPS step is open (case number and station are read as `saps`). */
   sapsStep?: boolean;
+  /**
+   * TTTFG-4830 (still need): Tina listed what the client still has to send ("Things we still need from you") and has no
+   * question open. The message may bring any of it; a SAPS case number or station is read as `saps`.
+   */
+  stillNeed?: QuestionItem[];
   /** Evidence items still missing on that claim: what a file could be. */
   missingEvidence: QuestionItem[];
   /** TTTFG-4830: the claim's other open questions (not `asking`): what else the message may answer. */
@@ -118,6 +123,15 @@ in any order: this message may answer all of them, some of them or none.
 - kind: "value" when the message answers, or says "don't know" to, at least one question in <batch_questions>;
   "unparsed" when it does neither.`;
 
+/** TTTFG-4830 (still need): Tina listed what the client still has to send, and has no question open. */
+const STILL_NEED_HELP = `Tina sent the client the list of what she still needs for the claim (<tina_asked>). The message may
+give some of it, in any order:
+- an answer to a question in <other_open_questions>: in otherAnswers (never in the top-level value fields);
+- the SAPS case number or the police station the client reported it at: sapsCaseNumber and sapsStation, kind "saps";
+- a file: see forItem.
+Use kind "not-yet" when the client only says they don't have them yet, will send them later or don't know. Otherwise use
+kind "unparsed" (otherAnswers, sapsCaseNumber and sapsStation are read whatever the kind).`;
+
 const claimLine = (c: OpenClaim, i: number) => `${i + 1}. ${c.claimType} claim ${c.reference}, incident on ${sastParts(c.incidentAt).date}`;
 
 function askingHelp(ctx: ReplyContext): string {
@@ -131,6 +145,7 @@ function askingHelp(ctx: ReplyContext): string {
       + 'sapsStation as the client gave them. Use kind "not-yet" when the client has no case number yet or hasn\'t reported it.';
   }
   if (ctx.batch && ctx.batch.length > 1) return BATCH_HELP;
+  if (ctx.stillNeed) return STILL_NEED_HELP;
   const item = ctx.asking;
   if (!item) return 'Tina has no question open. Use kind "unparsed" unless the client gives a SAPS case number (kind "saps").';
   if (item.kind === 'evidence') {
@@ -279,6 +294,8 @@ export function toResumeMessage(raw: unknown, ctx: ReplyContext, file: ClientFil
     if (also.length) understood = { ...understood, also };
   } else {
     if (file) understood = { kind: 'file', file, wamid };
+    // TTTFG-4830 (still need): a case number or station sent for the list is saved, even with "the rest later".
+    else if (ctx.stillNeed && (caseNumber || station)) understood = { kind: 'saps', caseNumber, station, wamid };
     else if (r.kind === 'not-yet') understood = { kind: 'not-yet', wamid };
     else if (ctx.sapsStep && (caseNumber || station)) understood = { kind: 'saps', caseNumber, station, wamid };
     else if (ctx.sapsStep && r.kind === 'value' && str(r.valueText)) understood = { kind: 'value', value: str(r.valueText)!, wamid };
@@ -379,6 +396,7 @@ export async function replyContext(
   const st = state.followOn;
   if (st && st.claimId === followed) {
     if (st.phase === 'saps') ctx.sapsStep = true;
+    if (st.phase === 'still-need') ctx.stillNeed = missingItems(form, claim.answers, claim.evidence, { facts, sapsRequired: st.sapsRequired });
     const list = formItems(form, claim.answers, facts, st.sapsRequired);
     ctx.asking = st.asking === SAPS_CASE_KEY || st.asking === SAPS_STATION_KEY
       ? SAPS_ITEMS.find((i) => i.key === st.asking)

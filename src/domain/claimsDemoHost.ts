@@ -13,6 +13,8 @@
  *    rest and the queue brings back a check after a quiet spell (claimsDemoBatchCheck);
  *  - no open claim: a claim report starts the walkthrough under a new riivo_request; anything else gets the demo hello.
  * "#reset" withdraws the demo client's open claims and forgets the conversation, so a demo can start clean.
+ * Every morning at 08:00 (TTTFG-5212, first cut) claimsDemoReminder() sends each demo number what it still has to send
+ * on its open claims ("Things we still need from you"), and puts the conversation back on that list.
  *
  * Pure apart from the injected deps (Tina's Ports pattern), so it is tested without Meta, Dataverse, Supabase or Claude.
  * src/services/claimsDemo.service.ts wires the real ones.
@@ -21,6 +23,7 @@ import { claimTurn, type Conversation } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
 import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyModel, type ReportedModel } from '../departments/insurance/reply';
+import { remindTurn, type ReminderOutcome, type ReminderPorts, type ReminderSettings } from '../departments/insurance/reminder';
 import { NO_RESUME_STATE, resumeTurn, type ResumePorts, type ResumeState } from '../departments/insurance/resume';
 import { understand, type UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
@@ -46,6 +49,14 @@ export function parseDemoNumbers(raw: string | undefined): Map<string, string> {
 export function batchQuietMs(raw: string | undefined): number {
     const ms = raw === undefined || raw.trim() === '' ? 45_000 : Number(raw);
     return Number.isFinite(ms) && ms >= 0 ? ms : 45_000;
+}
+
+/**
+ * TTTFG-5212: the demo numbers as WhatsApp numbers (27 and nine digits, as Meta sends them and the conversation is kept
+ * under), for the morning reminder, which starts from the list rather than from a message.
+ */
+export function demoPhones(raw: string | undefined): { phone: string; contactId: string }[] {
+    return [...parseDemoNumbers(raw)].map(([local, contactId]) => ({ phone: `27${local}`, contactId }));
 }
 
 /** The demo contact for a WhatsApp sender, or null when the number isn't a demo number. */
@@ -101,6 +112,8 @@ export interface ClaimsDemoDeps {
      * without it, she lists what's still open straight away.
      */
     scheduleBatchCheck?(phone: string, token: string): Promise<void>;
+    /** TTTFG-5212: when the claim's last morning reminder went out (its agent action). Absent: never. */
+    lastReminderOn?(claimId: string): Promise<string | null>;
 }
 
 export type DemoOutcome =
@@ -259,6 +272,30 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
     if (last !== undefined) c.lastSent = last;
     await deps.save(phone, c);
     return 'listed';
+}
+
+/**
+ * TTTFG-5212 (first cut): the morning reminder for one demo number, on the number's own queue so it never crosses a
+ * message the client is sending. Not while the client is reporting a claim (a 5168 walkthrough in progress).
+ * remindTurn() decides per open claim and sends; when it puts the conversation back on a claim's list, that is kept,
+ * with the reminder as Tina's last message, so the reply is read against it. Nothing sent: nothing is written.
+ */
+export async function claimsDemoReminder(
+    deps: ClaimsDemoDeps, phone: string, contactId: string, now: Date, settings: ReminderSettings = {},
+): Promise<ReminderOutcome[] | 'walkthrough'> {
+    const stored = await deps.load(phone);
+    const c: DemoConversation = stored && stored.contactId === contactId
+        ? stored
+        : { contactId, requestId: '', walk: null, resume: NO_RESUME_STATE, held: [], lastSent: null };
+    const abandoned = c.updatedAt && now.getTime() - Date.parse(c.updatedAt) > ABANDONED_AFTER_MS;
+    if (c.walk && !abandoned) return 'walkthrough';
+    const ports: ReminderPorts = { ...deps.ports(c.requestId, () => {}), lastReminderOn: deps.lastReminderOn ?? (async () => null) };
+    const r = await remindTurn(ports, { phone, requestId: c.requestId, signUpLink: deps.signUpLink }, c.resume, contactId, now, settings);
+    if (!r.outcomes.some((o) => 'sent' in o)) return r.outcomes;
+    c.resume = r.state;
+    if (r.lastSent) c.lastSent = r.lastSent;
+    await deps.save(phone, c);
+    return r.outcomes;
 }
 
 /** The client's report as Claude reads it for the form: their own messages, then the facts they confirmed. */

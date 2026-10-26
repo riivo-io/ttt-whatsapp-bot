@@ -104,6 +104,25 @@ export async function enqueueClaimsBatchCheck(phone: string, token: string, dela
     await getSender().sendMessages(msg);
 }
 
+/** TTTFG-5212 (claims demo): the rawMessage type of the morning reminder (see enqueueClaimsReminder). */
+export const CLAIMS_REMINDER = 'claims_reminder';
+
+/**
+ * TTTFG-5212 (claims demo): the morning reminder for one demo number, queued by the 08:00 cron on the number's own
+ * session, so it runs after anything the client is sending. The message id names the day: with duplicate detection on
+ * the queue a second run the same day is dropped (the claims package also skips a claim already reminded today).
+ */
+export async function enqueueClaimsReminder(phone: string, day: string): Promise<void> {
+    const payload: WhatsAppJobPayload = {
+        metaMessageId: `claims-reminder:${phone}:${day}`,
+        phone,
+        phoneNumberId: null,
+        receivedAt: Date.now(),
+        rawMessage: { type: CLAIMS_REMINDER },
+    };
+    await getSender().sendMessages({ body: payload, sessionId: phone, messageId: payload.metaMessageId });
+}
+
 // Pure helper lives in src/utils/jobIdRetry so smoke tests can import it
 // without pulling in @azure/service-bus transitively.
 export { parseRetryAttempt } from '../utils/jobIdRetry';

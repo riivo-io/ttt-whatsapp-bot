@@ -134,6 +134,11 @@ export interface DemoChannels {
     site: string;
     sendText(to: string, text: string): Promise<void>;
     sendDocument(to: string, bytes: Buffer, fileName: string, caption: string): Promise<void>;
+    /**
+     * TTTFG-5212: the morning reminder as Tina's approved WhatsApp template (outside the 24-hour window), its variables
+     * in order. Absent: no template is set up, and the claims package doesn't ask for one.
+     */
+    sendTemplate?(to: string, params: string[]): Promise<void>;
     /** A WhatsApp media item's bytes (Meta keeps them for 30 days, so a file held for later still downloads). */
     mediaBytes(mediaId: string): Promise<Buffer>;
     /** Where the blank insurer form comes from when SharePoint won't give it (the rehearsal's local copies). */
@@ -258,7 +263,11 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
         },
         send: async (to, m) => {
             // Templates (the duty of disclosure, the deadline note) go as text: the client is inside the 24-hour window.
-            await ch.sendText(to, m.text);
+            // TTTFG-5212: one with params (the morning reminder, outside the window) goes as the approved template.
+            if (m.kind === 'template' && m.params) {
+                if (!ch.sendTemplate) throw new Error(`No WhatsApp template set up for "${m.name}" outside the 24-hour window`);
+                await ch.sendTemplate(to, m.params);
+            } else await ch.sendText(to, m.text);
             sent(m.text);
         },
     });

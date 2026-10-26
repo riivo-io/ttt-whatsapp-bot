@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 78a9547). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 240b9bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -28,7 +28,7 @@ import {
   type FollowOnState, type ResumeFile, type StoredClaimForm,
 } from './followon';
 import type { QuestionItem } from './contracts';
-import { itemName, SAPS_CASE_KEY, SAPS_STATION_KEY } from './progress';
+import { chased, itemName } from './progress';
 import type { ClaimType, Facts, WalkthroughState } from './walkthrough';
 
 /**
@@ -176,7 +176,9 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
   const f = state.followOn;
   const current = f && claims.find((c) => c.id === f.claimId);
   const last = current?.lastClientMessageOn ? Date.parse(current.lastClientMessageOn) : now.getTime();
-  const fresh = !!current && now.getTime() - last < resumeAfterHours * HOUR;
+  // TTTFG-4830 (still need): a reply to the list of what's still needed (the morning reminder too) goes on the list.
+  const listed = f?.phase === 'still-need' && f.listedAt ? Date.parse(f.listedAt) : 0;
+  const fresh = !!current && now.getTime() - Math.max(last, listed) < resumeAfterHours * HOUR;
 
   // TTTFG-4830: the client already said it's a new claim, so it isn't asked.
   if (message.newClaim) return { kind: 'start-new', held: files, facts: message.facts };
@@ -221,22 +223,18 @@ export function whichClaimText(claims: readonly OpenClaim[], again = false): str
   return `Sorry, I didn't quite get that. Which claim is this about?\n${labels.map((l, i) => `${i + 1}. ${l.charAt(0).toUpperCase()}${l.slice(1)}`).join('\n')}`;
 }
 
-const SAPS_NAMES: Record<string, string> = {
-  [SAPS_CASE_KEY]: 'the SAPS case number',
-  [SAPS_STATION_KEY]: 'the police station you reported it at',
-};
-
 /**
- * The names in the welcome-back list. Documents and photos are named, because those are what the client has to go
- * and find. The form's other questions are counted, not named: Tina asks them straight after, and a
- * Momentum form has over a hundred, whose keys don't read as names.
+ * The names in the welcome-back list. What the client has to go and find is named (TTTFG-4830: the items a form
+ * chases, as on "Things we still need from you": the SAPS case number, the registration number, documents and photos).
+ * The form's other questions are counted, not named: Tina asks them straight after, and a Momentum form has over a
+ * hundred, whose keys don't read as names.
  */
 export function missingNames(items: readonly QuestionItem[]): string[] {
-  const saps = items.filter((i) => SAPS_NAMES[i.key]).map((i) => SAPS_NAMES[i.key]);
-  const questions = items.filter((i) => i.kind === 'question' && !SAPS_NAMES[i.key]).length;
+  const named = items.filter((i) => i.kind === 'question' && chased(i)).map(itemName);
+  const questions = items.filter((i) => i.kind === 'question' && !chased(i)).length;
   const evidence = items.filter((i) => i.kind === 'evidence').map(itemName);
   const counted = questions === 0 ? [] : [questions === 1 ? 'the answer to 1 more question' : `the answers to ${questions} more questions`];
-  return [...saps, ...counted, ...evidence];
+  return [...named, ...counted, ...evidence];
 }
 
 /**

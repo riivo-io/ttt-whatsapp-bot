@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 78a9547). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 240b9bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -55,3 +55,41 @@ export const DISCLOSURE_TEMPLATE = {
 } as const;
 
 export type ClaimTemplate = typeof DEADLINE_UPCOMING_TEMPLATE | typeof DEADLINE_PASSED_TEMPLATE | typeof DISCLOSURE_TEMPLATE;
+
+/**
+ * TTTFG-4830 (still need): "it" or "them" for a list's lines: "them" for several, or for one whose main word is a
+ * plural ("Photos of the damage", "Quotes"); "it" for "Vehicle registration number".
+ */
+export function itOrThem(lines: readonly string[]): 'it' | 'them' {
+  if (lines.length !== 1) return 'them';
+  const head = lines[0].split(/ (?:of|you|the|for|that|where|to) /)[0].trim().split(/\s+/).at(-1) ?? '';
+  return /[^s]s$/i.test(head) ? 'them' : 'it';
+}
+
+export interface ReminderVars {
+  firstName: string;
+  /** "motor theft claim (CLM-000301)". */
+  claim: string;
+  /** The list's lines (followon.ts stillNeedLines), or for the WhatsApp template the same in one line. */
+  lines: readonly string[];
+  /** Some of it is questions Tina asks one by one (a claim the client left half way), not things to send. */
+  questionsLeft?: boolean;
+}
+
+/**
+ * TTTFG-5212 (first cut, for the TTTFG-4830 demo): the morning reminder of what the client still has to send
+ * (reminder.ts). Never says what happens if they don't. Inside WhatsApp's 24-hour window it goes as this text; outside
+ * it, as the approved WhatsApp template whose body is `whatsappBody`, with the list in one line ({{3}}).
+ */
+export const REMINDER_TEMPLATE = {
+  name: 'Claim - still needed (morning reminder)',
+  version: 'draft-1',
+  approved: false,
+  render: (v: ReminderVars) => [
+    `Good morning ${v.firstName}, it's Tina from TTT. Things we still need from you for your ${v.claim}:`,
+    ...v.lines.map((l) => `- ${l}`),
+    v.questionsLeft ? "Reply here when you're ready and I'll take you through them." : `Please send ${itOrThem(v.lines)} here when you have ${itOrThem(v.lines)}.`,
+  ].join('\n'),
+  /** For Meta: {{1}} first name, {{2}} the claim, {{3}} the list in one line ("the SAPS case number and the quotes"). */
+  whatsappBody: "Good morning {{1}}, it's Tina from TTT. For your {{2}} we still need {{3}}. Please send them here when you have them.",
+} as const;

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 78a9547). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 240b9bb). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -29,15 +29,21 @@
 // spell, when it can: ClaimSettings.waitForMore) or straight away when it can't. A question listed again and still open
 // the next time goes to the broker, as after two misses on one question. Forms without sections are asked one question
 // at a time, as before.
+//
+// TTTFG-4830 (still need): when everything has been asked, what the client still has to get (the items a form marks
+// `chase`, the required evidence, the SAPS case number) goes out as one list, "Things we still need from you:", and the
+// conversation stays on it (phase `still-need`): whatever the client sends next is read against the list, and the
+// morning reminder (reminder.ts) puts a client back on it. "I don't know" to one of those items is "not yet", so it
+// stays the client's to send; the broker takes only what the client can't get.
 import { DEPARTMENT, type AgentActionRow, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import { formatProblem } from './formats';
 import { claimGate } from './gate';
 import {
-  applies, deferred, formItems, itemName, missingItems, nextBatch, nextItem, sapsStepApplies, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
+  applies, chased, deferred, formItems, itemName, missingItems, nextBatch, nextItem, sapsStepApplies, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
-import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, type ClaimTemplate } from './templates';
+import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, type ClaimTemplate } from './templates';
 import type { ClaimType, Facts } from './walkthrough';
 
 /**
@@ -134,8 +140,12 @@ export interface FollowOnPorts {
 /** Stored on the Tina conversation, keyed by claim id. Where the conversation is, not what the claim holds. */
 export interface FollowOnState {
   claimId: string;
-  /** `address` (TTTFG-4830): Tina is confirming the client's home address, between the duty of disclosure and the form. */
-  phase: 'saps' | 'address' | 'items';
+  /**
+   * `address` (TTTFG-4830): Tina is confirming the client's home address, between the duty of disclosure and the form.
+   * `still-need` (TTTFG-4830): everything has been asked and Tina listed what the client still has to send; each message
+   * is read for any of it. `asking` is empty.
+   */
+  phase: 'saps' | 'address' | 'items' | 'still-need';
   /** The key Tina asked last. */
   asking: string;
   /** Unreadable replies to `asking` in a row. */
@@ -175,6 +185,11 @@ export interface FollowOnState {
    * asked again it starts "Back to where we left off:", so the client doesn't get the same words twice.
    */
   waitingOn?: string;
+  /**
+   * TTTFG-4830 (still need): when Tina last sent the client the list of what she still needs (at the end of the
+   * questions, or in the morning reminder). A reply within resumeAfterHours of it goes on the list (resume.ts).
+   */
+  listedAt?: string;
 }
 
 /** What Claude understood from the client's message. Code decides what happens next. */
@@ -240,6 +255,15 @@ export const SAVED_SAPS = "Thanks, I've saved the SAPS case number. Back to my q
 export const LEFT_OFF = 'Back to where we left off:';
 /** TTTFG-4830: "I don't know" to a required question. */
 export const BROKER_WILL_CHECK = 'No problem, your broker will check that with you.';
+/** TTTFG-4830 (still need): "I don't know" to items the client can get (chased): they go on the list for later. */
+export const sendLater = (items: readonly QuestionItem[]) =>
+  `No problem, send me ${list(items.map(itemName))} when you have ${items.length === 1 ? 'it' : 'them'}.`;
+/** TTTFG-4830 (still need): said after sendLater() when some of the same message's "don't know"s are the broker's. */
+export const BROKER_THE_OTHERS = 'Your broker will check the others with you.';
+/** TTTFG-4830 (still need): "not yet" to the list. */
+export const WHEN_YOU_HAVE_THEM = 'No problem, send them here when you have them.';
+/** TTTFG-4830 (still need): the list after the last of the insurer's questions. */
+export const ALL_FOR_NOW = "Thanks, that's all for now.";
 /** TTTFG-4830: the client changed an earlier answer. */
 export const CORRECTED = "No problem, I've changed that.";
 /** TTTFG-4830: the reply answered other questions but not the one Tina asked. */
@@ -304,7 +328,8 @@ type Out =
   | { kind: 'template'; template: ClaimTemplate; text: string }
   | { kind: 'received'; item: QuestionItem }
   | { kind: 'closing' }
-  | { kind: 'still-missing'; items: QuestionItem[] }
+  /** `lead` (TTTFG-4830): the words in front of "Things we still need from you:" ('' for none). */
+  | { kind: 'still-missing'; items: QuestionItem[]; lead: string }
   | { kind: 'save-answer'; key: string; record: AnswerRecord }
   /** TTTFG-4830: an answer that no longer belongs on the claim (a group entry the client took back). */
   | { kind: 'drop-answer'; key: string }
@@ -371,7 +396,7 @@ const moveOn = ({ waitingOn: _o, batch: _b, relisted: _r, waiting: _w, ...st }: 
  * The next question (or batch of questions, TTTFG-4830) or evidence item, the signing step between them, and the end.
  * `thanks` (TTTFG-4830): the client just finished a batch, so the next question starts with "Thanks.".
  */
-function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thanks.'): FollowOnState | null {
+function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thanks.', listLead: string = ALL_FOR_NOW): FollowOnState | null {
   // The SAPS keys belong to the SAPS step; the questions never ask them again.
   const skip = [...st.skipped, SAPS_CASE_KEY, SAPS_STATION_KEY];
   const batch = nextBatch(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip });
@@ -404,8 +429,26 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
     return { ...st, phase: 'items', asking: next.key, misses: 0 };
   }
   const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
-  out.push(...(missing.length ? [{ kind: 'still-missing', items: missing } as const] : [{ kind: 'evidence-complete' } as const, { kind: 'closing' } as const]));
-  return null;
+  if (!missing.length) {
+    out.push({ kind: 'evidence-complete' }, { kind: 'closing' });
+    return null;
+  }
+  // TTTFG-4830 (still need): the list, and the conversation stays on it.
+  out.push({ kind: 'still-missing', items: missing, lead: listLead });
+  return stillNeedState(c, st, missing);
+}
+
+/**
+ * TTTFG-4830 (still need): the state once Tina has listed what the client still has to send. The listed items are
+ * skipped in this conversation, so only something new (a question a correction opened) is asked one by one; the rest
+ * comes in on the list.
+ */
+export function stillNeedState(c: Pick<Ctx, 'now'>, st: FollowOnState, missing: readonly QuestionItem[]): FollowOnState {
+  const { topic: _t, formatChecked: _f, ...rest } = moveOn(st);
+  return {
+    ...rest, phase: 'still-need', asking: '', misses: 0,
+    skipped: [...new Set([...st.skipped, ...missing.map((i) => i.key)])], listedAt: c.now.toISOString(),
+  };
 }
 
 /** After the SAPS step: the deadline note when needed, the duty of disclosure, then the first question. */
@@ -814,6 +857,7 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, raw: Exclude<FollowOn
   const noted = input.kind === 'file' ? 0 : applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.batch ?? st.asking);
 
   if (st.phase === 'address') return { state: advanceAddress(c, w, st, input, out, at), out };
+  if (st.phase === 'still-need') return { state: advanceStillNeed(c, w, st, input, out, { corrected, flagged, ownReading, noted }), out };
 
   if (st.phase === 'saps') {
     let caseNumber = input.kind === 'saps' ? input.caseNumber?.trim() || undefined : undefined;
@@ -908,12 +952,14 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, raw: Exclude<FollowOn
     }
   }
 
-  // "Not yet" passes over an evidence item or an optional question.
-  if (input.kind === 'not-yet' && (item.kind === 'evidence' || !item.required)) {
+  // "Not yet" passes over an evidence item or an optional question. TTTFG-4830 (still need): and over a question the
+  // client can get (chased), which goes on their list for later rather than to the broker.
+  if (input.kind === 'not-yet' && (item.kind === 'evidence' || !item.required || chased(item))) {
     // Kept on the claim, so a later conversation doesn't ask an optional item again, and asks a required one as "yet?".
     const record: AnswerRecord = { value: null, status: 'not-yet', at, wamid: input.wamid };
     out.push({ kind: 'save-answer', key: item.key, record });
     w.answers[item.key] = record;
+    if (item.kind === 'question' && item.required) out.push({ kind: 'text', text: sendLater([item]) });
     return { state: proceed(c, w, { ...st, skipped: [...st.skipped, item.key] }, out), out };
   }
 
@@ -938,7 +984,8 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, raw: Exclude<FollowOn
     out.push({ kind: 'ask', item, simpler: true });
     return { state: { ...st, misses: st.misses + 1 }, out };
   }
-  if (item.kind === 'evidence') return { state: proceed(c, w, { ...st, skipped: [...st.skipped, item.key] }, out), out };
+  // TTTFG-4830 (still need): an item the client can get stays theirs: it goes on the list at the end.
+  if (item.kind === 'evidence' || chased(item)) return { state: proceed(c, w, { ...st, skipped: [...st.skipped, item.key] }, out), out };
   const record: AnswerRecord = { value: null, status: 'broker-to-confirm', at, wamid: input.wamid };
   out.push({ kind: 'save-answer', key: item.key, record });
   w.answers[item.key] = record;
@@ -1041,21 +1088,25 @@ function advanceBatch(
     }
     if (checked.size) st = { ...st, formatChecked: [...checked] };
     let broker = false;
+    const later: QuestionItem[] = [];
     for (const key of input.dontKnow) {
       const item = list().find((i) => i.key === key);
       const prev = w.answers[key];
       if (!batch.includes(key) || item?.kind !== 'question' || !applies(item, w.answers, w.facts) || (prev && prev.status !== 'not-yet')) continue;
       answered = true;
-      if (item.required) {
+      if (item.required && !chased(item)) {
         // "I don't know" isn't a miss: the broker confirms it with the client, as for one question.
         save(key, { value: null, status: 'broker-to-confirm', at, wamid: input.wamid });
         broker = true;
       } else {
+        // An optional question, or (TTTFG-4830, still need) one the client can get: theirs, for later.
         save(key, { value: null, status: 'not-yet', at, wamid: input.wamid });
         st = { ...st, skipped: [...st.skipped, key] };
+        if (item.required) later.push(item);
       }
     }
-    if (broker) out.push({ kind: 'text', text: BROKER_WILL_CHECK });
+    if (later.length) out.push({ kind: 'text', text: broker ? `${sendLater(later)} ${BROKER_THE_OTHERS}` : sendLater(later) });
+    else if (broker) out.push({ kind: 'text', text: BROKER_WILL_CHECK });
   }
 
   if (!openBatch(c, w, st).length) return proceed(c, w, st, out, 'Thanks.');
@@ -1077,16 +1128,20 @@ function advanceBatch(
 function relist(c: Ctx, w: Work, st: FollowOnState, out: Out[], lead: Relist, at: string, wamid: string): FollowOnState | null {
   const relisted = { ...(st.relisted ?? {}) };
   if (lead.count) {
+    const later: string[] = [];
     for (const item of openBatch(c, w, st)) {
       if (!applies(item, w.answers, w.facts)) continue;
       if (!relisted[item.key]) {
         relisted[item.key] = 1;
         continue;
       }
-      const record: AnswerRecord = { value: null, status: 'broker-to-confirm', at, wamid };
+      // TTTFG-4830 (still need): one the client can get stays theirs (on the list at the end), not the broker's.
+      const record: AnswerRecord = { value: null, status: chased(item) ? 'not-yet' : 'broker-to-confirm', at, wamid };
       out.push({ kind: 'save-answer', key: item.key, record });
       w.answers[item.key] = record;
+      if (record.status === 'not-yet') later.push(item.key);
     }
+    if (later.length) st = { ...st, skipped: [...st.skipped, ...later] };
   }
   const open = openBatch(c, w, st);
   if (!open.length) return proceed(c, w, st, out);
@@ -1101,9 +1156,68 @@ function relist(c: Ctx, w: Work, st: FollowOnState, out: Out[], lead: Relist, at
 
 /** The host's nudge: when Tina is still waiting on that message, what's open is listed again. */
 function nudged(c: Ctx, st: FollowOnState, wamid: string): Step {
-  if (!st.batch || st.waiting !== wamid) return { state: st, out: [] };
+  if (st.waiting !== wamid) return { state: st, out: [] };
+  if (st.phase === 'still-need') return stillNeedNudged(c, st);
+  if (!st.batch) return { state: st, out: [] };
   const out: Out[] = [];
   return { state: relist(c, work(c.claim), st, out, { ...STILL_NEED, count: true }, c.now.toISOString(), wamid), out };
+}
+
+// ------------------------------------------------------------- TTTFG-4830: what the client still has to send
+
+/**
+ * A message while Tina is on the list of what the client still has to send (phase `still-need`). It may bring any of
+ * it: answers to the listed questions (saved before this, as `also`), the SAPS case number or station, a file. Then:
+ * - something new to ask (a correction opened a question), or nothing left (evidence complete): on as after any answer;
+ * - something came in and the host can wait (waitForMore): a file is thanked now, and the list goes out again after the
+ *   quiet spell, because a client often sends several photos in a row;
+ * - otherwise the list again, after "Thanks." when something came in. "Not yet" lists nothing.
+ */
+function advanceStillNeed(
+  c: Ctx, w: Work, st: FollowOnState, input: ClientReply, out: Out[],
+  side: { corrected: number; flagged: number; ownReading: boolean; noted: number },
+): FollowOnState | null {
+  let got = side.noted > 0 || side.corrected > 0;
+  let filed = false;
+  if (side.corrected) out.push({ kind: 'text', text: side.ownReading ? NOTED_OTHERS : CORRECTED });
+  const caseNumber = input.kind === 'saps' ? input.caseNumber?.trim() || undefined : undefined;
+  const station = input.kind === 'saps' ? input.station?.trim() || undefined : undefined;
+  if (caseNumber || station) {
+    out.push({ kind: 'save-saps', caseNumber, station });
+    w.facts = { ...w.facts, sapsCaseNumber: caseNumber ?? w.facts.sapsCaseNumber, sapsStation: station ?? w.facts.sapsStation };
+    got = true;
+  } else if (input.kind === 'file') {
+    // As the evidence item Claude read it as, else the only one missing, else against the claim for the pipeline to sort.
+    const open = formItems(c.form, w.answers, w.facts, st.sapsRequired)
+      .filter((i) => i.kind === 'evidence' && applies(i, w.answers, w.facts) && !w.evidence.some((e) => e.key === i.key));
+    const item = open.find((i) => i.key === input.forItem) ?? (open.length === 1 ? open[0] : undefined);
+    out.push({ kind: 'file', file: input.file, itemKey: item?.key });
+    if (item) {
+      out.push({ kind: 'received', item });
+      w.evidence.push({ key: item.key });
+    } else out.push({ kind: 'text', text: FILE_SAVED });
+    got = filed = true;
+  } else if (input.kind === 'not-yet' && !got) {
+    out.push({ kind: 'text', text: WHEN_YOU_HAVE_THEM });
+    return { ...st, waiting: undefined };
+  }
+  // A new value that doesn't look right was pointed out (formats.ts): Tina waits for it again.
+  if (!got && side.flagged) return { ...st, waiting: undefined };
+
+  const thanks = got && !filed ? 'Thanks.' : undefined;
+  const next = nextItem(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip: [...st.skipped, SAPS_CASE_KEY, SAPS_STATION_KEY] });
+  const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
+  if (next || !missing.length) return proceed(c, w, { ...st, waiting: undefined }, out, thanks, thanks ?? '');
+  if (got && c.waitForMore) return { ...st, waiting: input.wamid };
+  out.push({ kind: 'still-missing', items: missing, lead: thanks ?? '' });
+  return stillNeedState(c, st, missing);
+}
+
+/** The host's nudge after a quiet spell on the list: what's still needed, listed again (or the end, if nothing is). */
+function stillNeedNudged(c: Ctx, st: FollowOnState): Step {
+  const w = work(c.claim);
+  const out: Out[] = [];
+  return { state: proceed(c, w, { ...st, waiting: undefined }, out, undefined, 'Thanks.'), out };
 }
 
 // ------------------------------------------------------------------------------------------------------- the texts
@@ -1138,7 +1252,7 @@ export function askText(item: QuestionItem, simpler: boolean, again = false): st
   // TTTFG-5184: asked again only because the client said "not yet" last time; never the same words twice.
   if (again && !simpler) {
     if (item.key === SAPS_CASE_KEY) return 'Do you have the SAPS case number yet? If so, please send it with the name of the police station you reported it at.';
-    if (item.kind === 'evidence') return `Have you got ${itemName(item)} yet? If so, please send it here.`;
+    if (item.kind === 'evidence' || chased(item)) return `Have you got ${itemName(item)} yet? If so, please send it here.`;
   }
   const prompt = item.kind === 'evidence'
     ? `${evidenceRequest(item)}${item.required || /if you have/i.test(item.prompt) ? '' : " If you don't have this, just say so."}`
@@ -1204,8 +1318,39 @@ export const list = (names: string[]) => {
   return n.length < 2 ? n.join('') : `${n.slice(0, -1).join(', ')} and ${n.at(-1)}`;
 };
 
-export function stillMissingText(items: QuestionItem[]): string {
-  return `Thanks, that's all for now. When you have them, please send me ${list(items.map(itemName))} here.`;
+/** TTTFG-4830 (still need): the heading of the list, in the client's words. */
+export const STILL_NEED_HEADING = 'Things we still need from you:';
+
+/** "the vehicle registration number" as a line of a list: "Vehicle registration number". */
+export const lineName = (item: QuestionItem) => {
+  const name = itemName(item).replace(/^the\s+/i, '');
+  return name.charAt(0).toUpperCase() + name.slice(1);
+};
+
+/**
+ * TTTFG-4830 (still need): the lines of "Things we still need from you", one per item the client can get (chased), in
+ * the question list's order. On a claim the client left half way (TTTFG-5212's reminder), the questions Tina hasn't
+ * asked yet are counted in one line instead, after the questions: she asks those one by one when the client is back.
+ * The SAPS items, the documents and anything the client said "not yet" to are named there too.
+ */
+export function stillNeedLines(items: readonly QuestionItem[], answers: ClaimAnswers = {}): string[] {
+  const halfWay = items.some((i) => !chased(i));
+  const named = (i: QuestionItem) => chased(i) && (!halfWay || i.kind === 'evidence' || isSaps(i.key) || deferred(i.key, answers));
+  const questions = [...new Set(items.filter((i) => i.kind === 'question' && named(i)).map(lineName))];
+  const others = items.filter((i) => !named(i)).length;
+  const counted = others ? [others === 1 ? 'The answer to 1 more question' : `The answers to ${others} more questions`] : [];
+  const evidence = [...new Set(items.filter((i) => i.kind === 'evidence' && named(i)).map(lineName))];
+  return [...questions, ...counted, ...evidence];
+}
+
+/**
+ * TTTFG-4830 (still need): "Thanks, that's all for now. Things we still need from you:", the items as a bulleted list
+ * (WhatsApp shows "- " lines as bullets), then how to send them. `lead` replaces "Thanks, that's all for now." ('' for none).
+ */
+export function stillMissingText(items: readonly QuestionItem[], lead: string = ALL_FOR_NOW): string {
+  const lines = stillNeedLines(items);
+  const them = itOrThem(lines);
+  return [[lead, STILL_NEED_HEADING].filter(Boolean).join(' '), ...lines.map((l) => `- ${l}`), `Please send ${them} here when you have ${them}.`].join('\n');
 }
 
 // ----------------------------------------------------------------------------------------------------- the turn
@@ -1290,7 +1435,7 @@ export async function followOnTurn(
         await say(closingText(signature, claim.owner));
         break;
       case 'still-missing':
-        await say(stillMissingText(o.items));
+        await say(stillMissingText(o.items, o.lead));
         break;
       case 'save-answer':
       case 'drop-answer':

@@ -23,7 +23,7 @@ import { handleClientRelayResponse, RELAY_BUTTON_PAYLOAD } from '../controllers/
 import { knowledgeBaseService, KbChunkHit } from '../services/knowledgeBase.service';
 import { graphMailService } from '../services/graphMail.service';
 import { messageContextStorage } from '../utils/messageContext';
-import { CLAIMS_BATCH_CHECK, WhatsAppJobPayload } from '../queue/whatsappQueue';
+import { CLAIMS_BATCH_CHECK, CLAIMS_REMINDER, WhatsAppJobPayload } from '../queue/whatsappQueue';
 import { enqueueFeedbackPrompt } from '../queue/feedbackPromptQueue';
 import { enqueueCaseAutoClose } from '../queue/caseAutoCloseQueue';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
@@ -41,7 +41,7 @@ import {
     AUTO_REPLY_CLARIFICATION,
 } from '../utils/autoReply';
 import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
-import { claimsDemoContact, handleClaimsDemoBatchCheck, handleClaimsDemoMessage } from '../services/claimsDemo.service';
+import { claimsDemoContact, handleClaimsDemoBatchCheck, handleClaimsDemoMessage, handleClaimsDemoReminder } from '../services/claimsDemo.service';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
@@ -1721,6 +1721,11 @@ export async function processInboundJob(payload: WhatsAppJobPayload): Promise<vo
     if (payload.rawMessage?.type === CLAIMS_BATCH_CHECK) {
         await messageContextStorage.run({ phoneNumberId: payload.phoneNumberId || '' }, () =>
             handleClaimsDemoBatchCheck(payload.phone, String(payload.rawMessage.token ?? '')));
+        return;
+    }
+    // TTTFG-5212 claims demo: the 08:00 reminder of what the client still has to send, not a client message.
+    if (payload.rawMessage?.type === CLAIMS_REMINDER) {
+        await messageContextStorage.run({ phoneNumberId: payload.phoneNumberId || '' }, () => handleClaimsDemoReminder(payload.phone));
         return;
     }
     const incoming = extractIncoming(payload.rawMessage);
