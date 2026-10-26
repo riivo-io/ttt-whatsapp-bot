@@ -111,14 +111,16 @@ export const CLAIMS_REMINDER = 'claims_reminder';
  * TTTFG-5212 (claims demo): the morning reminder for one demo number, queued by the 08:00 cron on the number's own
  * session, so it runs after anything the client is sending. The message id names the day: with duplicate detection on
  * the queue a second run the same day is dropped (the claims package also skips a claim already reminded today).
+ * `test`: one number's reminder sent by hand to see it (claimsDemo.service enqueueClaimsDemoReminders).
  */
-export async function enqueueClaimsReminder(phone: string, day: string): Promise<void> {
+export async function enqueueClaimsReminder(phone: string, day: string, test = false): Promise<void> {
     const payload: WhatsAppJobPayload = {
-        metaMessageId: `claims-reminder:${phone}:${day}`,
+        // A test (one number, by hand) gets its own id, so it never stands in for the day's reminder.
+        metaMessageId: test ? `claims-reminder-test:${phone}:${Date.now()}` : `claims-reminder:${phone}:${day}`,
         phone,
         phoneNumberId: null,
         receivedAt: Date.now(),
-        rawMessage: { type: CLAIMS_REMINDER },
+        rawMessage: { type: CLAIMS_REMINDER, ...(test ? { test: true } : {}) },
     };
     await getSender().sendMessages({ body: payload, sessionId: phone, messageId: payload.metaMessageId });
 }

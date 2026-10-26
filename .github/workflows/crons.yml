@@ -33,6 +33,11 @@ on:
           - cleanup-webhook-events
           - loe-activation-sweep
           - claims-reminders
+      phone:
+        description: 'claims-reminders only: send to this one demo number now, as a test (e.g. 27723203629)'
+        required: false
+        default: ''
+        type: string
 
 env:
   BOT_BASE_URL: https://ttt-prod-bot-fpbwezdygqbdh8a7.southafricanorth-01.azurewebsites.net
@@ -98,7 +103,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: GET /api/cron/claims-reminders
+        env:
+          PHONE: ${{ inputs.phone }}
         run: |
           curl -fsS --max-time 300 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "$BOT_BASE_URL/api/cron/claims-reminders"
+            "$BOT_BASE_URL/api/cron/claims-reminders${PHONE:+?phone=$PHONE}"
