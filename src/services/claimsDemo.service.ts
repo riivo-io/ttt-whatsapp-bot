@@ -227,24 +227,29 @@ export async function handleClaimsDemoBatchCheck(phone: string, token: string): 
 /**
  * TTTFG-5212 (first cut): the 08:00 cron queues one reminder per demo number on its own session (the worker runs
  * handleClaimsDemoReminder). Returns how many were queued; none when CLAIMS_REMINDERS is "off".
+ * `testPhone`: a test by hand: only that demo number (any SA format), now, even if the client wrote in the last 12 hours.
  */
-export async function enqueueClaimsDemoReminders(now: Date = new Date()): Promise<number> {
+export async function enqueueClaimsDemoReminders(now: Date = new Date(), testPhone?: string): Promise<number> {
     if ((process.env.CLAIMS_REMINDERS || '').trim().toLowerCase() === 'off') return 0;
     const day = new Date(now.getTime() + 2 * 3_600_000).toISOString().slice(0, 10);
-    const phones = demoPhones(process.env.CLAIMS_DEMO_NUMBERS);
-    for (const { phone } of phones) await enqueueClaimsReminder(phone, day);
+    const local = testPhone?.replace(/\D/g, '').slice(-9);
+    const phones = demoPhones(process.env.CLAIMS_DEMO_NUMBERS).filter((p) => !testPhone || p.phone.endsWith(local ?? '-'));
+    for (const { phone } of phones) await enqueueClaimsReminder(phone, day, !!testPhone);
     return phones.length;
 }
 
 /** TTTFG-5212: one demo number's morning reminder (whatsappProcessor routes it here). Never throws. */
-export async function handleClaimsDemoReminder(phone: string): Promise<void> {
+export async function handleClaimsDemoReminder(phone: string, o: { test?: boolean } = {}): Promise<void> {
     const contactId = claimsDemoContact(phone);
     if (!contactId) return;
     const stats = newCrmStats();
     try {
-        const r = await claimsDemoReminder(deps(phone, contactId, stats), phone, contactId, new Date(), { template: !!process.env.CLAIMS_REMINDER_TEMPLATE });
+        // A test by hand goes out even if the client wrote in the last 12 hours (still once per claim per day).
+        const r = await claimsDemoReminder(deps(phone, contactId, stats), phone, contactId, new Date(), {
+            template: !!process.env.CLAIMS_REMINDER_TEMPLATE, ...(o.test ? { quietHours: 0 } : {}),
+        });
         const said = r === 'walkthrough' ? 'reporting a claim, no reminder' : r.map((o) => `${o.reference} ${'sent' in o ? `sent (${o.sent})` : o.skipped}`).join(', ') || 'no open claims';
-        console.log(`[ClaimsDemo] ${phone}: morning reminder: ${said}; CRM ${stats.reads} reads, ${stats.writes} writes`);
+        console.log(`[ClaimsDemo] ${phone}: ${o.test ? 'test' : 'morning'} reminder: ${said}; CRM ${stats.reads} reads, ${stats.writes} writes`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} morning reminder failed:`, (e as Error).message, (e as Error).stack);
     }
