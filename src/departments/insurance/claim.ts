@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit a9611ed). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 954c78b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -209,6 +209,118 @@ const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
   other: {},
 };
 
+/**
+ * TTTFG-4830: what to gather while the client is still at the scene, by kind of claim, sent once right after "is anyone
+ * hurt or in danger" (walkthrough.ts onScene), so they have it all before the questions start. `when` opens the
+ * message ("If you're still on the scene"); `towLine`: a car that may need a tow, so the insurer's assist line is
+ * given for it (when it's on file).
+ * DRAFT WORDING (decision D11): the Insurance and Advice department approves it before go-live.
+ */
+export const ON_SCENE: Record<ClaimKind, { when: string; lead: string; items: string[]; towLine?: true }> = {
+  motor: {
+    when: "If you're still on the scene", lead: 'make sure to grab the following where applicable:', towLine: true,
+    items: [
+      "The other car's registration number (number plate)",
+      "The other driver's name and phone number, and a photo of their driver's licence",
+      'Photos of both cars and the damage, and of the scene (the road, and any signs or robots)',
+      "The other driver's insurer, if they know it",
+      'The names and phone numbers of anyone who saw it',
+      "If the police come: the officer's name and the accident report (AR) number",
+    ],
+  },
+  windscreen: {
+    when: "If you're still on the scene", lead: 'make sure to grab the following where applicable:',
+    items: [
+      'Photos of the damaged glass, close up and from further away',
+      'If a truck or another vehicle threw something up: its registration number, or the company name on it',
+      'Where it happened: the road, and the nearest exit or landmark',
+    ],
+  },
+  'motor-theft': {
+    when: "While it's fresh", lead: 'these help the most where applicable:',
+    items: [
+      'Call your tracking company right away, if the car has one',
+      'Report it to the police (SAPS) and get the case number',
+      'Photos of where the car was parked, and of any broken glass',
+      "Ask security at the building or centre for the CCTV footage, and note the guard's name",
+      'Your parking ticket, if you have one',
+      'The names and phone numbers of anyone who saw anything',
+    ],
+  },
+  hijacking: {
+    when: "Once you're safe", lead: 'these help the most where applicable:',
+    items: [
+      'Report it to the police (SAPS) on 10111 and get the case number',
+      'Call your tracking company right away, if the car has one',
+      'Write down what you remember about them and their vehicle: how many there were, what they looked like, and the make, colour and registration',
+      'Which way they went',
+      'The names and phone numbers of anyone who saw it',
+    ],
+  },
+  home: {
+    when: "If you're at the property now", lead: 'make sure to do the following where applicable:',
+    items: [
+      "Stop more damage if it's safe to, for example turn off the water at the mains or switch off the geyser",
+      'Take photos of the damage before you clean up or fix anything',
+      'Keep the damaged items: the assessor may want to see them',
+      'The name and number of the plumber, electrician or contractor, and their report or quote',
+    ],
+  },
+  'home-theft': {
+    when: "If you're at the property now", lead: 'these help the most where applicable:',
+    items: [
+      "Don't touch or clean up anything until the police have been",
+      'Report it to the police (SAPS) and get the case number',
+      'Photos of how they got in (a broken window, door or lock) and of the rooms',
+      "A list of what's missing",
+      'Your alarm or armed response company\'s report, and any CCTV footage',
+      'The names and phone numbers of neighbours or anyone who saw anything',
+    ],
+  },
+  'lost-item': {
+    when: "While it's fresh", lead: 'these help the most where applicable:',
+    items: [
+      "Ask where you lost it (lost and found, security or the venue), and note the name of the person you spoke to",
+      "For a phone: ask your network to block the SIM, and note the phone's IMEI number (it's on the box)",
+      'Report the loss to the police (SAPS) and get the reference number',
+      "Proof that it's yours: the receipt, the box, or a photo of you with it",
+    ],
+  },
+  'stolen-item': {
+    when: "If you're still where it happened", lead: 'these help the most where applicable:',
+    items: [
+      'Report it to the police (SAPS) and get the case number',
+      "Ask security at the shop or centre for the CCTV footage, and note the guard's name",
+      "For a phone: ask your network to block the SIM and blacklist the phone (they'll need its IMEI number, it's on the box)",
+      'The names and phone numbers of anyone who saw it',
+    ],
+  },
+  other: {
+    when: "If you're still on the scene", lead: 'make sure to grab the following where applicable:',
+    items: [
+      'Photos of the damage and of where it happened',
+      'The names and phone numbers of anyone involved or who saw it',
+      'Keep anything damaged: the assessor may want to see it',
+    ],
+  },
+};
+export const ON_SCENE_PHOTOS = 'You can send me photos here at any time.';
+
+/**
+ * TTTFG-4830: the on-scene checklist for this claim. `safeFirst`: someone is hurt or in danger, so it starts "Once
+ * everyone is safe". A car that may need a tow gets the insurer's assist line for it, when it's on file.
+ */
+export function onSceneText(state: WalkthroughState, safeFirst = false): string {
+  const c = ON_SCENE[claimKind(state.facts, state.opening)];
+  const when = !safeFirst ? c.when : /^(Once|While)\b/.test(c.when) ? 'Once everyone is safe' : `Once everyone is safe, ${lowerFirst(c.when)}`;
+  const policy = state.policies.find((p) => p.id === state.policyId);
+  const number = policy?.assistNumber?.trim();
+  const tow = c.towLine && number
+    ? `If the car needs a tow, call ${policy!.insurer} on ${number}, and don't let a tow truck you didn't call take it.`
+    : undefined;
+  return [`${when}, ${c.lead}`, ...c.items.map((item, i) => `${i + 1}. ${item}`), ...(tow ? [tow] : []), ON_SCENE_PHOTOS].join('\n');
+}
+
 const EXAMPLE_TIME = 'Your best estimate is fine, for example "about 11pm" or "around 6 in the morning".';
 
 const lowerFirst = (t: string) => t.charAt(0).toLowerCase() + t.slice(1);
@@ -418,6 +530,8 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
       return `Please call ${say.insurer}'s emergency assist line now: ${say.number}. Come back to me once everyone is safe.`;
     case 'emergency':
       return 'Please call 112 for emergency help now. Come back to me once everyone is safe.';
+    case 'on-scene':
+      return onSceneText(state!, say.safeFirst);
     case 'passed-on': {
       const why = say.reason === 'no-active-policy' ? "I can't see an active policy for you on our system" : "I can only open a claim on a policy we have on file";
       const by = passedOn?.dueOn ? ` by ${new Date(passedOn.dueOn).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', weekday: 'long', day: 'numeric', month: 'long' })}` : '';

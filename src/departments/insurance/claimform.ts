@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit a9611ed). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 954c78b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5172: claim form configs and their validator (TTTFG-5251 steps 5 and 9).
 //

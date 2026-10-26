@@ -153,6 +153,10 @@ test('the whole claim: walkthrough, the form after the last question, then the p
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
     assert.equal(w.rows.length, 1);
+    // TTTFG-4830: what to gather at the scene went out once, after "is anyone hurt", before what happened.
+    const onScene = w.sent.filter((t) => t.startsWith("If you're still on the scene, make sure to grab the following where applicable:\n1. The other car's registration number"));
+    assert.equal(onScene.length, 1);
+    assert.ok(w.sent.indexOf(onScene[0]) > w.sent.findIndex((t) => /hurt or in danger/.test(t)));
     const opened = w.since().join('\n');
     assert.match(opened, /CLM-000001/); // the acknowledgement
     assert.match(opened, /Who was driving the vehicle\?/); // the follow-on's first question, straight after
