@@ -1725,7 +1725,7 @@ export async function processInboundJob(payload: WhatsAppJobPayload): Promise<vo
     }
     // TTTFG-5212 claims demo: the 08:00 reminder of what the client still has to send, not a client message.
     if (payload.rawMessage?.type === CLAIMS_REMINDER) {
-        await messageContextStorage.run({ phoneNumberId: payload.phoneNumberId || '' }, () => handleClaimsDemoReminder(payload.phone));
+        await messageContextStorage.run({ phoneNumberId: payload.phoneNumberId || '' }, () => handleClaimsDemoReminder(payload.phone, { test: payload.rawMessage.test === true }));
         return;
     }
     const incoming = extractIncoming(payload.rawMessage);

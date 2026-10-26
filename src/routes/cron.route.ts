@@ -59,6 +59,7 @@ router.get('/case-timeout', async (req: Request, res: Response) => {
 /**
  * TTTFG-5212 (claims demo, first cut): 08:00 South African time. Queues each demo number's morning reminder of what
  * it still has to send on its claims; the worker sends them, on each number's own session. CLAIMS_REMINDERS=off: none.
+ * `?phone=27…`: a test by hand: only that demo number, now, even if it wrote in the last 12 hours.
  */
 router.get('/claims-reminders', async (req: Request, res: Response) => {
     if (!isAuthorized(req)) {
@@ -66,7 +67,8 @@ router.get('/claims-reminders', async (req: Request, res: Response) => {
         return;
     }
     try {
-        res.json({ ok: true, queued: await enqueueClaimsDemoReminders() });
+        const phone = typeof req.query.phone === 'string' && req.query.phone.trim() ? req.query.phone : undefined;
+        res.json({ ok: true, queued: await enqueueClaimsDemoReminders(new Date(), phone), ...(phone ? { test: true } : {}) });
     } catch (e: any) {
         console.error('[Cron] claims-reminders failed:', e?.message || e);
         res.status(500).json({ ok: false, error: e?.message || 'unknown' });
