@@ -15,12 +15,17 @@
  *   npx tsx src/scripts/claims-demo-chat.ts --phone 27723203629 --contact <id> "message"            one message
  *   npx tsx src/scripts/claims-demo-chat.ts --phone 27723203629 --contact <id> --script file.txt     one message per line
  * --contact defaults to the number's entry in CLAIMS_DEMO_NUMBERS.
+ * --sign 4319: TTTFG-5196's signing page on http://localhost:4319 (requests in memory): the form's "ready to sign" link
+ *   prints here; open it in a browser and sign, and the callback files the signed copy and sets the DEV claim to Signed.
+ *   When a message or a script sends the link, the rehearsal waits for that signature (--wait <seconds>, default 900).
  *
  * Sign-in: `az login` to TTT's tenant (Dataverse and Graph tokens). Claude: ANTHROPIC_API_KEY, else the DEV email
  * agent's Key Vault secret. DEV only: it refuses any other Dataverse.
  */
 import Anthropic from '@anthropic-ai/sdk';
 import { execFileSync } from 'child_process';
+import crypto from 'crypto';
+import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
@@ -31,8 +36,12 @@ import {
 } from '../domain/claimsDemoHost';
 import { transcribeVoiceNote } from '../services/transcribe.service';
 import {
-    cachedDv, dataverseCall, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type Graph,
+    cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
 } from '../services/claimsDemoWiring';
+import { signingRouter } from '../routes/signing.route';
+import { callerCallbackKey, createSigningRequest, SIGNATURE_HEADER, type SigningDeps } from '../signing/signing';
+import { memorySigningStore } from '../signing/store';
+import { verifyHmacSha256 } from '../utils/hmac';
 
 const DEV = 'https://tttdevelopment.crm4.dynamics.com';
 const TENANT = process.env.DYNAMICS_TENANT_ID || '';
@@ -50,7 +59,9 @@ if (!phone || !contactId) {
     process.exit(2);
 }
 const scriptFile = flag('--script');
-const oneMessage = args.filter((a, i) => !a.startsWith('--') && !['--phone', '--contact', '--script'].includes(args[i - 1] ?? ''))[0];
+const signPort = flag('--sign');
+const waitSeconds = Number(flag('--wait') ?? 900);
+const oneMessage = args.filter((a, i) => !a.startsWith('--') && !['--phone', '--contact', '--script', '--sign', '--wait'].includes(args[i - 1] ?? ''))[0];
 
 // --- az login tokens ----------------------------------------------------------------------------------------------------
 const tokens = new Map<string, { value: string; until: number }>();
@@ -119,6 +130,40 @@ const show = (who: string, text: string) => console.log(`\n${who}:\n${text.split
 const storeFile = path.join(STORE, `${phone}.json`);
 
 let dv: Dv = rawDv;
+
+// --- TTTFG-5196: the signing page on localhost ----------------------------------------------------------------------------
+let signedCount = 0;
+let linksSent = 0;
+function localSigning(port: number): DemoSigning {
+    const deps: SigningDeps = { store: memorySigningStore(), publicUrl: `http://localhost:${port}`, callbackSecret: crypto.randomBytes(16).toString('hex') };
+    const app = express();
+    app.use('/sign', signingRouter(() => deps));
+    app.post('/webhook/claim-signed', express.raw({ type: 'application/json', limit: '40mb' }), async (req, res) => {
+        if (!verifyHmacSha256(req.body, req.header(SIGNATURE_HEADER), callerCallbackKey(deps.callbackSecret, 'claim'))) return void res.status(401).end();
+        const b = JSON.parse(req.body.toString('utf8'));
+        try {
+            dv = cachedDv(rawDv, newCrmStats());
+            const signedPdf = Buffer.from(b.signedPdf, 'base64');
+            fs.mkdirSync(OUT, { recursive: true });
+            const local = path.join(OUT, `signed-${b.requestId}.pdf`);
+            fs.writeFileSync(local, signedPdf);
+            const outcome = await demoClaimSigned(channels, { requestId: b.requestId, caller: b.caller, callerRecordId: b.callerRecordId, signedPdf: new Uint8Array(signedPdf), audit: b.audit });
+            show('Signing page', `The client signed (${b.audit.ip ?? 'no IP'}): ${JSON.stringify(outcome)}\n📎 ${local}`);
+            signedCount++;
+            res.json({ ok: true, outcome });
+        } catch (e) {
+            console.error(`  ERROR in the callback: ${(e as Error).stack}`);
+            res.status(500).end();
+        }
+    });
+    app.listen(port, () => console.log(`  [signing page on http://localhost:${port}]`));
+    return {
+        create: (input) => { linksSent++; return createSigningRequest(deps, { ...input, callbackUrl: `http://localhost:${port}/webhook/claim-signed` }); },
+        signedOff: true,
+    };
+}
+const signing = signPort ? localSigning(Number(signPort)) : undefined;
+
 const channels: DemoChannels = {
     get dv() { return dv; }, graph, site: SITE,
     sendText: async (_to, text) => show('Tina', text),
@@ -132,6 +177,7 @@ const channels: DemoChannels = {
     mediaBytes: async (mediaId) => fs.readFileSync(mediaId),
     blankFormFallback: localBlankForm,
     note: (text) => console.log(`  [${text}]`),
+    ...(signing ? { signing } : {}),
 };
 
 const deps: ClaimsDemoDeps = {
@@ -187,11 +233,21 @@ async function say(line: string) {
     console.log(`  (${outcome}; CRM ${stats.reads} reads, ${stats.cached} from cache, ${stats.writes} writes)`);
 }
 
+/** With --sign, after a message or a script that sent a signing link: wait for the client to sign on the page. */
+async function waitForSignature() {
+    if (!signPort || !linksSent) process.exit(0);
+    console.log(`\n  Waiting up to ${waitSeconds}s for the form to be signed on the page...`);
+    const until = Date.now() + waitSeconds * 1000;
+    while (signedCount === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 1000));
+    console.log(signedCount ? '  Signed.' : '  Not signed in time.');
+    process.exit(0);
+}
+
 async function main() {
-    if (oneMessage) return say(oneMessage);
+    if (oneMessage) { await say(oneMessage); return waitForSignature(); }
     if (scriptFile) {
         for (const line of fs.readFileSync(scriptFile, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('//'))) await say(line);
-        return;
+        return waitForSignature();
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     console.log(`Chatting as ${phone} (DEV contact ${contactId}) with the claims demo. "/file <path> [caption]" sends a file; "/voice <path>" a voice note; "exit" stops.`);
@@ -203,6 +259,7 @@ async function main() {
         process.stdout.write('\nYou: ');
     }
     rl.close();
+    process.exit(0);
 }
 
 main().catch((e) => { console.error(`ERROR: ${(e as Error).stack}`); process.exit(1); });

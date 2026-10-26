@@ -8,6 +8,8 @@ import emailRoute from './routes/email.route';
 import loeSignedRoute from './routes/loeSigned.route';
 import outboundNotifyRoute from './routes/outboundNotify.route';
 import adminRoute from './routes/admin.route';
+import signingRoute from './routes/signing.route';
+import claimSignedRoute from './routes/claimSigned.route';
 console.log('[boot] server.ts: all imports resolved');
 
 dotenv.config();
@@ -23,6 +25,9 @@ app.use(cors());
 // consumed before the route's own raw-body middleware sees it.
 app.use('/webhook/loe-signed', loeSignedRoute);
 app.use('/webhook/outbound-notify', outboundNotifyRoute);
+// TTTFG-5196: the signing page (its own body limits) and its claims callback (raw body, HMAC).
+app.use('/sign', signingRoute);
+app.use('/webhook/claim-signed', claimSignedRoute);
 
 app.use(express.json());
 

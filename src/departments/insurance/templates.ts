@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 1254c4f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit da163a4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -92,4 +92,33 @@ export const REMINDER_TEMPLATE = {
   ].join('\n'),
   /** For Meta: {{1}} first name, {{2}} the claim, {{3}} the list in one line ("the SAPS case number and the quotes"). */
   whatsappBody: "Good morning {{1}}, it's Tina from TTT. For your {{2}} we still need {{3}}. Please send them here when you have them.",
+} as const;
+
+export interface SignFormVars {
+  firstName: string;
+  insurer: string;
+  /** The claim reference, CLM-…. */
+  reference: string;
+  link: string;
+  /** The last day the link works, as a calendar date in South Africa, YYYY-MM-DD. */
+  expiresOn: string;
+}
+
+/**
+ * TTTFG-5196: the one message at Form sent, with the signing link (TTTFG-5208 sends nothing more on Form sent). It goes
+ * on the claim's own channel only. Inside WhatsApp's 24-hour window (always, in practice: the client has just answered
+ * the last question) it goes as this text; outside it, as the approved WhatsApp template whose body is
+ * `whatsappBody`. Email uses `emailSubject` and the same text (TTTFG-4973's templated send path).
+ */
+export const SIGN_FORM_TEMPLATE = {
+  name: 'Claim - form ready to sign',
+  version: 'draft-1',
+  approved: false,
+  render: (v: SignFormVars) =>
+    `${v.firstName}, your claim form for ${v.insurer} (${v.reference}) is ready. Please read it through and sign it here: ${v.link}\n` +
+    `The link is just for you and works until ${longDate(v.expiresOn)}.`,
+  /** For Meta: {{1}} first name, {{2}} insurer, {{3}} claim reference, {{4}} the link, {{5}} the last day it works. */
+  whatsappBody: '{{1}}, your claim form for {{2}} ({{3}}) is ready. Please read it through and sign it here: {{4}} The link is just for you and works until {{5}}.',
+  params: (v: SignFormVars) => [v.firstName, v.insurer, v.reference, v.link, longDate(v.expiresOn)],
+  emailSubject: (v: SignFormVars) => `Your claim form is ready to sign (${v.reference})`,
 } as const;

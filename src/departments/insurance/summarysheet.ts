@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit 1254c4f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit da163a4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the one-page claim summary sheet, for a policy whose insurer has no mapped form (the generic
 // riivo_claimform row). The client signs it like a form, and the broker still fills that insurer's own form by hand
@@ -14,12 +14,14 @@
 // list names them the same way.
 //
 // Above the signature line: DECLARATION, a draft (draft-1) for Insurance and Advice to approve with the other templates.
+// TTTFG-5196: the sheet says where its signature and date lines are (`stamps`), for the signing page.
 //
 // One A4 page: the text shrinks (down to MIN_SIZE) until everything fits. It is never cut off; in the unlikely case
 // that it still doesn't fit (a description of several thousand words), it carries on to a second page.
 import { PDFDocument, StandardFonts, type PDFFont } from 'pdf-lib';
 import type { ClaimAnswers, ClaimForm, FieldMapEntry } from './contracts';
 import { addBlank, drawable, formatText, MIN_SIZE, resolveSource, wrap, type BlankField, type CrmValues } from './fill';
+import type { SignStamp } from './signing';
 
 export const A4 = { width: 595.28, height: 841.89 } as const;
 const MARGIN = 48;
@@ -61,7 +63,7 @@ export const BLANK_NOTE = 'A blank answer means we do not have it yet, or your b
 export const SIGN_LINES = ['Client signature', 'Date'];
 
 export interface SummaryRow { section: string; label: string; value: string }
-export interface SummaryResult { bytes: Uint8Array; blankFields: BlankField[]; rows: SummaryRow[]; pages: number }
+export interface SummaryResult { bytes: Uint8Array; blankFields: BlankField[]; rows: SummaryRow[]; pages: number; stamps: SignStamp[] }
 
 /** The rows of the sheet with their values ('' for a blank), and the blank-fields list. */
 export function summaryRows(form: ClaimForm, answers: ClaimAnswers, crm: CrmValues): { rows: SummaryRow[]; blankFields: BlankField[] } {
@@ -101,6 +103,7 @@ export async function summarySheet(form: ClaimForm, answers: ClaimAnswers, crm: 
 
   let page = doc.addPage([A4.width, A4.height]);
   let y = A4.height - MARGIN;
+  const stamps: SignStamp[] = [];
   for (const b of blocks) {
     const s = size * b.scale;
     y -= size * b.lead;
@@ -112,9 +115,18 @@ export async function summarySheet(form: ClaimForm, answers: ClaimAnswers, crm: 
       y -= lineHeight(s);
       if (line.label) page.drawText(line.label, { x: MARGIN, y, size: s, font: bold });
       if (line.text) page.drawText(line.text, { x: b.row ? MARGIN + LABEL_WIDTH : MARGIN, y, size: s, font: b.font });
+      // The signature goes on the line after "Client signature:", the date after "Date:".
+      const sign = SIGN_LINES.find((l) => line.text?.startsWith(`${l}: _`));
+      if (sign) {
+        const x = MARGIN + b.font.widthOfTextAtSize(`${sign}: `, s);
+        const right = MARGIN + b.font.widthOfTextAtSize(line.text!, s);
+        stamps.push(sign === SIGN_LINES[0]
+          ? { kind: 'signature', page: doc.getPageCount(), x, y: y - 2, width: right - x, height: s * 2.2 }
+          : { kind: 'date', page: doc.getPageCount(), x: x + 2, y: y + 1.5, size: s });
+      }
     }
   }
-  return { bytes: await doc.save(), blankFields, rows, pages: doc.getPageCount() };
+  return { bytes: await doc.save(), blankFields, rows, pages: doc.getPageCount(), stamps };
 }
 
 // ---------------------------------------------------------------- layout

@@ -21,7 +21,10 @@
  *   CLAIMS_VOICE_NOTES             TTTFG-4830: "off" stops voice notes being transcribed (Tina asks the client to type).
  *                                  On by default; needs OPENAI_API_KEY. CLAIMS_TRANSCRIBE_MODEL, CLAIMS_TRANSCRIBE_LANGUAGE
  *                                  and CLAIMS_VOICE_MAX_SECONDS: see transcribe.service.ts
- * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql).
+ *   CLAIMS_SIGN_TEMPLATE_SIGNED_OFF  TTTFG-5196: "yes" lets the "ready to sign" message go out (draft-1 wording until
+ *                                  Insurance and Advice signs it off). Otherwise the claim owner gets a Follow-up and
+ *                                  the client no link. Needs the signing page set up (src/signing/env.ts: SIGNING_PUBLIC_URL)
+ * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql); signing_requests (20261027120000).
  * TTTFG-4830: every message in and out also goes where Tina keeps her own: Supabase's message log (sessions and
  * messages) and the demo CRM's timeline (riivo_whatsappcommunications), under the claim, else the request, else the
  * contact; a voice note with its transcript and the recording attached (writeDemoLog).
@@ -40,9 +43,12 @@ import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
 import {
-    cachedDv, dataverseCall, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
-    type CrmStats, type DemoChannels, type DemoLog, type Graph,
+    cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
+    type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
 } from './claimsDemoWiring';
+import type { SignedCallback } from '../departments/insurance/signing';
+import { signingFromEnv } from '../signing/env';
+import { createSigningRequest } from '../signing/signing';
 import { enqueueClaimsBatchCheck, enqueueClaimsReminder } from '../queue/whatsappQueue';
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
@@ -131,7 +137,24 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels => ({
     } : {}),
     mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
     note: (text) => console.log(`[ClaimsDemo] ${text}`),
+    signing: signing(),
 });
+
+/** TTTFG-5196: the signing page, when it's set up. Its callback comes back to /webhook/claim-signed (handleClaimSigned). */
+function signing(): DemoSigning | undefined {
+    const d = signingFromEnv();
+    if (!d) return undefined;
+    return {
+        create: (input) => createSigningRequest(d, { ...input, callbackUrl: `${d.publicUrl}/webhook/claim-signed` }),
+        signedOff: process.env.CLAIMS_SIGN_TEMPLATE_SIGNED_OFF === 'yes',
+    };
+}
+
+/**
+ * TTTFG-5196: the client signed a demo claim's form (routes/claimSigned.route.ts). The callback sends the client
+ * nothing, so its message log stays empty and isn't written.
+ */
+export const handleClaimSigned = (cb: SignedCallback) => demoClaimSigned(channels(newCrmStats(), newDemoLog()), cb);
 
 /** Every outside call gets a deadline, so one slow call can't hold the client's queue. */
 const DEADLINE_MS = 20_000;

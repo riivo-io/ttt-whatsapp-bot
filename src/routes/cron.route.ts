@@ -8,6 +8,8 @@ import { dynamicsService } from '../services/dynamics.service';
 import { supabaseService } from '../services/supabase.service';
 import { pendingIrp5Service } from '../services/pendingIrp5.service';
 import { enqueueClaimsDemoReminders } from '../services/claimsDemo.service';
+import { signingFromEnv } from '../signing/env';
+import { sweepSigning } from '../signing/signing';
 console.log('[boot] cron.route: imports done');
 
 // Subscriptions max out at ~70h. Renew anything within 24h of expiry.
@@ -71,6 +73,28 @@ router.get('/claims-reminders', async (req: Request, res: Response) => {
         res.json({ ok: true, queued: await enqueueClaimsDemoReminders(new Date(), phone), ...(phone ? { test: true } : {}) });
     } catch (e: any) {
         console.error('[Cron] claims-reminders failed:', e?.message || e);
+        res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+    }
+});
+
+/**
+ * TTTFG-5196: the signing page's sweep. Open signing links past their 7 days become expired, and a signed form whose
+ * callback wasn't taken (the caller was down) is sent again, up to 10 tries in all. Every 15 minutes.
+ */
+router.get('/signing-sweep', async (req: Request, res: Response) => {
+    if (!isAuthorized(req)) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    const d = signingFromEnv();
+    if (!d) {
+        res.json({ ok: true, skipped: 'signing not set up' });
+        return;
+    }
+    try {
+        res.json({ ok: true, ...(await sweepSigning(d)) });
+    } catch (e: any) {
+        console.error('[Cron] signing-sweep failed:', e?.message || e);
         res.status(500).json({ ok: false, error: e?.message || 'unknown' });
     }
 });

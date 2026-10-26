@@ -19,6 +19,7 @@ on:
     - cron: '0 3 * * *'    # cleanup-webhook-events   (daily 03:00 UTC)
     - cron: '0 * * * *'    # loe-activation-sweep     (hourly)
     - cron: '0 6 * * *'    # claims-reminders         (daily 06:00 UTC = 08:00 SAST)
+    - cron: '*/15 * * * *' # signing-sweep            (every 15 min, TTTFG-5196)
   workflow_dispatch:
     inputs:
       target:
@@ -33,6 +34,7 @@ on:
           - cleanup-webhook-events
           - loe-activation-sweep
           - claims-reminders
+          - signing-sweep
       phone:
         description: 'claims-reminders only: send to this one demo number now, as a test (e.g. 27723203629)'
         required: false
@@ -109,3 +111,17 @@ jobs:
           curl -fsS --max-time 300 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "$BOT_BASE_URL/api/cron/claims-reminders${PHONE:+?phone=$PHONE}"
+
+  # TTTFG-5196: expires old signing links and re-sends signed forms whose callback wasn't taken.
+  signing-sweep:
+    if: >-
+      github.event.schedule == '*/15 * * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+        (inputs.target == 'signing-sweep' || inputs.target == 'all'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /api/cron/signing-sweep
+        run: |
+          curl -fsS --max-time 300 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "$BOT_BASE_URL/api/cron/signing-sweep"
