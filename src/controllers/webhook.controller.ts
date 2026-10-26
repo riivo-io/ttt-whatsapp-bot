@@ -115,7 +115,7 @@ export async function handleIncomingMessage(req: Request, res: Response): Promis
                     }
 
                     console.log(
-                        `[Webhook] ${incoming.from} → [pid ${inboundPhoneNumberId || 'env'}] ${incoming.document ? `[doc ${incoming.document.filename}]` : ''} ${incoming.text}`
+                        `[Webhook] ${incoming.from} → [pid ${inboundPhoneNumberId || 'env'}] ${incoming.document ? `[doc ${incoming.document.filename}]` : ''}${incoming.audio ? '[voice note]' : ''} ${incoming.text}`
                     );
 
                     try {

@@ -7,8 +7,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
-    type ClaimsDemoDeps, type DemoConversation,
+    VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
 } from '../../src/domain/claimsDemoHost';
+import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
 import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
@@ -152,6 +153,10 @@ test('the whole claim: walkthrough, the form after the last question, then the p
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
     assert.equal(w.rows.length, 1);
+    // TTTFG-4830: what to gather at the scene went out once, after "is anyone hurt", before what happened.
+    const onScene = w.sent.filter((t) => t.startsWith("If you're still on the scene, make sure to grab the following where applicable:\n1. The other car's registration number"));
+    assert.equal(onScene.length, 1);
+    assert.ok(w.sent.indexOf(onScene[0]) > w.sent.findIndex((t) => /hurt or in danger/.test(t)));
     const opened = w.since().join('\n');
     assert.match(opened, /CLM-000001/); // the acknowledgement
     assert.match(opened, /Who was driving the vehicle\?/); // the follow-on's first question, straight after
@@ -383,3 +388,81 @@ test('TTTFG-5212: no reminder while the client is reporting a claim; the demo nu
         { phone: '27723203629', contactId: CONTACT }, { phone: '27832852913', contactId: CONTACT },
     ]);
 });
+
+// ---- TTTFG-4830: voice notes ----
+
+const VOICE = { id: 'media-voice-1', mimeType: 'audio/ogg; codecs=opus' };
+const speak = (w: ReturnType<typeof world>, now: Date) =>
+    claimsDemoTurn(w.deps, { phone: PHONE, contactId: CONTACT, text: '', voice: VOICE, wamid: `wamid.${now.getTime()}` }, now);
+/** The transcription answers `heard`, and keeps the hint it was given. */
+function hearing(w: ReturnType<typeof world>, heard: VoiceHeard) {
+    const hints: string[] = [];
+    w.deps.transcribe = async (voice, hint) => { assert.equal(voice.id, VOICE.id); hints.push(hint); return heard; };
+    return hints;
+}
+
+test('TTTFG-4830: a voice note answering the batch: transcribed with the questions as the hint, read as a transcript, and said back', async () => {
+    const { w, t } = await openedOnCar({ schedule: null as never });
+    delete w.deps.scheduleBatchCheck;
+    const asked = w.store.get(PHONE)!.lastSent!;
+    const hints = hearing(w, { text: 'um ja so one is a Toyota two Corolla and the registration is C A one two three four five six' });
+    const systems: string[] = [];
+    const reply = w.deps.replyModel;
+    w.deps.replyModel = async (req) => (systems.push(req.system), reply(req));
+    w.replies.push({ kind: 'value', otherAnswers: [other('carMake', 'Toyota'), other('carModel', 'Corolla'), other('carRegistration', 'CA 123456')] });
+
+    assert.equal(await speak(w, tick(t, 1)), 'follow-on');
+    assert.ok(hints[0].endsWith(`Tina asked: ${asked.replace(/\s+/g, ' ')}`), hints[0]);
+    assert.match(hints[0], /1\. What make is the car\? 2\. What model is it\?/);
+    assert.ok(systems[0].includes(SPOKEN_HELP));
+    const said = w.since();
+    assert.equal(said[0], 'From your voice note I noted:\n1. Toyota\n2. Corolla\n3. CA 123456\nIf I misheard anything, just tell me.');
+    assert.match(said.slice(1).join('\n'), /Please send me photos of the damage/i);
+    assert.equal(w.rows[0].answers.carRegistration?.value, 'CA 123456');
+});
+
+test('TTTFG-4830: a voice note Tina can\'t use: she says why, and nothing is read or saved', async () => {
+    for (const problem of ['unclear', 'too-long', 'unsupported', 'unavailable'] as const) {
+        const { w, t } = await openedOnCar();
+        const before = structuredClone(w.store.get(PHONE));
+        hearing(w, { problem });
+        let read = 0;
+        w.deps.replyModel = async () => (read++, blankReply);
+        assert.equal(await speak(w, tick(t, 1)), 'voice-unheard');
+        assert.deepEqual(w.since(), [VOICE_PROBLEM[problem]]);
+        assert.equal(read, 0);
+        assert.deepEqual(w.store.get(PHONE), before); // Tina's questions stay what the next reply is read against
+        assert.deepEqual(w.rows[0].answers, {});
+    }
+    // Voice notes off (no transcription): "can't listen right now".
+    const { w, t } = await openedOnCar();
+    delete w.deps.transcribe;
+    assert.equal(await speak(w, tick(t, 1)), 'voice-unheard');
+    assert.deepEqual(w.since(), [VOICE_PROBLEM.unavailable]);
+});
+
+test('TTTFG-4830: a voice note while reporting the claim is read as a transcript too; a voice note is never "#reset"', async () => {
+    const w = world();
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', DAY1);
+    w.since();
+    const systems: string[] = [];
+    const understand = w.deps.understandModel;
+    w.deps.understandModel = async (req) => (systems.push(req.system), understand(req));
+    hearing(w, { text: 'yes the discovery one' });
+    assert.equal(await speak(w, tick(DAY1, 1)), 'walkthrough');
+    assert.ok(systems[0].includes(SPOKEN_HELP));
+    assert.deepEqual(w.store.get(PHONE)?.said, ['Someone drove into the back of my car at the Claremont robot', 'yes the discovery one']);
+
+    hearing(w, { text: '#reset' });
+    assert.notEqual(await speak(w, tick(DAY1, 2)), 'reset');
+    assert.equal(w.withdrawn.length, 0);
+});
+
+test('TTTFG-4830: the transcription hint says who is speaking and ends with what Tina asked, kept short', () => {
+    assert.match(voiceHint(null), /^A South African client answers Tina/);
+    assert.ok(!voiceHint(null).includes('Tina asked'));
+    const long = voiceHint(`A few questions about your car.\n1. ${'What make is the car? '.repeat(100)}`);
+    assert.match(long, /Tina asked: A few questions about your car\. 1\. What make/);
+    assert.ok(long.length < 1200);
+});
+
