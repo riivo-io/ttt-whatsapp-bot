@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 5bddb94). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 78a9547). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -22,19 +22,30 @@
 // TTTFG-5184 added the `resume` input: the client comes back to a claim after the conversation ended (resume.ts
 // decides that). resumeFollowOn() rebuilds the state from the claim record alone, so the duty of disclosure and the
 // deadline note are not sent again, and the conversation carries on from the first missing item.
+//
+// TTTFG-4830 (batches): the questions of one section of the form go out together, up to five in a numbered list
+// (progress.ts nextBatch). The client may answer them in one message or in several. Every message's answers are saved
+// at once; what is still open is listed again only when the client goes quiet (the host sends `nudge` after a quiet
+// spell, when it can: ClaimSettings.waitForMore) or straight away when it can't. A question listed again and still open
+// the next time goes to the broker, as after two misses on one question. Forms without sections are asked one question
+// at a time, as before.
 import { DEPARTMENT, type AgentActionRow, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import { formatProblem } from './formats';
 import { claimGate } from './gate';
 import {
-  applies, deferred, formItems, itemName, missingItems, nextItem, sapsStepApplies, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
+  applies, deferred, formItems, itemName, missingItems, nextBatch, nextItem, sapsStepApplies, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
 import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, type ClaimTemplate } from './templates';
 import type { ClaimType, Facts } from './walkthrough';
 
-/** Package settings. `claims.notificationWarningDays`: send the Upcoming note when this many days or fewer are left. */
-export interface ClaimSettings { notificationWarningDays?: number }
+/**
+ * Package settings. `claims.notificationWarningDays`: send the Upcoming note when this many days or fewer are left.
+ * `waitForMore` (TTTFG-4830): the host calls back with { kind: 'nudge' } after a quiet spell, so when a message answers
+ * part of a batch Tina waits for the rest instead of listing what's open straight away.
+ */
+export interface ClaimSettings { notificationWarningDays?: number; waitForMore?: boolean }
 export const CLAIM_SETTINGS_DEFAULTS = { notificationWarningDays: 7 } as const;
 
 /** riivo_claim.riivo_claimstatus (TTTFG-4885). */
@@ -132,8 +143,27 @@ export interface FollowOnState {
   sapsRequired: boolean;
   /** "Not yet" in this conversation. Still on the missing list. */
   skipped: string[];
-  /** TTTFG-4830: the question whose answer Tina said didn't look right (formats.ts). A second such answer is kept. */
-  formatChecked?: string;
+  /**
+   * TTTFG-4830: the question whose answer Tina said didn't look right (formats.ts). A second such answer is kept. A list
+   * in a batch, where several answers may be pointed out.
+   */
+  formatChecked?: string | string[];
+  /**
+   * TTTFG-4830 (batches): the questions Tina asked together in her last message, in the order she numbered them;
+   * `asking` is the first. Absent: one question at a time.
+   */
+  batch?: string[];
+  /** TTTFG-4830: per question of the batch, how often Tina listed it again because the client's replies left it open. */
+  relisted?: Record<string, number>;
+  /**
+   * TTTFG-4830: the client's message (its wamid) that answered part of the batch. Tina is waiting for the rest; the
+   * host's `nudge` with this wamid lists what's still open. A later message replaces it, so an older nudge does nothing.
+   */
+  waiting?: string;
+  /** TTTFG-4830: Tina has said "if you don't know something, just say so" in this conversation. */
+  batchHint?: true;
+  /** TTTFG-4830: what the last batch was about, so the next one on the same topic says "a few more questions". */
+  topic?: string;
   /** TTTFG-4830: how many questions the client's report answered; said once, right after the duty of disclosure. */
   reportedUsed?: number;
   signingRequested: boolean;
@@ -170,6 +200,16 @@ export type FollowOnInput =
    * new values for questions the client answered earlier ("actually no, there was no other car").
    */
   | { kind: 'value'; value: string | number | boolean; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  /**
+   * TTTFG-4830: the reply to a batch. `answers`: values for questions of the batch; `dontKnow`: questions of the batch
+   * the client says they don't know or don't have; `also` and `corrections` as for 'value'.
+   */
+  | { kind: 'batch'; answers: OtherAnswer[]; dontKnow: string[]; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
+  /**
+   * TTTFG-4830: from the host, not the client: the quiet spell after the message `wamid` is over. Tina lists what's still
+   * open in the batch, if she is still waiting on that message (FollowOnState.waiting).
+   */
+  | { kind: 'nudge'; wamid: string }
   | { kind: 'saps'; caseNumber?: string; station?: string; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
   /** "I don't have it yet." */
   | { kind: 'not-yet'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[] }
@@ -204,6 +244,16 @@ export const BROKER_WILL_CHECK = 'No problem, your broker will check that with y
 export const CORRECTED = "No problem, I've changed that.";
 /** TTTFG-4830: the reply answered other questions but not the one Tina asked. */
 export const NOTED_OTHERS = "Thanks, I've noted that.";
+/** TTTFG-4830 (batches): said with the first batch of a conversation. */
+export const BATCH_HINT = "Answer as best you can, and if you don't know something, just say so.";
+/** TTTFG-4830: what's still open after a reply that answered part of a batch (several, or one). */
+export const STILL_NEED = { many: 'Thanks. I still need these:', one: 'Thanks. I still need this one:' } as const;
+/** TTTFG-4830: a reply that answered none of the batch. One question left is asked "in simpler words", as before. */
+export const SORRY_BATCH = "Sorry, I didn't quite get that. Could you answer these?";
+/** TTTFG-4830: a file in the middle of a batch, acknowledged while Tina waits for the rest. */
+export const FILE_SAVED = "Thanks, I've saved that with your claim.";
+/** TTTFG-4830: "Back to my question:" for a batch. */
+const plural = (lead: string) => lead.replace(/my question:$/, 'my questions:');
 /** TTTFG-4830: after the duty of disclosure, when the client's report already answered some of the form's questions. */
 export const usedReport = (n: number) =>
   `I've filled in ${n === 1 ? 'one of the insurer\'s questions' : `${n} of the insurer's questions`} from what you've already told me, so I won't ask ${n === 1 ? 'it' : 'them'} again.`;
@@ -244,6 +294,11 @@ type Out =
    * in the same words. `lead`: words in front of the question, in the same message.
    */
   | { kind: 'ask'; item: QuestionItem; simpler: boolean; again?: boolean; lead?: string }
+  /**
+   * TTTFG-4830: several questions in one numbered message. `intro`: a new batch ("A few questions about your car.",
+   * with the hint the first time, "a few more" on the same topic); without it, `lead` says why they're listed again.
+   */
+  | { kind: 'ask-batch'; items: QuestionItem[]; lead?: string; intro?: { hint: boolean; same: boolean } }
   | { kind: 'saps-required' }
   | { kind: 'text'; text: string }
   | { kind: 'template'; template: ClaimTemplate; text: string }
@@ -261,7 +316,8 @@ type Out =
   /** TTTFG-4830: open work for the claim's owner (the broker), for example to update the client's address in the CRM. */
   | { kind: 'follow-up'; detail: string };
 
-export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number }
+/** `waitForMore`: ClaimSettings.waitForMore. */
+export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean }
 /** The claim as it stands within this turn. */
 interface Work { answers: ClaimAnswers; evidence: { key: string }[]; facts: ClaimFacts }
 
@@ -308,16 +364,31 @@ export function accept(item: QuestionItem, v: string | number | boolean): string
   }
 }
 
-/** The next question or evidence item, the signing step between them, and the end. */
-function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | null {
+/** The state without what belongs to the question (or batch) Tina was on. */
+const moveOn = ({ waitingOn: _o, batch: _b, relisted: _r, waiting: _w, ...st }: FollowOnState): FollowOnState => st;
+
+/**
+ * The next question (or batch of questions, TTTFG-4830) or evidence item, the signing step between them, and the end.
+ * `thanks` (TTTFG-4830): the client just finished a batch, so the next question starts with "Thanks.".
+ */
+function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thanks.'): FollowOnState | null {
   // The SAPS keys belong to the SAPS step; the questions never ask them again.
   const skip = [...st.skipped, SAPS_CASE_KEY, SAPS_STATION_KEY];
-  const next = nextItem(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip });
-  const lead = next && next.key === st.waitingOn && !deferred(next.key, w.answers) ? LEFT_OFF : undefined;
-  if (st.waitingOn) st = { ...st, waitingOn: undefined };
+  const batch = nextBatch(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip });
+  const next = batch[0] ?? null;
+  const leftOff = next && next.key === st.waitingOn && !deferred(next.key, w.answers) ? LEFT_OFF : undefined;
+  const lead = [thanks, leftOff].filter(Boolean).join(' ') || undefined;
+  const { topic: before, ...rest } = moveOn(st);
+  st = before ? { ...rest, topic: before } : rest;
   if (next?.kind === 'question') {
+    const topic = next.section ? batchTopic(batch) : undefined;
+    const kept = { ...rest, phase: 'items' as const, asking: next.key, misses: 0, ...(topic ? { topic } : {}) };
+    if (batch.length > 1) {
+      out.push({ kind: 'ask-batch', items: batch, lead, intro: { hint: !st.batchHint, same: !!topic && topic === before } });
+      return { ...kept, batch: batch.map((i) => i.key), batchHint: true };
+    }
     out.push({ kind: 'ask', item: next, simpler: false, again: deferred(next.key, w.answers), lead });
-    return { ...st, phase: 'items', asking: next.key, misses: 0 };
+    return kept;
   }
   // TTTFG-5254 step 11: the last form question is answered. The form goes to sign before any evidence is asked.
   if (!st.signingRequested) {
@@ -430,7 +501,7 @@ export function addressAsk(claim: FollowOnClaim, answers: ClaimAnswers): Questio
 }
 
 /** The address question's answer: saved, the new address passed to the broker, then the next address question or the form. */
-function advanceAddress(c: Ctx, w: Work, st: FollowOnState, input: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>, out: Out[], at: string): FollowOnState | null {
+function advanceAddress(c: Ctx, w: Work, st: FollowOnState, input: ClientReply, out: Out[], at: string): FollowOnState | null {
   const item = addressItem(c.claim, st.asking);
   const toForm = () => proceed(c, w, { ...st, phase: 'items', misses: 0 }, out);
   if (!item) return toForm();
@@ -519,15 +590,17 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
  */
 function applyOthers(
   c: Ctx, w: Work, sapsRequired: boolean, others: readonly OtherAnswer[] | undefined,
-  rec: { at: string; wamid?: string; source: 'report' | 'same-message' }, out: Out[], except?: string,
+  rec: { at: string; wamid?: string; source: 'report' | 'same-message' }, out: Out[], except?: string | readonly string[],
 ): number {
   if (!others?.length) return 0;
+  // The question (or TTTFG-4830 batch of questions) Tina is asking: answered as such, never on the side.
+  const asked = new Set(typeof except === 'string' ? [except] : except ?? []);
   let saved = 0;
   for (let pass = 0, progress = true; progress && pass < 5; pass++) {
     progress = false;
     const items = formItems(c.form, w.answers, w.facts, sapsRequired);
     for (const o of others) {
-      if (o.key === except || o.key.includes('.more.') || isSaps(o.key)) continue;
+      if (asked.has(o.key) || o.key.includes('.more.') || isSaps(o.key)) continue;
       const prev = w.answers[o.key];
       if (prev && prev.status !== 'not-yet') continue;
       const item = items.find((i) => i.key === o.key);
@@ -699,13 +772,37 @@ export function resumeStep(c: Ctx, files: readonly ResumeFile[] = [], introSent 
   const first = out.length;
   const next = intro(ctx, w, st, out);
   // The words in front go on the first question asked, if one is (not on a template or a closing line).
-  const ask = out.slice(first).find((o): o is Extract<Out, { kind: 'ask' }> => o.kind === 'ask');
+  const ask = out.slice(first).find((o): o is Extract<Out, { kind: 'ask' | 'ask-batch' }> => o.kind === 'ask' || o.kind === 'ask-batch');
   if (lead && ask) ask.lead = lead;
   else if (lead) out.splice(first, 0, { kind: 'text', text: lead });
   return { state: next, out };
 }
 
-export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>): Step {
+/** A client message, as the follow-on reads it (not the start, a resume or the host's nudge). */
+export type ClientReply = Exclude<FollowOnInput, { kind: 'start' | 'resume' | 'nudge' }>;
+
+/**
+ * TTTFG-4830: a reply read for one question while Tina asked a batch, or for a batch while she asked one question
+ * (the host reads against the state it had), in the shape the state needs.
+ */
+function fitted(st: FollowOnState, input: ClientReply): ClientReply {
+  if (st.batch && st.phase === 'items') {
+    const rest = { wamid: input.wamid, ...('also' in input && input.also ? { also: input.also } : {}), ...('corrections' in input && input.corrections ? { corrections: input.corrections } : {}) };
+    if (input.kind === 'value') return { kind: 'batch', answers: [{ key: st.asking, value: input.value }], dontKnow: [], ...rest };
+    if (input.kind === 'not-yet' || input.kind === 'unparsed') return { kind: 'batch', answers: [], dontKnow: [], ...rest };
+    return input;
+  }
+  if (input.kind !== 'batch') return input;
+  const also = [...(input.also ?? []), ...input.answers.filter((a) => a.key !== st.asking)];
+  const rest = { wamid: input.wamid, ...(also.length ? { also } : {}), ...(input.corrections ? { corrections: input.corrections } : {}) };
+  const mine = input.answers.find((a) => a.key === st.asking);
+  if (mine) return { kind: 'value', value: mine.value, ...rest };
+  return { kind: input.dontKnow.includes(st.asking) ? 'not-yet' : 'unparsed', ...rest };
+}
+
+export function advanceFollowOn(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>): Step {
+  if (raw.kind === 'nudge') return nudged(c, st, raw.wamid);
+  const input = fitted(st, raw);
   const w = work(c.claim);
   const out: Out[] = [];
   const at = c.now.toISOString();
@@ -714,7 +811,7 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
   const { changed: corrected, flagged, ownReading } = input.kind === 'file'
     ? { changed: 0, flagged: 0, ownReading: false }
     : applyCorrections(c, w, st.sapsRequired, input.corrections, { at, wamid: input.wamid }, out, st.asking);
-  const noted = input.kind === 'file' ? 0 : applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.asking);
+  const noted = input.kind === 'file' ? 0 : applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.batch ?? st.asking);
 
   if (st.phase === 'address') return { state: advanceAddress(c, w, st, input, out, at), out };
 
@@ -752,6 +849,8 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
     out.push({ kind: 'ask', item: sapsAsk(w.facts), simpler: true });
     return { state: { ...st, misses: st.misses + 1 }, out };
   }
+
+  if (st.batch) return { state: advanceBatch(c, w, st, input, out, at, { corrected, flagged, ownReading, noted }), out };
 
   const item = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === st.asking);
   if (!item || !applies(item, w.answers, w.facts)) {
@@ -795,7 +894,7 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
     // TTTFG-4830: a phone number, email or ID number that doesn't look right is pointed out once. The same again is kept
     // as given, with the reason for the broker: a client who means it is never stuck on a question.
     const problem = value === undefined ? null : formatProblem(item, value);
-    if (problem && st.formatChecked !== item.key) {
+    if (problem && !formatChecked(st).includes(item.key)) {
       out.push({ kind: 'text', text: problem });
       return { state: { ...st, formatChecked: item.key }, out };
     }
@@ -846,6 +945,167 @@ export function advanceFollowOn(c: Ctx, st: FollowOnState, input: Exclude<Follow
   return { state: proceed(c, w, st, out), out };
 }
 
+// -------------------------------------------------------------------------------- TTTFG-4830: questions in batches
+
+/** The questions whose answers Tina said didn't look right (FollowOnState.formatChecked). */
+const formatChecked = (st: FollowOnState): string[] => (Array.isArray(st.formatChecked) ? st.formatChecked : st.formatChecked ? [st.formatChecked] : []);
+
+/** The batch's questions still open: unanswered and applying, or waiting on a yes or a no still open in the batch. */
+function openBatch(c: Ctx, w: Work, st: FollowOnState): QuestionItem[] {
+  const list = formItems(c.form, w.answers, w.facts, st.sapsRequired);
+  const open: QuestionItem[] = [];
+  for (const key of st.batch ?? []) {
+    const item = list.find((i) => i.key === key);
+    const a = w.answers[key];
+    if (!item || item.kind !== 'question' || st.skipped.includes(key) || (a && a.status !== 'not-yet')) continue;
+    if (applies(item, w.answers, w.facts) || (item.onlyIf && open.some((o) => o.key === item.onlyIf!.key))) open.push(item);
+  }
+  return open;
+}
+
+/**
+ * How Tina leads into the batch's open questions when she lists them again (`many`), or the one left (`one`; absent: the
+ * question alone, in simpler words when `simpler`). `count`: the listing counts as asking them again.
+ */
+interface Relist { many: string; one?: string; simpler?: boolean; count: boolean }
+const BACK: Relist = { many: 'Back to my questions:', one: 'Back to my question:', count: false };
+
+/**
+ * One reply to a batch. Its answers are saved, each checked against its own question as for one question; "don't
+ * know" goes to the broker (a required question) or is "not yet" (an optional one); a file or a SAPS case number is
+ * filed as in the middle of one question. Then:
+ * - nothing open: the next batch, after "Thanks.";
+ * - the message moved things on (or Tina was already waiting) and the host can wait (waitForMore): Tina says nothing
+ *   more until the client goes quiet;
+ * - otherwise what's still open is listed again (relist): "Thanks. I still need these:" after some answers, "Sorry, I
+ *   didn't quite get that." after none, "Back to my questions:" after a file or a correction (not counted).
+ */
+function advanceBatch(
+  c: Ctx, w: Work, st: FollowOnState, input: ClientReply, out: Out[], at: string,
+  side: { corrected: number; flagged: number; ownReading: boolean; noted: number },
+): FollowOnState | null {
+  const batch = st.batch ?? [];
+  const list = () => formItems(c.form, w.answers, w.facts, st.sapsRequired);
+  const save = (key: string, record: AnswerRecord) => {
+    out.push({ kind: 'save-answer', key, record });
+    w.answers[key] = record;
+  };
+  let answered = false;
+  let back: Relist | undefined;
+  if (side.corrected) {
+    out.push({ kind: 'text', text: side.ownReading ? NOTED_OTHERS : CORRECTED });
+    back = BACK;
+  } else if (side.flagged) back = BACK;
+  else if (side.noted) back = { ...BACK, many: `${NOTED_OTHERS} ${BACK.many}`, one: `${NOTED_OTHERS} ${BACK.one}` };
+
+  if (input.kind === 'file') {
+    // Filed against the claim, as the evidence item Claude read it as when that one is still missing.
+    const item = input.forItem
+      ? list().find((i) => i.key === input.forItem && i.kind === 'evidence' && applies(i, w.answers, w.facts) && !w.evidence.some((e) => e.key === i.key))
+      : undefined;
+    out.push({ kind: 'file', file: input.file, itemKey: item?.key });
+    if (item) {
+      out.push({ kind: 'received', item });
+      w.evidence.push({ key: item.key });
+      back = BACK;
+    } else back = { many: plural(SAVED_FILE), one: SAVED_FILE, count: false };
+  } else if (input.kind === 'saps' && input.caseNumber) {
+    out.push({ kind: 'save-saps', caseNumber: input.caseNumber.trim(), station: input.station?.trim() || undefined });
+    back = { many: plural(SAVED_SAPS), one: SAVED_SAPS, count: false };
+  } else if (input.kind === 'batch') {
+    const checked = new Set(formatChecked(st));
+    // An answer can open another question of the batch (a "no" to "Is the car registered in your name?" opens whose
+    // name it is), so go round until nothing more fits.
+    const given = new Map(input.answers.filter((a) => batch.includes(a.key)).map((a) => [a.key, a.value] as const));
+    for (let pass = 0, more = true; more && pass < batch.length; pass++) {
+      more = false;
+      for (const [key, v] of given) {
+        const item = list().find((i) => i.key === key);
+        if (!item || item.kind !== 'question' || !applies(item, w.answers, w.facts)) continue;
+        given.delete(key);
+        more = true;
+        const prev = w.answers[key];
+        const value = prev && prev.status !== 'not-yet' ? undefined : accept(item, v);
+        if (value === undefined) continue;
+        answered = true;
+        // A phone number, email or ID number that doesn't look right is pointed out once, by its number; the same
+        // again is kept as given, with the reason for the broker.
+        const problem = formatProblem(item, value);
+        if (problem && !checked.has(key)) {
+          out.push({ kind: 'text', text: `About number ${batch.indexOf(key) + 1}: ${problem}` });
+          checked.add(key);
+          continue;
+        }
+        save(key, { value, status: 'answered', at, wamid: input.wamid, ...(problem ? { doubt: problem.replace(/ Could you.*$/, '') } : {}) });
+      }
+    }
+    if (checked.size) st = { ...st, formatChecked: [...checked] };
+    let broker = false;
+    for (const key of input.dontKnow) {
+      const item = list().find((i) => i.key === key);
+      const prev = w.answers[key];
+      if (!batch.includes(key) || item?.kind !== 'question' || !applies(item, w.answers, w.facts) || (prev && prev.status !== 'not-yet')) continue;
+      answered = true;
+      if (item.required) {
+        // "I don't know" isn't a miss: the broker confirms it with the client, as for one question.
+        save(key, { value: null, status: 'broker-to-confirm', at, wamid: input.wamid });
+        broker = true;
+      } else {
+        save(key, { value: null, status: 'not-yet', at, wamid: input.wamid });
+        st = { ...st, skipped: [...st.skipped, key] };
+      }
+    }
+    if (broker) out.push({ kind: 'text', text: BROKER_WILL_CHECK });
+  }
+
+  if (!openBatch(c, w, st).length) return proceed(c, w, st, out, 'Thanks.');
+  if (c.waitForMore && (answered || back || st.waiting)) {
+    // A file or a case number is acknowledged now; answers are thanked when Tina next writes.
+    if (input.kind === 'file' && !out.some((o) => o.kind === 'received')) out.push({ kind: 'text', text: FILE_SAVED });
+    if (input.kind === 'saps' && input.caseNumber) out.push({ kind: 'text', text: SAVED_SAPS.replace(/ Back to.*$/, '') });
+    return { ...st, waiting: input.wamid };
+  }
+  if (answered) return relist(c, w, st, out, { ...STILL_NEED, count: true }, at, input.wamid);
+  return relist(c, w, st, out, back ?? { many: SORRY_BATCH, simpler: true, count: true }, at, input.wamid);
+}
+
+/**
+ * What's still open in the batch, listed again after `lead` and numbered from 1. When the listing counts, a question
+ * listed again before and still open goes to the broker, as after two misses on one question (a question waiting on its
+ * yes or no isn't counted). One question left is asked on its own, as before; none, and Tina moves on.
+ */
+function relist(c: Ctx, w: Work, st: FollowOnState, out: Out[], lead: Relist, at: string, wamid: string): FollowOnState | null {
+  const relisted = { ...(st.relisted ?? {}) };
+  if (lead.count) {
+    for (const item of openBatch(c, w, st)) {
+      if (!applies(item, w.answers, w.facts)) continue;
+      if (!relisted[item.key]) {
+        relisted[item.key] = 1;
+        continue;
+      }
+      const record: AnswerRecord = { value: null, status: 'broker-to-confirm', at, wamid };
+      out.push({ kind: 'save-answer', key: item.key, record });
+      w.answers[item.key] = record;
+    }
+  }
+  const open = openBatch(c, w, st);
+  if (!open.length) return proceed(c, w, st, out);
+  const base = { ...moveOn(st), phase: 'items' as const, asking: open[0].key };
+  if (open.length === 1) {
+    out.push({ kind: 'ask', item: open[0], simpler: !lead.one && !!lead.simpler, lead: lead.one });
+    return { ...base, misses: relisted[open[0].key] ?? 0 };
+  }
+  out.push({ kind: 'ask-batch', items: open, lead: lead.many });
+  return { ...base, batch: open.map((i) => i.key), misses: 0, relisted };
+}
+
+/** The host's nudge: when Tina is still waiting on that message, what's open is listed again. */
+function nudged(c: Ctx, st: FollowOnState, wamid: string): Step {
+  if (!st.batch || st.waiting !== wamid) return { state: st, out: [] };
+  const out: Out[] = [];
+  return { state: relist(c, work(c.claim), st, out, { ...STILL_NEED, count: true }, c.now.toISOString(), wamid), out };
+}
+
 // ------------------------------------------------------------------------------------------------------- the texts
 
 const HINT: Partial<Record<QuestionItem['answerType'], string>> = {
@@ -888,6 +1148,47 @@ export function askText(item: QuestionItem, simpler: boolean, again = false): st
   return `Sorry, I didn't quite get that. ${prompt}${HINT[item.answerType] ?? ''}${choices}`;
 }
 
+const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+
+/**
+ * TTTFG-4830: what a batch is about, as "A few questions about …" ends: its first question's section, and for a later
+ * entry of a repeating group, which one ("the passenger (the second one)").
+ */
+export function batchTopic(items: readonly QuestionItem[]): string {
+  const first = items[0];
+  const section = first?.section ?? 'your claim';
+  const n = first?.group ? Number(/\.(\d+)$/.exec(first.key)?.[1] ?? 1) : 1;
+  if (n < 2) return section;
+  return `${section} (${ORDINALS[n - 1] ? `the ${ORDINALS[n - 1]} one` : `number ${n}`})`;
+}
+
+/** "What is…" becomes "what is…"; "SAPS…" stays. */
+const uncap = (s: string) => (/^[A-Z][a-z]/.test(s) ? s.charAt(0).toLowerCase() + s.slice(1) : s);
+
+/**
+ * TTTFG-4830: a batch's questions as Tina words them, without the numbers. A question asked ahead of the yes or no it
+ * depends on says so ("If no to 4: whose name is the car registered in?"). `choices`: a choice question shows its
+ * choices (when it's listed again).
+ */
+export function batchLines(items: readonly QuestionItem[], choices = false): string[] {
+  return items.map((item) => {
+    const c = item.onlyIf;
+    const parent = c && typeof c.equals === 'boolean' ? items.findIndex((p) => p.key === c.key) : -1;
+    const text = parent >= 0 ? `If ${c!.equals ? 'yes' : 'no'} to ${parent + 1}: ${uncap(item.prompt)}` : item.prompt;
+    return `${text}${choices && item.answerType === 'choice' && item.choices?.length ? ` (${item.choices.join(', ')})` : ''}`;
+  });
+}
+
+/** TTTFG-4830: a batch as Tina sends it: the lead and the intro, then the questions numbered from 1. */
+export function batchText(items: readonly QuestionItem[], o: { lead?: string; intro?: { hint: boolean; same: boolean } } = {}): string {
+  const intro = o.intro
+    ? `${o.intro.same ? 'A few more questions about' : o.intro.hint ? 'A few questions about' : 'Next, a few questions about'} ${batchTopic(items)}.`
+      + (o.intro.hint ? ` ${BATCH_HINT}` : '')
+    : undefined;
+  const lines = batchLines(items, !o.intro).map((l, i) => `${i + 1}. ${l}`);
+  return [[o.lead, intro].filter(Boolean).join(' '), ...lines].filter(Boolean).join('\n');
+}
+
 /** TTTFG-5254 step 14. The sign line only while a signing link is out: not when signed, and not when none was sent. */
 export function closingText(signature: SignatureStatus, owner: Owner): string {
   return [
@@ -917,6 +1218,8 @@ export async function followOnTurn(
   ports: FollowOnPorts, conv: Conversation, state: FollowOnState | null, input: FollowOnInput, now: Date, settings: ClaimSettings = {},
 ): Promise<{ state: FollowOnState | null }> {
   const at = now.toISOString();
+  // TTTFG-4830: a nudge Tina isn't waiting on any more (the client wrote again since) reads and writes nothing.
+  if (input.kind === 'nudge' && (!state || state.waiting !== input.wamid)) return { state };
   if (input.kind !== 'start' && input.kind !== 'resume' && !state) throw new Error('TTTFG-5176: a follow-on message with no follow-on state');
   const claimId = input.kind === 'start' || input.kind === 'resume' ? input.claimId : state!.claimId;
   const claim = await ports.loadClaim(claimId);
@@ -929,9 +1232,12 @@ export async function followOnTurn(
   } else {
     form = await ports.claimForm(claim.claimFormId);
   }
-  if (input.kind !== 'start') await ports.setLastClientMessageOn(claimId, at);
+  if (input.kind !== 'start' && input.kind !== 'nudge') await ports.setLastClientMessageOn(claimId, at);
 
-  const ctx: Ctx = { claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays };
+  const ctx: Ctx = {
+    claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays,
+    ...(settings.waitForMore ? { waitForMore: true } : {}),
+  };
   const step =
     input.kind === 'start' ? startFollowOn(ctx, input.describedAsTheft, input.files, input.reported)
     : input.kind === 'resume' ? resumeStep(ctx, input.files, input.introSent, input.lead, input.skipped)
@@ -963,6 +1269,10 @@ export async function followOnTurn(
         await say(o.lead ? `${o.lead} ${phrased}` : phrased);
         break;
       }
+      case 'ask-batch':
+        // TTTFG-4830: code text, never rephrased: the numbers are what the client answers by.
+        await say(batchText(o.items, o));
+        break;
       case 'saps-required':
         await ports.setSapsRequired(claimId);
         break;

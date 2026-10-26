@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 5bddb94). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 78a9547). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -255,6 +255,13 @@ function askedAgain(fact: Fact, f: Facts, n: number, opening?: string): string {
   return ways[fact][(n - 1) % 3];
 }
 
+/** TTTFG-4830: the details questions, as the "If yes to N:" line under their yes/no. */
+const INJURY_DETAILS_IF_YES = 'who was hurt, and what happened to them?';
+const thirdPartyDetailsIfYes = (state: WalkthroughState) => {
+  const q = BY_KIND[claimKind(state.facts, state.opening)].thirdPartyDetails ?? FACT_QUESTIONS.thirdPartyDetails;
+  return lowerFirst(q);
+};
+
 /** One question, in words for this claim; asked before (`n` > 0): in other words. */
 function factQuestion(fact: Fact, f: Facts, n = 0, opening?: string): string {
   return n > 0 ? askedAgain(fact, f, n, opening) : BY_KIND[claimKind(f, opening)][fact] ?? FACT_QUESTIONS[fact];
@@ -303,11 +310,21 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
         ? ['Is everything in the summary above correct? Please answer yes, or tell me what to change.', 'Is that all correct? Yes, or tell me what to change.'][(again - 1) % 2]
         : summary(state);
     default: {
+      // TTTFG-4830: a yes/no asked for the first time brings its details question with it ("If yes to 1: please send me
+      // their details"), so the yes and the details can come in one reply. Two or more questions are numbered, so the
+      // client can answer by number.
+      const parts: string[] = [];
+      for (const f of missing) {
+        const n = tries[askedKey(f)] ?? 0;
+        parts.push(factQuestion(f, state.facts, n, state.opening));
+        const details = f === 'thirdParties' ? thirdPartyDetailsIfYes(state) : f === 'injuries' ? INJURY_DETAILS_IF_YES : undefined;
+        if (details && n === 0) parts.push(`If yes to ${parts.length}: ${details}`);
+      }
       // "Thanks." belongs at the start of the message, once, not in the middle of it.
-      const parts = missing.map((f) => factQuestion(f, state.facts, tries[askedKey(f)] ?? 0, state.opening));
       const thanks = parts.some((p) => p.startsWith('Thanks. '));
-      const text = parts.map((p) => p.replace(/^Thanks\. /, '')).join(' ');
-      return thanks ? `Thanks. ${text}` : text;
+      const clean = parts.map((p) => p.replace(/^Thanks\. /, ''));
+      const text = clean.length > 1 ? clean.map((p, i) => `${i + 1}. ${p}`).join('\n') : clean.join(' ');
+      return thanks ? `Thanks.${clean.length > 1 ? '\n' : ' '}${text}` : text;
     }
   }
 }

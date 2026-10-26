@@ -6,8 +6,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUSY, claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
+    batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoTurn, demoContactFor, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
 } from '../../src/domain/claimsDemoHost';
+
 import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
 import type { ClientFile, FollowOnClaim, StoredClaimForm } from '../../src/departments/insurance/followon';
@@ -45,7 +46,8 @@ const blankAnswer = { kind: 'unclear', policyNumber: null, claimType: null, desc
 const blankReply = { kind: 'unparsed', valueText: null, valueNumber: null, valueBool: null, sapsCaseNumber: null, sapsStation: null, differentIncident: false,
     chosenClaim: null, yesNo: null, forItem: null, claimType: null, description: null, incidentDate: null, place: null, otherAnswers: [], corrections: [] };
 
-function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, unknown>[] } = {}) {
+function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, unknown>[]; form?: StoredClaimForm } = {}) {
+    const form = o.form ?? MOTOR;
     const reportedSeen: string[] = [];
     const rows: Row[] = o.rows ?? [];
     const sent: string[] = [];
@@ -77,9 +79,9 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
         openClaimsForClient: async (contactId): Promise<OpenClaim[]> => rows.filter((r) => r.contactId === contactId && isOpenClaim(r.status))
             .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt, status: r.status, lastClientMessageOn: r.lastClientMessageOn })),
         loadClaim: async (id) => structuredClone(row(id)),
-        activeClaimForm: async (provider, type) => (provider === MOTOR.provider && type === MOTOR.claimType ? MOTOR : null),
+        activeClaimForm: async (provider, type) => (provider === form.provider && type === form.claimType ? form : null),
         genericClaimForm: async () => GENERIC,
-        claimForm: async (id) => (id === MOTOR.id ? MOTOR : GENERIC),
+        claimForm: async (id) => (id === form.id ? form : GENERIC),
         setClaimForm: async (id, formId) => void (row(id).claimFormId = formId),
         saveSaps: async () => {},
         setSapsRequired: async (id) => void (row(id).sapsRequired = true),
@@ -255,4 +257,79 @@ test('Claude unavailable during the walkthrough or on the first message: the sam
     assert.equal(await say(w, 'Yes', tick(DAY1, 2)), 'busy');
     assert.deepEqual(w.since(), [BUSY]);
     assert.equal(w.store.get(PHONE)!.walk!.step, step);
+});
+
+// ---- TTTFG-4830: the form's questions in batches, and the quiet spell before Tina lists what's still open ----
+
+/** A form whose three car questions go together (one section), then a photo. */
+const CAR: StoredClaimForm = {
+    ...MOTOR, id: 'cf-car',
+    questionList: [
+        q('carMake', 'What make is the car?', { section: 'your car' }),
+        q('carModel', 'What model is it?', { section: 'your car' }),
+        q('carRegistration', "What is the car's registration number?", { section: 'your car' }),
+        q('damagePhoto', 'Photos of the damage.', { kind: 'evidence', answerType: 'photo', name: 'the photos of the damage' }),
+    ],
+};
+const other = (key: string, valueText: string) => ({ key, valueText, valueNumber: null, valueBool: null });
+
+/** A claim opened on the CAR form; the first batch has just gone out. */
+async function openedOnCar(o: { schedule?: (phone: string, token: string) => Promise<void> } = {}) {
+    const w = world({ form: CAR });
+    const scheduled: [string, string][] = [];
+    if (o.schedule !== null) w.deps.scheduleBatchCheck = o.schedule ?? (async (phone, token) => void scheduled.push([phone, token]));
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    assert.match(w.since().join('\n'), /A few questions about your car\. Answer as best you can, and if you don't know something, just say so\.\n1\. What make is the car\?\n2\. What model is it\?/);
+    return { w, scheduled, t };
+}
+
+test('TTTFG-4830: part of a batch answered: saved at once, Tina waits, and the check after the quiet spell lists the rest', async () => {
+    const { w, scheduled, t } = await openedOnCar();
+    w.replies.push({ kind: 'value', otherAnswers: [other('carMake', 'Toyota')] });
+    const first = tick(t, 1);
+    assert.equal(await say(w, '1. Toyota', first), 'follow-on');
+    assert.deepEqual(w.since(), []); // nothing said while the client may still be typing
+    assert.equal(w.rows[0].answers.carMake?.value, 'Toyota');
+    const token = `wamid.${first.getTime()}`;
+    assert.deepEqual(scheduled, [[PHONE, token]]);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.waiting, token);
+
+    assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, 'wamid.older', tick(first, 1)), 'stale');
+    assert.deepEqual(w.since(), []);
+    assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, token, tick(first, 1)), 'listed');
+    const listed = w.since();
+    assert.deepEqual(listed, ["Thanks. I still need these:\n1. What model is it?\n2. What is the car's registration number?"]);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.waiting, undefined);
+    assert.equal(w.store.get(PHONE)?.lastSent, listed[0]); // the next reply is read against the list as renumbered
+});
+
+test('TTTFG-4830: a second small message finishes the batch: Tina moves on at once, and the old check does nothing', async () => {
+    const { w, scheduled, t } = await openedOnCar();
+    w.replies.push({ kind: 'value', otherAnswers: [other('carMake', 'Toyota')] });
+    await say(w, 'Toyota', tick(t, 1));
+    w.replies.push({ kind: 'value', otherAnswers: [other('carModel', 'Corolla'), other('carRegistration', 'CA 123-456')] });
+    assert.equal(await say(w, 'Corolla, CA 123-456', tick(t, 2)), 'follow-on');
+    assert.match(w.since().join('\n'), /Please send me photos of the damage/i);
+    assert.equal(scheduled.length, 1);
+    assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, scheduled[0][1], tick(t, 3)), 'stale');
+    assert.deepEqual(w.since(), []);
+});
+
+test('TTTFG-4830: with no scheduler (CLAIMS_BATCH_QUIET_MS=0), or when scheduling fails, Tina lists what is open straight away', async () => {
+    for (const schedule of [null, async () => { throw new Error('Service Bus down'); }] as const) {
+        const { w } = await openedOnCar({ schedule: schedule as never });
+        if (schedule === null) delete w.deps.scheduleBatchCheck;
+        w.replies.push({ kind: 'value', otherAnswers: [other('carMake', 'Toyota')] });
+        await say(w, 'Toyota', tick(DAY1, 30));
+        assert.deepEqual(w.since(), ["Thanks. I still need these:\n1. What model is it?\n2. What is the car's registration number?"]);
+        assert.equal(w.store.get(PHONE)?.resume.followOn?.waiting, undefined);
+    }
+    assert.equal(batchQuietMs(undefined), 45_000);
+    assert.equal(batchQuietMs('0'), 0);
+    assert.equal(batchQuietMs('20000'), 20_000);
+    assert.equal(batchQuietMs('soon'), 45_000);
 });

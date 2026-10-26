@@ -23,7 +23,7 @@ import { handleClientRelayResponse, RELAY_BUTTON_PAYLOAD } from '../controllers/
 import { knowledgeBaseService, KbChunkHit } from '../services/knowledgeBase.service';
 import { graphMailService } from '../services/graphMail.service';
 import { messageContextStorage } from '../utils/messageContext';
-import { WhatsAppJobPayload } from '../queue/whatsappQueue';
+import { CLAIMS_BATCH_CHECK, WhatsAppJobPayload } from '../queue/whatsappQueue';
 import { enqueueFeedbackPrompt } from '../queue/feedbackPromptQueue';
 import { enqueueCaseAutoClose } from '../queue/caseAutoCloseQueue';
 import { buildLoeMagicLink } from '../utils/loeMagicLink';
@@ -41,7 +41,7 @@ import {
     AUTO_REPLY_CLARIFICATION,
 } from '../utils/autoReply';
 import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
-import { claimsDemoContact, handleClaimsDemoMessage } from '../services/claimsDemo.service';
+import { claimsDemoContact, handleClaimsDemoBatchCheck, handleClaimsDemoMessage } from '../services/claimsDemo.service';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
@@ -1717,6 +1717,12 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
  * the controller used to set up.
  */
 export async function processInboundJob(payload: WhatsAppJobPayload): Promise<void> {
+    // TTTFG-4830 claims demo: a scheduled check after a part-answered batch of claim questions, not a client message.
+    if (payload.rawMessage?.type === CLAIMS_BATCH_CHECK) {
+        await messageContextStorage.run({ phoneNumberId: payload.phoneNumberId || '' }, () =>
+            handleClaimsDemoBatchCheck(payload.phone, String(payload.rawMessage.token ?? '')));
+        return;
+    }
     const incoming = extractIncoming(payload.rawMessage);
     if (!incoming) {
         console.log(`[Processor] Unsupported message type after dequeue: ${payload.rawMessage?.type}`);

@@ -78,6 +78,32 @@ export async function enqueueRetryAfterRateLimit(
     await getSender().sendMessages(msg);
 }
 
+/** TTTFG-4830 (claims demo): the rawMessage type of a scheduled batch check (see enqueueClaimsBatchCheck). */
+export const CLAIMS_BATCH_CHECK = 'claims_batch_check';
+
+/**
+ * TTTFG-4830 (claims demo): after a client answers part of Tina's numbered questions, check back in `delayMs`. The
+ * check goes on the sender's own session, so it comes after any message they send in the meantime; the claims demo
+ * lists what's still open only if nothing came in since the message `token` (its wamid). `phoneNumberId`: the number
+ * the client wrote to, so the reply comes from it.
+ */
+export async function enqueueClaimsBatchCheck(phone: string, token: string, delayMs: number, phoneNumberId: string | null): Promise<void> {
+    const payload: WhatsAppJobPayload = {
+        metaMessageId: `${token}:batch-check`,
+        phone,
+        phoneNumberId,
+        receivedAt: Date.now(),
+        rawMessage: { type: CLAIMS_BATCH_CHECK, token },
+    };
+    const msg: ServiceBusMessage = {
+        body: payload,
+        sessionId: phone,
+        messageId: payload.metaMessageId,
+        scheduledEnqueueTimeUtc: new Date(Date.now() + Math.max(1, Math.floor(delayMs))),
+    };
+    await getSender().sendMessages(msg);
+}
+
 // Pure helper lives in src/utils/jobIdRetry so smoke tests can import it
 // without pulling in @azure/service-bus transitively.
 export { parseRetryAttempt } from '../utils/jobIdRetry';

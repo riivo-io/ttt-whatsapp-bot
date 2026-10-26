@@ -9,7 +9,8 @@
  *    questions, the filled form, then the evidence). What the client said while reporting it already answers some of
  *    the form's questions (reportedAnswers): those are filled in, not asked;
  *  - otherwise: Claude reads the message against the open claims (reply.ts) and resumeTurn() (5184) decides which claim
- *    it belongs to, or that there is none;
+ *    it belongs to, or that there is none. When it answers part of a batch of the form's questions, Tina waits for the
+ *    rest and the queue brings back a check after a quiet spell (claimsDemoBatchCheck);
  *  - no open claim: a claim report starts the walkthrough under a new riivo_request; anything else gets the demo hello.
  * "#reset" withdraws the demo client's open claims and forgets the conversation, so a demo can start clean.
  *
@@ -36,6 +37,15 @@ export function parseDemoNumbers(raw: string | undefined): Map<string, string> {
         if (local?.length === 9 && /^[0-9a-f-]{36}$/i.test(contactId ?? '')) out.set(local, contactId.toLowerCase());
     }
     return out;
+}
+
+/**
+ * TTTFG-4830: CLAIMS_BATCH_QUIET_MS, how long Tina waits after a reply that answers part of a batch before she lists
+ * what's still open. Default 45 seconds; 0 lists it at once. Read on every message, so a changed setting needs no deploy.
+ */
+export function batchQuietMs(raw: string | undefined): number {
+    const ms = raw === undefined || raw.trim() === '' ? 45_000 : Number(raw);
+    return Number.isFinite(ms) && ms >= 0 ? ms : 45_000;
 }
 
 /** The demo contact for a WhatsApp sender, or null when the number isn't a demo number. */
@@ -85,6 +95,12 @@ export interface ClaimsDemoDeps {
     /** Tina's own fixed texts (the hello, the reset, a file kept for later), outside the package. */
     say(phone: string, text: string): Promise<void>;
     signUpLink: string;
+    /**
+     * TTTFG-4830: calls claimsDemoBatchCheck(phone, token) after a quiet spell, on the phone's own queue, so it comes
+     * after anything the client sends meanwhile. With it, Tina waits for the rest of a part-answered batch of questions;
+     * without it, she lists what's still open straight away.
+     */
+    scheduleBatchCheck?(phone: string, token: string): Promise<void>;
 }
 
 export type DemoOutcome =
@@ -178,9 +194,21 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     const ctx = await replyContext(ports, m.contactId, c.resume, c.lastSent ?? undefined);
     const reading = await readReply(watch(deps.replyModel), ctx, m.text, m.file, m.wamid, now);
     if (unavailable) return busy();
-    const r = await resumeTurn(ports, conv(), c.resume, reading, now);
+    const r = await resumeTurn(ports, conv(), c.resume, reading, now, deps.scheduleBatchCheck ? { waitForMore: true } : {});
     if (r.route === 'claim') {
         c.resume = r.state;
+        // TTTFG-4830: part of a batch answered: Tina waits for the rest, and lists what's open after a quiet spell. If
+        // the check can't be scheduled, she lists it now rather than wait for nothing.
+        const token = r.state.followOn?.waiting;
+        if (token && deps.scheduleBatchCheck) {
+            try {
+                await deps.scheduleBatchCheck(m.phone, token);
+            } catch (e) {
+                console.warn('[ClaimsDemo] Scheduling the batch check failed; listing what is open now:', (e as Error).message);
+                const listed = await followOnTurn(ports, conv(), r.state.followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
+                c.resume = { followOn: listed.state, pending: null };
+            }
+        }
         return done('follow-on');
     }
     if (r.route === 'new-claim') {
@@ -213,6 +241,24 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start' }, now);
     c.walk = t.state && (await withOpeningFacts(deps.understandModel, t.state, m.text, now));
     return done('started');
+}
+
+/**
+ * TTTFG-4830: the quiet spell after a part-answered batch of questions is over (scheduleBatchCheck). If Tina is still
+ * waiting on that message, she lists what's still open; if the client wrote since, or the conversation moved on,
+ * nothing happens and nothing is read from the CRM.
+ */
+export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, token: string, now: Date): Promise<'listed' | 'stale'> {
+    const c = await deps.load(phone);
+    const followOn = c?.resume.followOn;
+    if (!c || !followOn || followOn.waiting !== token) return 'stale';
+    let last: string | undefined;
+    const ports = deps.ports(c.requestId, (text) => { last = text; });
+    const r = await followOnTurn(ports, { phone, requestId: c.requestId, signUpLink: deps.signUpLink }, followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
+    c.resume = { followOn: r.state, pending: null };
+    if (last !== undefined) c.lastSent = last;
+    await deps.save(phone, c);
+    return 'listed';
 }
 
 /** The client's report as Claude reads it for the form: their own messages, then the facts they confirmed. */

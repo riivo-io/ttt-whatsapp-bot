@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 5bddb94). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit 78a9547). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830 (claims on Tina): Claude reads one WhatsApp message from a client who has an open claim and says what it
 // means for resume.ts (a ResumeMessage). It is the follow-on's half of understand.ts: TTTFG-5176 and TTTFG-5184 left
@@ -17,11 +17,15 @@
 // something the client already told her. reportedAnswers() does the same once, when the claim opens, over what the
 // client said while reporting it.
 //
+// When Tina asked a batch (followon.ts, several questions in one numbered message), Claude returns a value for each
+// batch question the message answers (in otherAnswers, like the others) and lists the ones the client says they don't
+// know (dontKnow). Each value is checked against its own question, and the reading is a { kind: 'batch' } input.
+//
 // Pure, apart from the model port. No zod, as understand.ts.
 import type { QuestionItem } from './contracts';
 import { applies, formItems, missingItems, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY, type ClaimFacts } from './progress';
 import type { ClaimAnswers } from './contracts';
-import { ADDRESS_KEY, addressItem, BARE_NO, type ClientFile, type FollowOnPorts, type OtherAnswer, type StoredClaimForm } from './followon';
+import { ADDRESS_KEY, addressItem, BARE_NO, batchLines, type ClientFile, type FollowOnPorts, type OtherAnswer, type StoredClaimForm } from './followon';
 import type { OpenClaim, OpenClaimsPort, Pending, ResumeMessage, ResumeState } from './resume';
 import { CLAIM_TYPES, sastParts, type ClaimType, type Facts } from './walkthrough';
 
@@ -43,7 +47,7 @@ export const REPLY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['kind', 'valueText', 'valueNumber', 'valueBool', 'sapsCaseNumber', 'sapsStation', 'differentIncident', 'chosenClaim',
-    'yesNo', 'wantsNewClaim', 'forItem', 'claimType', 'description', 'incidentDate', 'place', 'otherAnswers', 'corrections'],
+    'yesNo', 'wantsNewClaim', 'forItem', 'claimType', 'description', 'incidentDate', 'place', 'otherAnswers', 'corrections', 'dontKnow'],
   properties: {
     kind: { type: 'string', enum: [...KINDS] },
     valueText: nullable('string'),
@@ -62,6 +66,8 @@ export const REPLY_SCHEMA = {
     place: nullable('string'),
     otherAnswers: { type: 'array', items: OTHER_ANSWER },
     corrections: { type: 'array', items: OTHER_ANSWER },
+    /** TTTFG-4830: keys of batch questions the client says they don't know (empty when Tina asked one question). */
+    dontKnow: { type: 'array', items: { type: 'string' } },
   },
 } as const;
 
@@ -73,6 +79,11 @@ export interface ReplyContext {
   pending: Pending | null;
   /** The item Tina asked last on the claim being followed (a form question, an evidence item or a SAPS item). */
   asking?: QuestionItem;
+  /**
+   * TTTFG-4830: the questions Tina asked together, in the order she numbered them (`asking` is the first). Set only
+   * when there are two or more of them still open.
+   */
+  batch?: QuestionItem[];
   /** Tina's SAPS step is open (case number and station are read as `saps`). */
   sapsStep?: boolean;
   /** Evidence items still missing on that claim: what a file could be. */
@@ -84,6 +95,28 @@ export interface ReplyContext {
   /** Tina's last message, as the client saw it. */
   lastSent?: string;
 }
+
+/** TTTFG-4830: Tina asked several numbered questions in one message. */
+const BATCH_HELP = `Tina asked several numbered questions in one message (<tina_asked>). <batch_questions> has each one's key
+and answer type, numbered as Tina numbered them. Clients answer them in one message or over several, by number or not,
+in any order: this message may answer all of them, some of them or none.
+- For every question in <batch_questions> the message answers, add {key, valueText, valueNumber, valueBool} to
+  otherAnswers, the same way as for <other_open_questions>. Leave valueText, valueNumber and valueBool at the top level
+  null.
+- dontKnow: the keys of the questions in <batch_questions> the client says they don't know, aren't sure of, don't have
+  or will have to find out ("no idea about 3", "I'll have to check the account number"). Never a question they answered.
+- A question marked [answered] already has an answer from an earlier message: a new value for it is a correction (in
+  corrections), never in otherAnswers.
+- A question that starts "If yes to N" or "If no to N" applies only after that answer: fill it only when the client
+  answered it.
+- A question that starts "Apart from the one(s) you've told me about" asks whether there is ANOTHER one: true only when
+  the client clearly says there is one more besides those.
+- A short "no", "none", "nothing" or "nobody" answers a yes/no question, or a question about whether something exists or
+  happened (or one that says to answer "no" or "none"). It never answers a question asking for details (a name, number,
+  make, model or description). A message that is only "yes" or "no" answers the batch's yes/no question when it has
+  exactly one; when it has more than one, it answers none of them.
+- kind: "value" when the message answers, or says "don't know" to, at least one question in <batch_questions>;
+  "unparsed" when it does neither.`;
 
 const claimLine = (c: OpenClaim, i: number) => `${i + 1}. ${c.claimType} claim ${c.reference}, incident on ${sastParts(c.incidentAt).date}`;
 
@@ -97,6 +130,7 @@ function askingHelp(ctx: ReplyContext): string {
     return 'Tina asked for the SAPS (police) case number and/or the police station. Use kind "saps" with sapsCaseNumber and '
       + 'sapsStation as the client gave them. Use kind "not-yet" when the client has no case number yet or hasn\'t reported it.';
   }
+  if (ctx.batch && ctx.batch.length > 1) return BATCH_HELP;
   const item = ctx.asking;
   if (!item) return 'Tina has no question open. Use kind "unparsed" unless the client gives a SAPS case number (kind "saps").';
   if (item.kind === 'evidence') {
@@ -151,7 +185,7 @@ Also:
   message clearly answers, add {key, valueText, valueNumber, valueBool} with the value in the field its type needs
   (text and date in valueText, a date as YYYY-MM-DD; number in valueNumber; yes/no in valueBool; choice in valueText
   as one of the listed choices). Leave the other two null. Only questions the client really answered; an empty list
-  is normal. A yes/no or a choice only when the client said it in so many words, never from what usually happens. Never put the question Tina asked here: that goes in the main fields.
+  is normal. A yes/no or a choice only when the client said it in so many words, never from what usually happens. When Tina asked one question, never put it here: that goes in the main fields.
 - corrections: when the message changes or takes back an earlier answer in <earlier_answers> ("actually no, there was
   no other car", "sorry, the registration is CA 555"), add {key, valueText, valueNumber, valueBool} with the new value
   for that question, in the same fields as otherAnswers. A client who says there was no other one after answering yes
@@ -166,16 +200,26 @@ Rules:
   const user = `<today>${today.date} ${today.time}</today>
 <open_claims>\n${ctx.open.map(claimLine).join('\n') || 'none'}\n</open_claims>
 <missing_evidence>\n${missing}\n</missing_evidence>
-<other_open_questions>\n${(ctx.openQuestions ?? []).map(questionLine).join('\n') || 'none'}\n</other_open_questions>
+${batchBlock(ctx)}<other_open_questions>\n${(ctx.openQuestions ?? []).map(questionLine).join('\n') || 'none'}\n</other_open_questions>
 <earlier_answers>\n${(ctx.answered ?? []).map((a) => `${questionLine(a.item)} -> ${JSON.stringify(a.value)}`).join('\n') || 'none'}\n</earlier_answers>
 <tina_asked>${ctx.lastSent ?? ctx.asking?.prompt ?? ''}</tina_asked>
 ${file ? `<file name="${file.fileName}" type="${file.media}"/>\n` : ''}<client_message>${text}</client_message>`;
   return { system, user };
 }
 
+/** A question's answer type as Claude sees it, with the choices. */
+const typeOf = (i: QuestionItem) => `${i.answerType}${i.answerType === 'choice' && i.choices?.length ? `: ${i.choices.map((c) => `"${c}"`).join(', ')}` : ''}`;
 /** One question as Claude sees it: key, type (with the choices) and the words Tina would ask. */
-const questionLine = (i: QuestionItem) =>
-  `${i.key} (${i.answerType}${i.answerType === 'choice' && i.choices?.length ? `: ${i.choices.map((c) => `"${c}"`).join(', ')}` : ''}): ${i.prompt}`;
+const questionLine = (i: QuestionItem) => `${i.key} (${typeOf(i)}): ${i.prompt}`;
+
+/** TTTFG-4830: the batch in Tina's numbering and words, the questions answered since her message marked. */
+function batchBlock(ctx: ReplyContext): string {
+  if (!ctx.batch || ctx.batch.length < 2) return '';
+  const answered = new Set((ctx.answered ?? []).map((a) => a.item.key));
+  const words = batchLines(ctx.batch);
+  const lines = ctx.batch.map((i, n) => `${n + 1}. ${i.key} (${typeOf(i)}): ${words[n]}${answered.has(i.key) ? ' [answered]' : ''}`);
+  return `<batch_questions>\n${lines.join('\n')}\n</batch_questions>\n`;
+}
 
 type Raw = { [K in (typeof REPLY_SCHEMA)['required'][number]]?: unknown };
 const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
@@ -219,22 +263,38 @@ export function toResumeMessage(raw: unknown, ctx: ReplyContext, file: ClientFil
   const station = str(r.sapsStation);
 
   let understood: ResumeMessage['understood'] = { kind: 'unparsed', wamid };
-  if (file) understood = { kind: 'file', file, wamid };
-  else if (r.kind === 'not-yet') understood = { kind: 'not-yet', wamid };
-  else if (ctx.sapsStep && (caseNumber || station)) understood = { kind: 'saps', caseNumber, station, wamid };
-  else if (ctx.sapsStep && r.kind === 'value' && str(r.valueText)) understood = { kind: 'value', value: str(r.valueText)!, wamid };
-  else if (r.kind === 'value' && ctx.asking && !ctx.sapsStep) {
-    const value = valueFor(ctx.asking, r, now);
-    if (value !== undefined) understood = { kind: 'value', value, wamid };
-  } else if (caseNumber) understood = { kind: 'saps', caseNumber, station, wamid };
+  const batch = !file && !ctx.sapsStep && ctx.batch && ctx.batch.length > 1 ? ctx.batch : undefined;
+  if (batch) {
+    // TTTFG-4830: a value for each batch question the message answers (never from the top-level fields: a value there
+    // can't be told apart from another question's), and the ones the client doesn't know.
+    const inBatch = (key: string) => batch.some((b) => b.key === key);
+    const others = otherAnswersOf(r.otherAnswers, [...batch, ...(ctx.openQuestions ?? [])], now);
+    const answers = others.filter((o) => inBatch(o.key));
+    const dontKnow = [...new Set((Array.isArray(r.dontKnow) ? r.dontKnow : [])
+      .filter((k): k is string => typeof k === 'string' && inBatch(k) && !answers.some((a) => a.key === k)))];
+    understood = !answers.length && !dontKnow.length && caseNumber
+      ? { kind: 'saps', caseNumber, station, wamid }
+      : { kind: 'batch', answers, dontKnow, wamid };
+    const also = others.filter((o) => !inBatch(o.key));
+    if (also.length) understood = { ...understood, also };
+  } else {
+    if (file) understood = { kind: 'file', file, wamid };
+    else if (r.kind === 'not-yet') understood = { kind: 'not-yet', wamid };
+    else if (ctx.sapsStep && (caseNumber || station)) understood = { kind: 'saps', caseNumber, station, wamid };
+    else if (ctx.sapsStep && r.kind === 'value' && str(r.valueText)) understood = { kind: 'value', value: str(r.valueText)!, wamid };
+    else if (r.kind === 'value' && ctx.asking && !ctx.sapsStep) {
+      const value = valueFor(ctx.asking, r, now);
+      if (value !== undefined) understood = { kind: 'value', value, wamid };
+    } else if (caseNumber) understood = { kind: 'saps', caseNumber, station, wamid };
 
-  // TTTFG-4830: the other questions the message answered, each checked against its own question. A value Claude put
-  // there for the question Tina asked counts as the answer to it.
-  const others = otherAnswersOf(r.otherAnswers, [...(ctx.openQuestions ?? []), ...(ctx.asking && !ctx.sapsStep ? [ctx.asking] : [])], now);
-  const forAsked = others.find((o) => o.key === ctx.asking?.key);
-  if (forAsked && understood.kind === 'unparsed') understood = { kind: 'value', value: forAsked.value, wamid };
-  const also = others.filter((o) => o.key !== ctx.asking?.key);
-  if (also.length && understood.kind !== 'file') understood = { ...understood, also };
+    // TTTFG-4830: the other questions the message answered, each checked against its own question. A value Claude put
+    // there for the question Tina asked counts as the answer to it.
+    const others = otherAnswersOf(r.otherAnswers, [...(ctx.openQuestions ?? []), ...(ctx.asking && !ctx.sapsStep ? [ctx.asking] : [])], now);
+    const forAsked = others.find((o) => o.key === ctx.asking?.key);
+    if (forAsked && understood.kind === 'unparsed') understood = { kind: 'value', value: forAsked.value, wamid };
+    const also = others.filter((o) => o.key !== ctx.asking?.key);
+    if (also.length && understood.kind !== 'file') understood = { ...understood, also };
+  }
   const corrections = otherAnswersOf(r.corrections, (ctx.answered ?? []).map((a) => a.item), now);
   if (corrections.length && understood.kind !== 'file') understood = { ...understood, corrections };
 
@@ -319,11 +379,15 @@ export async function replyContext(
   const st = state.followOn;
   if (st && st.claimId === followed) {
     if (st.phase === 'saps') ctx.sapsStep = true;
+    const list = formItems(form, claim.answers, facts, st.sapsRequired);
     ctx.asking = st.asking === SAPS_CASE_KEY || st.asking === SAPS_STATION_KEY
       ? SAPS_ITEMS.find((i) => i.key === st.asking)
       : st.phase === 'address' ? addressItem(claim, st.asking)
-      : formItems(form, claim.answers, facts, st.sapsRequired).find((i) => i.key === st.asking);
-    ctx.openQuestions = openQuestions(form, claim.answers, facts, st.sapsRequired, st.asking);
+      : list.find((i) => i.key === st.asking);
+    // TTTFG-4830: the batch as Tina numbered it, answered questions included (the client's numbers still count).
+    const batch = st.phase === 'items' ? (st.batch ?? []).map((k) => list.find((i) => i.key === k)).filter((i): i is QuestionItem => !!i) : [];
+    if (batch.length > 1) ctx.batch = batch;
+    ctx.openQuestions = openQuestions(form, claim.answers, facts, st.sapsRequired, st.batch ?? st.asking);
     // TTTFG-4830: "No, I live at 5 Main Road, Claremont now" answers the address check and gives the address.
     if (st.phase === 'address' && st.asking !== ADDRESS_KEY) ctx.openQuestions.push(addressItem(claim, ADDRESS_KEY)!);
     ctx.answered = earlierAnswers(form, claim.answers, facts, st.sapsRequired, st.asking);
@@ -349,9 +413,12 @@ export function earlierAnswers(
  * answer are included as if that answer opened them ("yes, I owe Wesbank" answers both whether money is owed and to
  * whom): followon.ts saves such a value only once its question really applies.
  */
-export function openQuestions(form: StoredClaimForm, answers: ClaimAnswers, facts: ClaimFacts, sapsRequired?: boolean, asking?: string): QuestionItem[] {
+export function openQuestions(
+  form: StoredClaimForm, answers: ClaimAnswers, facts: ClaimFacts, sapsRequired?: boolean, asking?: string | readonly string[],
+): QuestionItem[] {
   const could = opening(form, answers);
-  return formItems(form, could, facts, sapsRequired).filter((i) => i.kind === 'question' && i.key !== asking && !i.key.includes('.more.')
+  const asked = new Set(typeof asking === 'string' ? [asking] : asking ?? []);
+  return formItems(form, could, facts, sapsRequired).filter((i) => i.kind === 'question' && !asked.has(i.key) && !i.key.includes('.more.')
     && i.key !== SAPS_CASE_KEY && i.key !== SAPS_STATION_KEY && applies(i, could, facts)
     && (!answers[i.key] || answers[i.key].status === 'not-yet'));
 }

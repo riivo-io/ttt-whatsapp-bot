@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 5bddb94). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 78a9547). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -133,7 +133,9 @@ export function formItems(form: ClaimForm, answers: ClaimAnswers, facts?: ClaimF
       const more = moreKey(g.key, n);
       // TTTFG-4830: said with what's already given, so "yes" can't be read as the one the client just described.
       const prompt = `Apart from ${n === 1 ? 'the one' : `the ${n}`} you've told me about, ${g.more.charAt(0).toLowerCase()}${g.more.slice(1)}`;
-      out.push({ key: more, kind: 'question', prompt, answerType: 'yes/no', required: true, group: g.key });
+      // TTTFG-4830 (batches): asked with the entry it follows, so it takes the section of the entry's last question.
+      const section = members.at(-1)?.section;
+      out.push({ key: more, kind: 'question', prompt, answerType: 'yes/no', required: true, group: g.key, ...(section ? { section } : {}) });
       const k = known(more, answers, facts);
       if (!k || k.brokerToConfirm || k.value !== true) break;
     }
@@ -169,6 +171,61 @@ export function nextItem(form: ClaimForm, answers: ClaimAnswers, evidence: Recei
     return of.find((i) => !deferred(i.key, answers)) ?? of[0];
   };
   return pick('question') ?? pick('evidence') ?? null;
+}
+
+/** TTTFG-4830 (batches): at most this many questions in one message. */
+export const BATCH_MAX = 5;
+
+/** A yes/no condition ("If yes to 2"): the only kind of question that is asked ahead of the answer it depends on. */
+const yesNoCondition = (c: Condition | undefined): c is Condition & { equals: boolean } => !!c && typeof c.equals === 'boolean';
+
+/**
+ * TTTFG-4830 (batches): the questions to ask together in one message, in the order Tina numbers them. The first is
+ * nextItem(). When it is a question with a `section`, the open questions after it in the same section join it, in the
+ * list's order, up to BATCH_MAX:
+ * - a question that applies only after a yes or a no to a question in the batch ("If no to 4: whose name is the car
+ *   registered in?") goes straight after that question. A question brings these only when all of them fit, or, when
+ *   they could never fit in one message, as many as fit. The rest are asked once the answer is in;
+ * - a question that hangs on a choice ("If it was a vehicle: …") waits for the answer, so a client is never shown a
+ *   branch that may not be theirs;
+ * - the batch ends at an open question of another section or at an evidence item. A question the client said "not yet"
+ *   to is left out (nextItem() asks it after everything else).
+ * A batch of one is asked as before. Pure, like the rest of this file.
+ */
+export function nextBatch(form: ClaimForm, answers: ClaimAnswers, evidence: ReceivedEvidence, o: ProgressOptions = {}): QuestionItem[] {
+  const first = nextItem(form, answers, evidence, o);
+  if (!first) return [];
+  if (first.kind !== 'question' || !first.section || deferred(first.key, answers)) return [first];
+  const skip = new Set(o.skip ?? []);
+  const list = formItems(form, answers, o.facts, o.sapsRequired);
+  const isOpen = (i: QuestionItem) => i.kind === 'question' && !skip.has(i.key) && !deferred(i.key, answers) && !done(i, answers, evidence, o.facts);
+  // The questions waiting on a yes or a no to `parent` (and on their own yes or no), in the list's order.
+  const family = (parent: QuestionItem): QuestionItem[] => {
+    const keys = new Set([parent.key]);
+    const out: QuestionItem[] = [];
+    for (const i of list.slice(list.indexOf(parent) + 1)) {
+      if (i.section !== first.section || !isOpen(i) || !yesNoCondition(i.onlyIf) || !keys.has(i.onlyIf.key)) continue;
+      out.push(i);
+      keys.add(i.key);
+    }
+    return out;
+  };
+  const batch: QuestionItem[] = [];
+  const placed = new Set<string>();
+  for (const item of list.slice(list.findIndex((i) => i.key === first.key))) {
+    if (batch.length >= BATCH_MAX) break;
+    if (placed.has(item.key) || !isOpen(item)) continue;
+    if (!applies(item, answers, o.facts)) continue; // waits for an answer (placed with its question, or asked later)
+    if (item.section !== first.section) break;
+    const waiting = family(item);
+    const room = BATCH_MAX - batch.length - 1;
+    if (waiting.length > room && batch.length && waiting.length < BATCH_MAX) break; // they fit in the next message
+    for (const i of [item, ...waiting.slice(0, room)]) {
+      batch.push(i);
+      placed.add(i.key);
+    }
+  }
+  return batch;
 }
 
 /** TTTFG-5254 step 14: the required items still missing (skipped ones included). Empty means evidence complete. */
