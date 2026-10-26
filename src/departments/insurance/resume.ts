@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 5bddb94). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 78a9547). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -24,7 +24,7 @@
 // required question to the broker.
 import { claimTurn, sendText, type ClaimPorts, type Conversation } from './claim';
 import {
-  CLAIM_SETTINGS_DEFAULTS, followOnTurn, list, resumeMissing, type ClaimSettings, type ClaimStatus, type FollowOnInput, type FollowOnPorts,
+  CLAIM_SETTINGS_DEFAULTS, followOnTurn, list, resumeMissing, type ClaimSettings, type ClaimStatus, type ClientReply, type FollowOnPorts,
   type FollowOnState, type ResumeFile, type StoredClaimForm,
 } from './followon';
 import type { QuestionItem } from './contracts';
@@ -68,7 +68,7 @@ export const RESUME_SETTINGS_DEFAULTS = { resumeAfterHours: 12 } as const;
 /** What Claude understood from the client's message. Code decides what happens next. */
 export interface ResumeMessage {
   /** The message as the follow-on reads it: a value for the item Tina asked last, a file, "not yet", or unparsed. */
-  understood: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>;
+  understood: ClientReply;
   /** Claude: the message is about an incident other than the open claims (a different date, place or type). */
   differentIncident: boolean;
   /** Claude, for "which claim?": the claim the client chose, by id or by its number in the question (1, 2, …). */
@@ -228,7 +228,7 @@ const SAPS_NAMES: Record<string, string> = {
 
 /**
  * The names in the welcome-back list. Documents and photos are named, because those are what the client has to go
- * and find. The form's other questions are counted, not named: Tina asks them one by one straight after, and a
+ * and find. The form's other questions are counted, not named: Tina asks them straight after, and a
  * Momentum form has over a hundred, whose keys don't read as names.
  */
 export function missingNames(items: readonly QuestionItem[]): string[] {

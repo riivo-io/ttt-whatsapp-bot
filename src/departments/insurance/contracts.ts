@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 5bddb94). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 78a9547). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -59,6 +59,12 @@ export const QuestionItemSchema = z.object({
   onlyIf: ConditionSchema.optional(),
   /** The repeating group this question belongs to (see QuestionGroup). */
   group: z.string().min(1).optional(),
+  /**
+   * TTTFG-4830 (batches): the topic, in words that follow "A few questions about" ("your car", "the other car"). Tina
+   * asks the open questions of one section together, up to five in a numbered list, in the list's order. A question
+   * without a section is asked on its own, as before.
+   */
+  section: z.string().min(1).optional(),
 });
 export type QuestionItem = z.infer<typeof QuestionItemSchema>;
 

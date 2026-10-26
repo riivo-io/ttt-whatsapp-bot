@@ -9,9 +9,13 @@
  *   CLAIMS_DEMO_DATAVERSE_CLIENT_ID / _CLIENT_SECRET / _TENANT_ID
  *                                  an app registration that is an application user in that CRM (default: DYNAMICS_*)
  *   CLAIMS_DEMO_SHAREPOINT_SITE    default tttfinancialgroup.sharepoint.com:/sites/TTTDevelopment (Graph: GRAPH_*)
+ *   CLAIMS_BATCH_QUIET_MS          TTTFG-4830: how long Tina waits, after a reply that answers part of her numbered
+ *                                  questions, before she lists what's still open (default 45000; 0: lists it at once)
  * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql).
  */
-import { claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation } from '../domain/claimsDemoHost';
+import {
+    batchQuietMs, claimsDemoBatchCheck, claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation,
+} from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
 import type { ClientFile, ResumeFile } from '../departments/insurance/followon';
 import type { IntentModel } from '../departments/insurance/intent';
@@ -23,6 +27,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import {
     cachedDv, dataverseCall, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type CrmStats, type DemoChannels, type Graph,
 } from './claimsDemoWiring';
+import { enqueueClaimsBatchCheck } from '../queue/whatsappQueue';
+import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService } from './supabase.service';
 
@@ -142,6 +148,10 @@ function deps(phone: string, contactId: string, stats: CrmStats): ClaimsDemoDeps
         withdrawOpenClaims: (contactId) => withdrawOpenClaims(ch.dv, contactId),
         say: (phone, text) => ch.sendText(phone, text),
         signUpLink: SIGN_UP_LINK,
+        ...(batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS) > 0
+            ? { scheduleBatchCheck: (to: string, token: string) =>
+                enqueueClaimsBatchCheck(to, token, batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
+            : {}),
     };
 }
 export interface DemoInbound {
@@ -149,6 +159,22 @@ export interface DemoInbound {
     text: string;
     document?: { id: string; filename: string; mimeType: string };
     wamid?: string;
+}
+
+/**
+ * TTTFG-4830: the check scheduled after a part-answered batch of claim questions (whatsappProcessor routes it here).
+ * Never throws: a check that fails leaves Tina waiting, and the client's next message carries on as usual.
+ */
+export async function handleClaimsDemoBatchCheck(phone: string, token: string): Promise<void> {
+    const contactId = claimsDemoContact(phone);
+    if (!contactId || !token) return;
+    const stats = newCrmStats();
+    try {
+        const outcome = await claimsDemoBatchCheck(deps(phone, contactId, stats), phone, token, new Date());
+        console.log(`[ClaimsDemo] ${phone}: batch check ${outcome}; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes`);
+    } catch (e) {
+        console.error(`[ClaimsDemo] ${phone} batch check failed:`, (e as Error).message, (e as Error).stack);
+    }
 }
 
 /**
