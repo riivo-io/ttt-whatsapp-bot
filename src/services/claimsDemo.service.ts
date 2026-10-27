@@ -30,7 +30,7 @@
  * contact; a voice note with its transcript and the recording attached (writeDemoLog).
  */
 import {
-    batchQuietMs, claimsDemoBatchCheck, filesQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
+    batchQuietMs, claimsDemoBatchCheck, filesQuietMs, optionalQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
     type DemoConversation, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
@@ -258,8 +258,10 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
             ? {}
             : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint, log) }),
         ...(batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS) > 0
-            ? { scheduleBatchCheck: (to: string, token: string, what: 'answers' | 'files') => enqueueClaimsBatchCheck(to, token,
-                what === 'files' ? filesQuietMs(process.env.CLAIMS_FILES_QUIET_MS) : batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
+            ? { scheduleBatchCheck: (to: string, token: string, what: 'answers' | 'files' | 'optional') => enqueueClaimsBatchCheck(to, token,
+                what === 'files' ? filesQuietMs(process.env.CLAIMS_FILES_QUIET_MS)
+                : what === 'optional' ? optionalQuietMs(process.env.CLAIMS_OPTIONAL_QUIET_MS)
+                : batchQuietMs(process.env.CLAIMS_BATCH_QUIET_MS), getActivePhoneNumberId() || null) }
             : {}),
     };
 }

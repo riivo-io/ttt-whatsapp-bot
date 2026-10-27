@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
-    filesQuietMs, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
+    filesQuietMs, optionalQuietMs, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
 } from '../../src/domain/claimsDemoHost';
 import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
@@ -142,7 +142,7 @@ test('a hello with no open claim gets the demo hello, and opens nothing', async 
     assert.equal(w.created.length, 0);
 });
 
-test('the whole claim: walkthrough, the form after the last question, then the photo; nothing asked twice', async () => {
+test('the whole claim: walkthrough, the questions, the photo, then the form to sign at the end; nothing asked twice', async () => {
     const w = world();
     let t = DAY1;
     assert.equal(await say(w, 'Someone drove into the back of my car at the Claremont robot', t), 'started');
@@ -165,7 +165,7 @@ test('the whole claim: walkthrough, the form after the last question, then the p
 
     w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
     assert.equal(await say(w, 'Me, Adriaan', (t = tick(t, 2))), 'follow-on');
-    assert.deepEqual(w.signatureCalls, ['claim-1']); // the form, after the last question and before any evidence
+    assert.deepEqual(w.signatureCalls, []); // TTTFG-5196: the form waits for the evidence
     assert.equal(w.rows[0].answers.driverName?.value, 'Me, Adriaan');
     assert.match(w.since().join('\n'), /Please send me photos of the damage/i);
 
@@ -178,7 +178,7 @@ test('the whole claim: walkthrough, the form after the last question, then the p
     assert.equal(await say(w, 'Yes', (t = tick(t, 1))), 'follow-on');
     assert.match(w.since()[0], /^Thanks, I've got the photos of the damage\./);
     assert.equal(w.store.get(PHONE)?.resume.followOn, null); // nothing more to ask
-    assert.equal(w.signatureCalls.length, 1);
+    assert.deepEqual(w.signatureCalls, ['claim-1']); // the form, once, at the end
 });
 
 test('a photo sent during the walkthrough is kept and filed when the claim opens', async () => {
@@ -508,5 +508,41 @@ test('TTTFG-4830: the front and back of the licence: both filed as the licence, 
     assert.deepEqual(w.since(), ["Thanks, I've got the photo of the driver's licence.", "Please send me a photo of the driver's ID document or ID card."]);
     assert.equal(filesQuietMs(undefined), 15_000);
     assert.equal(filesQuietMs('5000'), 5_000);
+});
+
+test('TTTFG-5196: quiet on the optional item after the last required one: the next check is scheduled, and it sends the link', async () => {
+    const FORM: StoredClaimForm = {
+        ...MOTOR, id: 'cf-optional',
+        questionList: [
+            q('driverName', 'Who was driving the vehicle?'),
+            q('driversLicence', "A photo of the driver's licence.", { kind: 'evidence', answerType: 'photo', name: "the photo of the driver's licence" }),
+            q('dashcam', 'Any dashcam video, if you have one.', { kind: 'evidence', answerType: 'video', required: false, name: 'the dashcam video' }),
+        ],
+    };
+    const w = world({ form: FORM });
+    const scheduled: [string, string, string][] = [];
+    w.deps.scheduleBatchCheck = async (phone, token, what) => void scheduled.push([phone, token, what]);
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    w.replies.push({ kind: 'value', valueText: 'Me' });
+    await say(w, 'Me', (t = tick(t, 1)));
+    w.replies.push({});
+    await say(w, '', (t = tick(t, 1)), photo);
+    assert.deepEqual(scheduled.map(([, , what]) => what), ['files']);
+
+    // The photo's quiet spell: the licence is in, the dashcam video is asked, and the next check (a longer one) is set.
+    assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, scheduled[0][1], tick(t, 1)), 'listed');
+    assert.match(w.since().at(-1)!, /dashcam video/);
+    assert.deepEqual(scheduled.map(([, , what]) => what), ['files', 'optional']);
+    assert.deepEqual(w.signatureCalls, []);
+
+    // Nothing from the client: the claim ends without the video, with the link.
+    assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, scheduled[1][1], tick(t, 11)), 'listed');
+    assert.deepEqual(w.signatureCalls, ['claim-1']);
+    assert.deepEqual(w.since(), ['If you find the dashcam video later, you can still send it here.', "That's everything the insurer needs for now. Sipho will check your claim next."]);
+    assert.equal(w.store.get(PHONE)?.resume.followOn, null);
+    assert.equal(optionalQuietMs(undefined), 600_000);
 });
 

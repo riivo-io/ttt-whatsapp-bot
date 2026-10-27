@@ -62,6 +62,15 @@ export function batchQuietMs(raw: string | undefined, fallback = 45_000): number
 export const filesQuietMs = (raw: string | undefined): number => batchQuietMs(raw, 15_000);
 
 /**
+ * TTTFG-5196: CLAIMS_OPTIONAL_QUIET_MS, how long Tina waits on an optional item, with nothing required missing, before
+ * she ends the claim without it and sends the signing link. Default 10 minutes: long enough to find a document.
+ */
+export const optionalQuietMs = (raw: string | undefined): number => batchQuietMs(raw, 600_000);
+
+/** TTTFG-5196: which quiet spell the follow-on is waiting on (FollowOnState.waitingFor). */
+export const quietSpell = (waitingFor: 'files' | 'optional' | undefined): 'answers' | 'files' | 'optional' => waitingFor ?? 'answers';
+
+/**
  * TTTFG-5212: the demo numbers as WhatsApp numbers (27 and nine digits, as Meta sends them and the conversation is kept
  * under), for the morning reminder, which starts from the list rather than from a message.
  */
@@ -131,9 +140,10 @@ export interface ClaimsDemoDeps {
      * TTTFG-4830: calls claimsDemoBatchCheck(phone, token) after a quiet spell, on the phone's own queue, so it comes
      * after anything the client sends meanwhile. With it, Tina waits for the rest of a part-answered batch of questions,
      * and for the rest of the photos for an evidence item (`what` 'files': a shorter spell); without it, she answers
-     * straight away.
+     * straight away. TTTFG-5196: `what` 'optional' (a longer spell): on an optional item with nothing required missing,
+     * the check ends the claim and the signing link goes out.
      */
-    scheduleBatchCheck?(phone: string, token: string, what: 'answers' | 'files'): Promise<void>;
+    scheduleBatchCheck?(phone: string, token: string, what: 'answers' | 'files' | 'optional'): Promise<void>;
     /** TTTFG-5212: when the claim's last morning reminder went out (its agent action). Absent: never. */
     lastReminderOn?(claimId: string): Promise<string | null>;
     /**
@@ -275,7 +285,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         const token = r.state.followOn?.waiting;
         if (token && deps.scheduleBatchCheck) {
             try {
-                await deps.scheduleBatchCheck(m.phone, token, r.state.followOn?.waitingFor === 'files' ? 'files' : 'answers');
+                await deps.scheduleBatchCheck(m.phone, token, quietSpell(r.state.followOn?.waitingFor));
             } catch (e) {
                 console.warn('[ClaimsDemo] Scheduling the batch check failed; listing what is open now:', (e as Error).message);
                 const listed = await followOnTurn(ports, conv(), r.state.followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
@@ -319,7 +329,8 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
 /**
  * TTTFG-4830: the quiet spell after a part-answered batch of questions is over (scheduleBatchCheck). If Tina is still
  * waiting on that message, she lists what's still open; if the client wrote since, or the conversation moved on,
- * nothing happens and nothing is read from the CRM.
+ * nothing happens and nothing is read from the CRM. TTTFG-5196: when the check leaves Tina waiting again (the photos
+ * stopped coming and she asked an optional item), the next check is scheduled; if it can't be, it runs now.
  */
 export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, token: string, now: Date): Promise<'listed' | 'stale'> {
     const c = await deps.load(phone);
@@ -327,7 +338,18 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
     if (!c || !followOn || followOn.waiting !== token) return 'stale';
     let last: string | undefined;
     const ports = deps.ports(c.requestId, (text) => { last = text; });
-    const r = await followOnTurn(ports, { phone, requestId: c.requestId, signUpLink: deps.signUpLink }, followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
+    const conversation = { phone, requestId: c.requestId, signUpLink: deps.signUpLink };
+    let r = await followOnTurn(ports, conversation, followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
+    const again = r.state?.waiting;
+    if (again && again !== token) {
+        try {
+            if (!deps.scheduleBatchCheck) throw new Error('no scheduler');
+            await deps.scheduleBatchCheck(phone, again, quietSpell(r.state?.waitingFor));
+        } catch (e) {
+            console.warn('[ClaimsDemo] Scheduling the next check failed; running it now:', (e as Error).message);
+            r = await followOnTurn(ports, conversation, r.state, { kind: 'nudge', wamid: again }, now, { waitForMore: true });
+        }
+    }
     c.resume = { followOn: r.state, pending: null };
     if (last !== undefined) c.lastSent = last;
     await deps.save(phone, c);

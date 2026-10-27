@@ -1,11 +1,16 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit da163a4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit fb95cdd). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
 // with its own state machine, keyed by claim id, and its own turn function in the same style.
 //
 // Order, all in code (TTTFG-5254 step 3): SAPS step (when needed) -> notification deadline note (when needed) -> duty
-// of disclosure -> the form's questions -> the signing step -> evidence items, one at a time -> complete. Claude only
+// of disclosure -> the form's questions -> evidence items, one at a time -> "Things we still need from you" until every
+// required item is in -> complete: evidence complete, the closing line, the signing link. TTTFG-5196 (27 Oct 2026)
+// moved the signing step from after the questions to the end: the form is filled once, with every answer on it (the
+// chased answers and the SAPS case number come in on the list), and the client gets one link, as the last message. A
+// client who goes quiet on an optional item, with nothing required missing, still gets it: after a quiet spell the
+// optional items left are "not yet" and the claim ends (optionalQuiet). Claude only
 // turns the client's reply into a typed value (FollowOnInput) and may rephrase a question (the `phrase` port). It never
 // decides what comes next, and it writes none of the fixed texts.
 //
@@ -100,6 +105,8 @@ export interface FollowOnClaim {
    * none (Tina asks for it). Absent: the host didn't read it, so there's no check.
    */
   contactAddress?: string | null;
+  /** riivo_claim.riivo_evidencecomplete: the end ran once, and the signing step with it. */
+  evidenceComplete?: boolean;
 }
 
 /** A file the client sent on WhatsApp. `media` comes from the WhatsApp message type. */
@@ -174,8 +181,11 @@ export interface FollowOnState {
   /**
    * TTTFG-4830: what Tina is `waiting` for: 'files' when files are coming in for the evidence item she asked (`asking`).
    * Every file sent belongs to it, and she answers once they stop coming (the host waits less long than for answers).
+   * TTTFG-5196: 'optional' when she asked an optional item and nothing required is missing: if the client stays quiet,
+   * the claim ends without the rest (optionalQuiet; the host waits longer than for answers). followOnTurn sets
+   * `waiting` for it on every turn that ends on such an item.
    */
-  waitingFor?: 'files';
+  waitingFor?: 'files' | 'optional';
   /**
    * TTTFG-4830: the evidence item of any number of files (photos of the scene) whose files Tina asked "Are those all of
    * them?" about. A yes takes her on; a no, or more files, keeps her on it.
@@ -417,8 +427,9 @@ export function accept(item: QuestionItem, v: string | number | boolean): string
 const moveOn = ({ waitingOn: _o, batch: _b, relisted: _r, waiting: _w, waitingFor: _f, confirming: _c, ...st }: FollowOnState): FollowOnState => st;
 
 /**
- * The next question (or batch of questions, TTTFG-4830) or evidence item, the signing step between them, and the end.
- * `thanks` (TTTFG-4830): the client just finished a batch, so the next question starts with "Thanks.".
+ * The next question (or batch of questions, TTTFG-4830) or evidence item, and the end: evidence complete, the signing
+ * step, the closing line. `thanks` (TTTFG-4830): the client just finished a batch, so the next question starts with
+ * "Thanks.".
  */
 function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thanks.', listLead: string = ALL_FOR_NOW): FollowOnState | null {
   // The SAPS keys belong to the SAPS step; the questions never ask them again.
@@ -439,22 +450,22 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
     out.push({ kind: 'ask', item: next, simpler: false, again: deferred(next.key, w.answers), lead });
     return kept;
   }
-  // TTTFG-5254 step 11: the last form question is answered. The form goes to sign before any evidence is asked.
-  if (!st.signingRequested) {
-    out.push({ kind: 'request-signature' });
-    st = { ...st, signingRequested: true };
-  }
+  const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
   if (next) {
     if (!st.evidenceStarted) {
       out.push({ kind: 'status', status: 'Awaiting client docs' });
       st = { ...st, evidenceStarted: true };
     }
     out.push({ kind: 'ask', item: next, simpler: false, again: deferred(next.key, w.answers), lead });
-    return { ...st, phase: 'items', asking: next.key, misses: 0 };
+    // TTTFG-5196: only optional items stand between the client and the link, so a quiet spell ends the claim.
+    const optionalOnly = !next.required && !missing.length && !st.signingRequested;
+    return { ...st, phase: 'items', asking: next.key, misses: 0, ...(optionalOnly ? { waitingFor: 'optional' as const } : {}) };
   }
-  const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
   if (!missing.length) {
+    // TTTFG-5196: every item is in or passed over. The form is filled now, with every answer on it, and its link is the
+    // last message: the closing line goes first, without its sign line (closingText: only for a link sent before).
     out.push({ kind: 'evidence-complete' }, { kind: 'closing' });
+    if (!st.signingRequested) out.push({ kind: 'request-signature' });
     return null;
   }
   // TTTFG-4830 (still need): the list, and the conversation stays on it.
@@ -738,6 +749,8 @@ function applyCorrections(
 
 const BEFORE_FORM: readonly ClaimStatus[] = ['FNOL logged', 'Cover verified'];
 const BEFORE_EVIDENCE: readonly ClaimStatus[] = [...BEFORE_FORM, 'Form sent'];
+/** The statuses before the pack is complete: the conversation still gets to the end, and the signing step with it. */
+const isOpenStage = (s: ClaimStatus) => [...BEFORE_EVIDENCE, 'Awaiting client docs'].includes(s);
 const isSaps = (key: string) => key === SAPS_CASE_KEY || key === SAPS_STATION_KEY;
 
 /**
@@ -780,8 +793,8 @@ export function resumeMissing(c: Ctx): QuestionItem[] {
  * - the intro (deadline note, duty of disclosure) went out if the claim holds a form answer or a document, or the
  *   caller says so (a stale follow-on state of the same claim). Otherwise it is sent (again), because the disclosure
  *   must come before the first form question;
- * - the signing step was asked for once no required form question is missing, or once the signature or the status
- *   says so (5192's re-fill makes a second call harmless, but it isn't made without reason);
+ * - the signing step was asked for once the signature status says so, or the claim is evidence complete (the two go
+ *   together, TTTFG-5196), or it is past the pack. Otherwise it runs at the end, as in a first conversation;
  * - the evidence stage has started once the status is past Form sent. Pack complete and Additional info requested are
  *   never set back to Awaiting client docs;
  * - "not yet" items from the earlier conversation are asked again: the client may have them now.
@@ -789,11 +802,10 @@ export function resumeMissing(c: Ctx): QuestionItem[] {
 export function resumeFollowOn(c: Ctx, introSent = false, skipped: readonly string[] = []): FollowOnState {
   const w = work(c.claim);
   const sapsRequired = resumedSaps(c);
-  const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired });
   const { status, signatureStatus } = c.claim;
   const st: FollowOnState = {
     claimId: c.claim.id, phase: 'items', asking: '', misses: 0, skipped: [...skipped], sapsRequired,
-    signingRequested: signatureStatus !== 'Not sent' || !BEFORE_FORM.includes(status) || !missing.some((i) => i.kind === 'question' && !isSaps(i.key)),
+    signingRequested: signatureStatus !== 'Not sent' || !!c.claim.evidenceComplete || !isOpenStage(status),
     evidenceStarted: !BEFORE_EVIDENCE.includes(status),
     introSent: introSent || !!c.claim.introSent || Object.keys(w.answers).some((k) => !isSaps(k)) || w.evidence.length > 0,
   };
@@ -1302,6 +1314,7 @@ function filesIn(c: Ctx, w: Work, st: FollowOnState, item: QuestionItem, out: Ou
 function nudged(c: Ctx, st: FollowOnState, wamid: string): Step {
   if (st.waiting !== wamid) return { state: st, out: [] };
   if (st.phase === 'still-need') return stillNeedNudged(c, st);
+  if (st.waitingFor === 'optional') return optionalQuiet(c, st);
   if (st.waitingFor === 'files') {
     // TTTFG-4830: the files for the evidence item have stopped coming: one answer about all of them.
     const w = work(c.claim);
@@ -1364,6 +1377,32 @@ function advanceStillNeed(
   out.push({ kind: 'still-missing', items: missing, lead: thanks ?? '' });
   return stillNeedState(c, st, missing);
 }
+
+/**
+ * TTTFG-5196: the client went quiet on an optional item (proceed's `waitingFor: 'optional'`), with nothing required
+ * missing. The optional items left are kept as "not yet", as if the client had said so to each (a later conversation
+ * doesn't ask them), Tina says they can still send the one she asked, and the claim ends as after the last item: evidence
+ * complete, the closing line, the signing link. Something required that came up meanwhile is asked instead.
+ */
+function optionalQuiet(c: Ctx, st: FollowOnState): Step {
+  const w = work(c.claim);
+  const out: Out[] = [];
+  const at = c.now.toISOString();
+  const asked = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === st.asking);
+  const skipped = [...st.skipped];
+  const opts = () => ({ facts: w.facts, sapsRequired: st.sapsRequired, skip: [...skipped, SAPS_CASE_KEY, SAPS_STATION_KEY] });
+  for (let i = nextItem(c.form, w.answers, w.evidence, opts()); i && !i.required; i = nextItem(c.form, w.answers, w.evidence, opts())) {
+    const record: AnswerRecord = { value: null, status: 'not-yet', at, wamid: st.waiting ?? `quiet:${at}` };
+    out.push({ kind: 'save-answer', key: i.key, record });
+    w.answers[i.key] = record;
+    skipped.push(i.key);
+  }
+  if (asked) out.push({ kind: 'text', text: sendItLater(asked) });
+  return { state: proceed(c, w, { ...st, waiting: undefined, waitingFor: undefined, skipped }, out), out };
+}
+
+/** TTTFG-5196: what Tina says when she ends the claim without an optional item the client went quiet on. */
+export const sendItLater = (item: QuestionItem) => `If you find ${itemName(item)} later, you can still send it here.`;
 
 /** The host's nudge after a quiet spell on the list: what's still needed, listed again (or the end, if nothing is). */
 function stillNeedNudged(c: Ctx, st: FollowOnState): Step {
@@ -1535,10 +1574,20 @@ export async function followOnTurn(
     claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays,
     ...(settings.waitForMore ? { waitForMore: true } : {}),
   };
+  // TTTFG-5196: a message from the client ends the quiet spell on an optional item; the turn sets a new one if it ends
+  // on one again.
+  const from = state?.waitingFor === 'optional' && input.kind !== 'nudge' ? { ...state, waiting: undefined } : state;
   const step =
     input.kind === 'start' ? startFollowOn(ctx, input.describedAsTheft, input.files, input.reported)
     : input.kind === 'resume' ? resumeStep(ctx, input.files, input.introSent, input.lead, input.skipped)
-    : advanceFollowOn(ctx, state!, input);
+    : advanceFollowOn(ctx, from!, input);
+  if (step.state?.waitingFor === 'optional' && !step.state.waiting) {
+    // Without the host's nudge (waitForMore) nobody would end the wait, so there is none: the client answers as before.
+    // A turn that was itself a nudge (the files went quiet) gets a token of its own, so the host schedules a new check.
+    const { waitingFor: _f, ...rest } = step.state;
+    const token = input.kind !== 'nudge' && 'wamid' in input && input.wamid ? input.wamid : `quiet:${claimId}:${at}`;
+    step.state = ctx.waitForMore ? { ...step.state, waiting: token } : rest;
+  }
 
   const answers: ClaimAnswers = { ...claim.answers };
   let status = claim.status;

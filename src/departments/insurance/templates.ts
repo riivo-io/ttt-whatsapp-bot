@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit da163a4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit fb95cdd). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -106,8 +106,9 @@ export interface SignFormVars {
 
 /**
  * TTTFG-5196: the one message at Form sent, with the signing link (TTTFG-5208 sends nothing more on Form sent). It goes
- * on the claim's own channel only. Inside WhatsApp's 24-hour window (always, in practice: the client has just answered
- * the last question) it goes as this text; outside it, as the approved WhatsApp template whose body is
+ * on the claim's own channel only. Inside WhatsApp's 24-hour window (always, in practice: the client has just sent the
+ * last item, or went quiet on an optional one minutes ago) it goes as this text; outside it, as the approved WhatsApp
+ * template whose body is
  * `whatsappBody`. Email uses `emailSubject` and the same text (TTTFG-4973's templated send path).
  */
 export const SIGN_FORM_TEMPLATE = {

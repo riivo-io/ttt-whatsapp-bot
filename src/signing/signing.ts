@@ -30,8 +30,14 @@ export const MAX_CALLBACK_ATTEMPTS = 20;
 const CALLBACK_LEASE_MS = 10 * 60_000;
 const CALLBACK_TIMEOUT_MS = 120_000;
 const MAX_SIGNATURE_BYTES = 1_000_000;
-/** The pad is at most about 1300 x 180 CSS pixels at 3x; anything bigger isn't from the page. */
-const MAX_SIGNATURE_SIDE = 5000;
+/**
+ * The pad is at most about 800 x 180 CSS pixels, at up to 4 device pixels each, and the page cuts the picture to the
+ * ink; anything bigger isn't from the page (and pdf-lib would unpack every pixel of it).
+ */
+const MAX_SIGNATURE_WIDTH = 4000;
+const MAX_SIGNATURE_HEIGHT = 1200;
+/** A local callback (the terminal rehearsal) is only for a page that is itself on localhost. */
+const LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)[:/]/;
 export const SIGNATURE_HEADER = 'x-signing-signature';
 
 export interface SigningDeps {
@@ -71,7 +77,8 @@ export async function createSigningRequest(d: SigningDeps, input: CreateRequestI
     if (!['whatsapp', 'email'].includes(input.channel)) bad(`channel must be whatsapp or email, not "${input.channel}"`);
     if (!input.sentTo?.trim()) bad('sentTo is missing: the number or address the link goes to');
     if (!input.caller?.trim() || !input.callerRecordId?.trim()) bad('caller and callerRecordId are needed');
-    if (!/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(input.callbackUrl ?? '')) bad('callbackUrl must be https');
+    const url = input.callbackUrl ?? '';
+    if (!url.startsWith('https://') && !(LOCAL.test(url) && LOCAL.test(`${d.publicUrl}/`))) bad('callbackUrl must be https');
     if (Buffer.from(input.document.subarray(0, 5)).toString('latin1') !== '%PDF-') bad('the document is not a PDF');
     if (sha256(input.document) !== input.documentHash) bad('documentHash is not the SHA-256 of the document');
     if (!input.stamps?.some((s) => s.kind === 'signature')) bad('stamps need at least one signature box');
@@ -159,7 +166,7 @@ export function signaturePng(dataUrl: string): Uint8Array | null {
     if (bytes.length < 100 || bytes.length > MAX_SIGNATURE_BYTES || PNG.some((b, i) => bytes[i] !== b)) return null;
     // The size it says it is (IHDR), before pdf-lib unpacks every pixel: a small file can claim to be enormous.
     const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
-    if (bytes.toString('latin1', 12, 16) !== 'IHDR' || !width || !height || width > MAX_SIGNATURE_SIDE || height > MAX_SIGNATURE_SIDE) return null;
+    if (bytes.toString('latin1', 12, 16) !== 'IHDR' || !width || !height || width > MAX_SIGNATURE_WIDTH || height > MAX_SIGNATURE_HEIGHT) return null;
     return new Uint8Array(bytes);
 }
 

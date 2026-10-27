@@ -21,9 +21,17 @@ export function callbackSecretFromEnv(): string | null {
     return service ? crypto.createHmac('sha256', service).update('TTTFG-5196 signing callback').digest('hex') : null;
 }
 
+let warned = false;
+
 export function signingFromEnv(): (SigningDeps & { apiKey?: string }) | null {
-    const publicUrl = process.env.SIGNING_PUBLIC_URL;
+    const publicUrl = process.env.SIGNING_PUBLIC_URL?.trim();
     const callbackSecret = callbackSecretFromEnv();
     if (!publicUrl || !callbackSecret || !process.env.SUPABASE_URL) return null;
+    // The link is the client's key to the form: never over plain http, except on localhost (the rehearsal).
+    if (!/^https:\/\/[^/]+/.test(publicUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(publicUrl)) {
+        if (!warned) console.error(`[Signing] SIGNING_PUBLIC_URL must be https://<host>; the signing page is off (got "${publicUrl}")`);
+        warned = true;
+        return null;
+    }
     return (deps ??= { store: supabaseSigningStore(), publicUrl: publicUrl.replace(/\/$/, ''), callbackSecret, apiKey: process.env.SIGNING_API_KEY || undefined });
 }

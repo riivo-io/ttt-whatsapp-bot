@@ -31,6 +31,12 @@ export function clientIp(req: Request): string | null {
     return ip || null;
 }
 
+/**
+ * Link-preview fetchers (WhatsApp's, Facebook's, chat apps', search engines'). They may open the link when it is sent,
+ * before the client does, so their visit isn't recorded as the client's first open in the audit.
+ */
+export const LINK_PREVIEW = /facebookexternalhit|facebot|whatsapp|telegrambot|slackbot|twitterbot|linkedinbot|discordbot|skypeuripreview|googlebot|bingbot|applebot|\bbot\b|crawler|spider|preview/i;
+
 const sameKey = (a: string, b: string) => {
     const x = Buffer.from(a), y = Buffer.from(b);
     return x.length === y.length && crypto.timingSafeEqual(x, y);
@@ -75,7 +81,7 @@ export function signingRouter(getDeps: () => (SigningDeps & { apiKey?: string })
         privateHeaders(res);
         res.set('Content-Security-Policy', SIGNING_PAGE_CSP);
         try {
-            const opened = await openSigningRequest(d, req.params.token);
+            const opened = await openSigningRequest(d, req.params.token, { record: !LINK_PREVIEW.test(req.header('user-agent') ?? '') });
             if (!opened.ok) return void res.status(opened.reason === 'not-found' ? 404 : 410).type('html').send(refusedPage(opened.reason));
             res.type('html').send(signingPage(opened.row.title));
         } catch (e) {
@@ -91,6 +97,8 @@ export function signingRouter(getDeps: () => (SigningDeps & { apiKey?: string })
         try {
             const opened = await openSigningRequest(d, req.params.token, { record: false });
             if (!opened.ok) return void res.status(410).json({ ok: false, reason: opened.reason });
+            // Opened on its own, the PDF runs nothing with Tina's origin.
+            res.set('Content-Security-Policy', "sandbox; default-src 'none'");
             res.type('application/pdf').set('Content-Disposition', 'inline').send(Buffer.from(await d.store.unsignedPdf(opened.row)));
         } catch (e) {
             console.error('[Signing] document failed:', (e as Error).message);
