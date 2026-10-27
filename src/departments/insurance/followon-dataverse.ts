@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit da163a4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit a77f99a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the follow-on's ports (followon.ts FollowOnPorts) against Dataverse, in the style of TTTFG-5168's
 // dataverse.ts: the host passes its Dataverse call (`Dv`), its WhatsApp send and where files go, so this file runs
@@ -70,6 +70,7 @@ interface ClaimRow {
   riivo_claimtype: number | null;
   riivo_claimstatus: number | null;
   riivo_signaturestatus: number | null;
+  riivo_evidencecomplete?: boolean | null;
   riivo_incidentdate: string | null;
   riivo_incidentplace: string | null;
   riivo_description: string | null;
@@ -105,7 +106,7 @@ interface ClaimFormRow {
 }
 
 const CLAIM_SELECT = [
-  'riivo_name', 'riivo_claimtype', 'riivo_claimstatus', 'riivo_signaturestatus', 'riivo_incidentdate', 'riivo_incidentplace',
+  'riivo_name', 'riivo_claimtype', 'riivo_claimstatus', 'riivo_signaturestatus', 'riivo_evidencecomplete', 'riivo_incidentdate', 'riivo_incidentplace',
   'riivo_description', 'riivo_thirdpartiesinvolved', 'riivo_thirdpartydetails', 'riivo_sapsinvolved', 'riivo_sapscasenumber',
   'riivo_sapsstation', 'riivo_sapsrequired', 'riivo_injuries', 'riivo_injurydetails', 'riivo_answers', '_riivo_claimform_value', '_riivo_contact_value',
 ].join(',');
@@ -209,6 +210,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
         evidence: docs.value.map((d) => ({ key: d.riivo_claimitem! })),
         owner: ownerOf(r),
         contactAddress: r.riivo_Contact?.address1_composite?.trim() || null,
+        evidenceComplete: r.riivo_evidencecomplete === true,
       };
       return claim;
     },

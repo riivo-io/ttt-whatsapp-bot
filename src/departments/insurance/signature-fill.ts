@@ -1,20 +1,26 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit da163a4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit a77f99a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the fill half of the requestClaimSignature seam (TTTFG-5248 steps 6 to 8). TTTFG-5176 (WhatsApp) and
-// TTTFG-5188 (email) call it when no form answer is missing. It fills the insurer's form, or the summary sheet for the
+// TTTFG-5188 (email) call it at the end of the conversation, once every item is in or passed over (TTTFG-5196). It
+// fills the insurer's form, or the summary sheet for the
 // generic row, files it as the claim's one unsigned claim form, writes riivo_blankfields and calls the signing step
 // (TTTFG-5196), returning that step's result. The step gets the filed PDF with its SHA-256 and where the signature and
 // date go (signing.ts signatureStamps, or the summary sheet's lines). TTTFG-5196's step is signing.ts
 // claimSigningStep, which the host passes in; a host without the signing page keeps the stub `signingStepNotAvailable`:
-// the form is still filed, and TTTFG-5176 moves on to the evidence without a status change.
+// the form is still filed, and TTTFG-5176 ends the conversation without a status change.
 //
 // signature.ts (TTTFG-5176) owns the default seam; this module is wired in when the branches merge.
 //
 // Re-fill (TTTFG-5248 step 8, `onClaimChanged`): a change to a form answer after the first fill, while the client has
 // not signed, fills again, overwrites the same file and row, and calls the signing step again (TTTFG-5196 refuses the
 // old link because its document hash no longer matches). Once signed, nothing is filled and the signed copy is never
-// touched. The fill never runs because of evidence (riivo_evidencecomplete): the form comes before the evidence in
-// TTT's claims guide, and waiting for photos would hold the signature up by days ("the second wrong turn").
+// touched. The fill never runs because of evidence (riivo_evidencecomplete).
+//
+// When (TTTFG-5196, 27 Oct 2026): TTT's claims guide had the form go to sign before the evidence, so waiting for photos
+// wouldn't hold the signature up ("the second wrong turn"). In practice the chased answers (registration number) and
+// the SAPS case number arrive with the evidence, so each one re-filled the form and sent the client another link, and
+// the SAPS number (its own column) never reached the signed form. The signature now comes last: the form is filled
+// once, with everything on it. The pack can't go to the insurer before the required items are in anyway.
 //
 // I/O sits behind ClaimFillPorts (Dataverse, SharePoint, the signing step), faked in the tests. fill-dataverse.ts is the
 // Dataverse adapter (TTTFG-4885's riivo_claim and riivo_claimform, riivo_clientdocument); the host passes where the
@@ -143,7 +149,7 @@ export async function fillAndFile(ports: ClaimFillPorts, claimId: string): Promi
   return { result: await ports.signingStep(claim.id, document), document, blankFields };
 }
 
-/** The seam TTTFG-5176 calls when the last form question is answered. */
+/** The seam TTTFG-5176 calls at the end of the conversation (TTTFG-5196). */
 export function requestClaimSignature(ports: ClaimFillPorts): RequestClaimSignature {
   return async (claimId) => (await fillAndFile(ports, claimId)).result;
 }
@@ -163,7 +169,7 @@ export type RefillSkip =
   /** riivo_answers was rewritten, but no answer the form uses changed (an evidence item, or the same values again). */
   | 'unchanged'
   | 'signed'
-  /** No form filed yet: the client is still answering and TTTFG-5176 calls the seam after the last answer. */
+  /** No form filed yet: the client is still answering, and TTTFG-5176 calls the seam at the end. */
   | 'not-filled-yet';
 
 /**

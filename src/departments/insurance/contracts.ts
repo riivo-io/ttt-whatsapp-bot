@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit da163a4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit a77f99a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -211,9 +211,10 @@ export interface AnswerRecord {
 export type ClaimAnswers = Record<string, AnswerRecord>;
 
 /**
- * The seam TTTFG-5176 calls when the last form question is answered. TTTFG-5192 fills and files the form, then calls
- * the signing step (TTTFG-5196). 'sent' moves the claim to Form sent; 'notAvailable' (no signing page yet) leaves the
- * status alone and Tina carries on with the evidence.
+ * The seam TTTFG-5176 calls at the end of the conversation, once every item is in or passed over (TTTFG-5196 moved it
+ * there from after the last form question). TTTFG-5192 fills and files the form, then calls the signing step
+ * (TTTFG-5196). 'sent' moves the claim to Form sent; 'notAvailable' (no signing page yet) leaves the status alone, and
+ * the closing line points at no link.
  */
 export type SignatureResult = 'sent' | 'notAvailable';
 export type RequestClaimSignature = (claimId: string) => Promise<SignatureResult>;
