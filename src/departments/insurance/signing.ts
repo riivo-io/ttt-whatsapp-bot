@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit a77f99a). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit fb95cdd). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -6,12 +6,12 @@
 //
 // - signatureStamps(): where the client's signature and the date go, from the form's `sign` boxes (TTTFG-5172 config).
 //   The summary sheet returns its own (summarysheet.ts).
-// - claimSigningStep(): the signing step TTTFG-5192's fill calls with the filed, unsigned form (TTTFG-5252 step 4). It
-//   creates the signing request, sends the "ready to sign" link on the claim's own channel (never both), sets the
+// - claimSigningStep(): the signing step TTTFG-5192's fill calls with the filed, unsigned form (TTTFG-5252 step 4), at
+//   the end of the conversation (TTTFG-5196: once every item is in). It creates the signing request, sends the "ready to sign" link on the claim's own channel (never both), sets the
 //   signature status to Link sent and answers 'sent'. TTTFG-5176 (WhatsApp) and TTTFG-5188 (email) set Form sent from
 //   that answer; nothing here sets the claim status. When the template isn't signed off, the claim has nowhere to send
 //   the link, or the host can't send on that channel yet (email, until TTTFG-4973), it sends nothing, gives the claim
-//   owner a Follow-up and answers 'notAvailable', so Tina carries on with the evidence.
+//   owner a Follow-up and answers 'notAvailable', and the conversation ends without a link.
 // - onClaimFormSigned(): the page's callback (step 9). The signed copy goes to the claim folder as its own
 //   riivo_clientdocument ("Claim form (signed)"), and riivo_claim gets Signed, signed on and the audit JSON. The
 //   unsigned form and its row stay as they are. Signed is written last: the page calls back until it gets an answer,
@@ -190,11 +190,20 @@ export function claimSigningStep(ports: ClaimSigningPorts): SigningStep {
     } catch (e) {
       return followUp(`the link could not be sent (${(e as Error).message.slice(0, 300)})`);
     }
-    await ports.setLinkSent(claimId);
-    await ports.createAgentAction({
-      kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at,
-      detail: `${t.name} sent on ${name} for claim ${claim.reference}.`, template: { name: t.name, version: t.version, text: sentText },
-    });
+    try {
+      await ports.setLinkSent(claimId);
+      await ports.createAgentAction({
+        kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at,
+        detail: `${t.name} sent on ${name} for claim ${claim.reference}.`, template: { name: t.name, version: t.version, text: sentText },
+      });
+    } catch (e) {
+      // The link is with the client, so this is still 'sent' (Form sent, and nothing points at a link they never got);
+      // the owner is told what the CRM is missing. If that write fails too, the error is the host's to log.
+      await ports.createAgentAction({
+        kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at,
+        detail: `The signing link for ${claim.reference} went to the client on ${name}, but the CRM didn't record it (${(e as Error).message.slice(0, 200)}). Please set the signature status to Link sent.`,
+      }).catch(() => undefined);
+    }
     return 'sent';
   };
 }
@@ -252,7 +261,9 @@ export type SignedOutcome =
   | { skipped: 'already-signed' }
   | { skipped: 'not-a-claim' }
   /** The request was for an earlier fill of the form; the owner has a Follow-up. */
-  | { skipped: 'stale-document' };
+  | { skipped: 'stale-document' }
+  /** The signed copy isn't the one the page's audit names; the owner has a Follow-up. */
+  | { skipped: 'copy-mismatch' };
 
 /** TTTFG-5252 step 9. */
 export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallback): Promise<SignedOutcome> {
@@ -269,6 +280,15 @@ export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallb
       detail: `The client signed an earlier version of the claim form for ${claim.reference} (signing request ${cb.requestId}); the form was filled again after that link went out. It was not filed. Please check the client got the latest link.`,
     });
     return { skipped: 'stale-document' };
+  }
+  // The copy is the one the page signed: its hash is in the audit (the callback's HMAC covers both, so this only
+  // catches a fault in the page). A bad copy is never filed; the owner is told.
+  if (sha256(cb.signedPdf) !== cb.audit.signedHash) {
+    await ports.createAgentAction({
+      ...actionBase, kind: 'Follow-up',
+      detail: `The client signed the claim form for ${claim.reference} (signing request ${cb.requestId}), but the signed copy that came back doesn't match its fingerprint. It was not filed. Please send the client the form to sign again.`,
+    });
+    return { skipped: 'copy-mismatch' };
   }
   const fileName = claimFormFileName(claim.insurer, claim.claimType, 'signed');
   const { fileRef } = await ports.saveToClaimFolder(claim, fileName, cb.signedPdf);

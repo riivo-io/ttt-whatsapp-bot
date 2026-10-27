@@ -10,7 +10,7 @@
  *  - the signing step (TTTFG-5196): with the signing page set up (`signing`), the client gets the "ready to sign" link
  *    and the claim goes to Form sent; the page's callback files the signed copy (demoClaimSigned). Without it, the
  *    filled PDF goes to the client on WhatsApp to look at and the step answers notAvailable, so the claim status doesn't
- *    change and Tina moves on to the evidence.
+ *    change. Either way it is the conversation's last message, once every item is in (TTTFG-5196).
  */
 import type { Dv } from '../departments/insurance/dataverse';
 import { dataverseFillPorts, type ClaimFormFiles } from '../departments/insurance/fill-dataverse';
@@ -294,14 +294,14 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
     const base = dataverseResumePorts({
         dv: ch.dv,
         files,
-        // A fill that fails (the blank PDF unreachable, say) must not stop the conversation: Tina goes on to the
-        // evidence and the broker fills the form. The error is logged.
+        // A fill that fails (the blank PDF unreachable, say) must not stop the conversation: Tina ends it without a link
+        // and the broker fills the form. The error is logged.
         requestClaimSignature: async (claimId) => {
             try {
                 return await sign(claimId);
             } catch (e) {
                 console.error(`[ClaimsDemo] Claim form fill failed for ${claimId}:`, (e as Error).message);
-                ch.note?.(`Claim form not filled (${(e as Error).message}): Tina moves on to the evidence`);
+                ch.note?.(`Claim form not filled (${(e as Error).message}): no signing link; the broker sends the form`);
                 return 'notAvailable';
             }
         },

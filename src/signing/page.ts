@@ -121,6 +121,8 @@ export function signingPage(title: string): string {
           window.scrollTo(0, 0);
         } else {
           msg.className = 'msg warn'; msg.textContent = (r.body && r.body.message) || 'Something went wrong. Please try again.';
+          // A signature the server couldn't read is drawn again; a link that's used or expired stays done.
+          if (r.status === 400) { ctx.clearRect(0, 0, pad.width, pad.height); inked = false; clearBtn.disabled = false; }
           if (r.status >= 500) { submit.disabled = false; clearBtn.disabled = false; }
         }
       })
@@ -130,6 +132,11 @@ export function signingPage(title: string): string {
   sizePad();
   window.addEventListener('resize', function () { if (!inked) sizePad(); });
 
+  // pdf.js didn't load (no connection, or the CDN served something else and the browser refused it): say so.
+  if (typeof pdfjsLib === 'undefined') {
+    document.getElementById('loading').textContent = 'The form could not be loaded. Please check your connection and refresh the page.';
+    return;
+  }
   pdfjsLib.GlobalWorkerOptions.workerSrc = '${PDFJS}/pdf.worker.min.js';
   // isEvalSupported off: a crafted font can't run script (CVE-2024-4367).
   pdfjsLib.getDocument({ url: location.pathname + '/document', isEvalSupported: false }).promise.then(function (pdf) {

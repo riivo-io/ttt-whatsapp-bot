@@ -118,6 +118,26 @@ test('check 4: a link older than 7 days, and a link already used, are refused', 
     assert.equal([...w.store.rows.values()].find((r) => r.caller_record_id === 'claim-old')!.status, 'expired');
 });
 
+test('the page: a signature the server couldn\'t read can be drawn again; no pdf.js says so instead of loading forever', () => {
+    const html = signingPage('Claim form');
+    assert.match(html, /if \(r\.status === 400\) \{ ctx\.clearRect\(0, 0, pad\.width, pad\.height\); inked = false; clearBtn\.disabled = false; \}/);
+    assert.match(html, /if \(typeof pdfjsLib === 'undefined'\) \{[^}]*could not be loaded/);
+    assert.match(signingPage('<script>alert(1)</script>'), /<h1>&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/h1>/);
+});
+
+test('settings: the page is off when SIGNING_PUBLIC_URL is not https (localhost aside)', async () => {
+    const keep = { ...process.env };
+    try {
+        const { signingFromEnv } = await import('../../src/signing/env');
+        process.env.SUPABASE_URL = 'https://x.supabase.co';
+        process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-key';
+        process.env.SIGNING_PUBLIC_URL = 'http://tina.example';
+        assert.equal(signingFromEnv(), null);
+    } finally {
+        process.env = keep;
+    }
+});
+
 test('check 5: the signature pad is off until the end of the last page has been on screen', () => {
     const html = signingPage('Claim form');
     assert.match(html, /<button id="submit"[^>]*disabled/);
@@ -200,6 +220,10 @@ test('a request is refused when its hash, document, stamps or callback are wrong
     await bad({ stamps: [STAMPS[1]] }, /at least one signature/);
     await bad({ stamps: [{ ...STAMPS[0], page: 3 }] }, /page 3; the document has 2/);
     await bad({ callbackUrl: 'http://evil.example/x' }, /callbackUrl must be https/);
+    // A local callback only for a page that is itself local (the rehearsal), never from the live page.
+    await bad({ callbackUrl: 'http://localhost:8080/webhook/claim-signed' }, /callbackUrl must be https/);
+    const local = { ...w.deps, publicUrl: 'http://localhost:4319' };
+    assert.ok((await createSigningRequest(local, await w.input({ callbackUrl: 'http://localhost:4319/hook' }))).link.startsWith('http://localhost:4319/sign/'));
     await bad({ channel: 'sms' as never }, /whatsapp or email/);
 });
 
@@ -243,6 +267,7 @@ test('the stamped date and signature land where the stamps say; a date that does
     assert.equal(formatDate(new Date('2026-09-07T10:00:00Z'), 'yy'), '26');
     assert.equal(signaturePng('data:image/jpeg;base64,AAAA'), null);
     assert.equal(signaturePng(pngSignature(6000)), null, 'a picture bigger than the pad is refused before it is unpacked');
+    assert.ok(signaturePng(pngSignature(3000)), 'a wide pad at 4 device pixels still fits');
 });
 
 // ------------------------------------------------------------------------------------------------- the routes
@@ -287,14 +312,20 @@ test('routes: the API needs the key; the page, the PDF and signing answer by the
         const created = await (await post('k')).json() as { link: string };
         const path = new URL(created.link).pathname;
 
+        // A link-preview fetcher (WhatsApp's) gets the page, but its visit isn't the client's first open.
+        const preview = await fetch(`${s.base}${path}`, { headers: { 'User-Agent': 'WhatsApp/2.24.1 A' } });
+        assert.equal(preview.status, 200);
+        assert.equal([...w.store.rows.values()][0].opened_at, null);
         const page = await fetch(`${s.base}${path}`);
         assert.equal(page.status, 200);
         assert.equal(page.headers.get('cache-control'), 'no-store');
         assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
         assert.match(page.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
         assert.match(await page.text(), /Claim form for Discovery \(CLM-000201\)/);
+        assert.equal([...w.store.rows.values()][0].opened_at, NOW.toISOString());
         const pdf = await fetch(`${s.base}${path}/document`);
         assert.equal(pdf.headers.get('content-type'), 'application/pdf');
+        assert.match(pdf.headers.get('content-security-policy') ?? '', /^sandbox/);
         assert.equal(sha256(new Uint8Array(await pdf.arrayBuffer())), body.documentHash);
 
         const sign = (signature: string) => fetch(`${s.base}${path}`, {

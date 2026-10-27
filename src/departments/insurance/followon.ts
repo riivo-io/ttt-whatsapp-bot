@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit a77f99a). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit fb95cdd). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -6,9 +6,9 @@
 //
 // Order, all in code (TTTFG-5254 step 3): SAPS step (when needed) -> notification deadline note (when needed) -> duty
 // of disclosure -> the form's questions -> evidence items, one at a time -> "Things we still need from you" until every
-// required item is in -> complete: evidence complete, the signing step, the closing line. TTTFG-5196 (27 Oct 2026)
+// required item is in -> complete: evidence complete, the closing line, the signing link. TTTFG-5196 (27 Oct 2026)
 // moved the signing step from after the questions to the end: the form is filled once, with every answer on it (the
-// chased answers and the SAPS case number come in on the list), and the client gets one link, as the last thing. A
+// chased answers and the SAPS case number come in on the list), and the client gets one link, as the last message. A
 // client who goes quiet on an optional item, with nothing required missing, still gets it: after a quiet spell the
 // optional items left are "not yet" and the claim ends (optionalQuiet). Claude only
 // turns the client's reply into a typed value (FollowOnInput) and may rephrase a question (the `phrase` port). It never
@@ -462,11 +462,10 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
     return { ...st, phase: 'items', asking: next.key, misses: 0, ...(optionalOnly ? { waitingFor: 'optional' as const } : {}) };
   }
   if (!missing.length) {
-    // TTTFG-5196: every item is in or passed over. The form is filled now, with every answer on it, and the link is the
-    // last thing before the closing line.
-    out.push({ kind: 'evidence-complete' });
+    // TTTFG-5196: every item is in or passed over. The form is filled now, with every answer on it, and its link is the
+    // last message: the closing line goes first, without its sign line (closingText: only for a link sent before).
+    out.push({ kind: 'evidence-complete' }, { kind: 'closing' });
     if (!st.signingRequested) out.push({ kind: 'request-signature' });
-    out.push({ kind: 'closing' });
     return null;
   }
   // TTTFG-4830 (still need): the list, and the conversation stays on it.
@@ -1383,7 +1382,7 @@ function advanceStillNeed(
  * TTTFG-5196: the client went quiet on an optional item (proceed's `waitingFor: 'optional'`), with nothing required
  * missing. The optional items left are kept as "not yet", as if the client had said so to each (a later conversation
  * doesn't ask them), Tina says they can still send the one she asked, and the claim ends as after the last item: evidence
- * complete, the signing link, the closing line. Something required that came up meanwhile is asked instead.
+ * complete, the closing line, the signing link. Something required that came up meanwhile is asked instead.
  */
 function optionalQuiet(c: Ctx, st: FollowOnState): Step {
   const w = work(c.claim);
