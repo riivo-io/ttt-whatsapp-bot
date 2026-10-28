@@ -10,7 +10,8 @@ export type WhatsAppRegarding = { table: 'riivo_claim' | 'riivo_request' | 'cont
 /**
  * The client the message is with: on the row as its From (the client's message) or To (Tina's), as TTT's own WhatsApp
  * flows set it. A contact's or lead's timeline shows the activities they take part in, so every message shows there
- * too, whatever record it is filed under (a request, a claim).
+ * too, whatever record it is filed under (a request, a claim). The claims demo sets it (TTTFG-4830); Tina's own
+ * conversations (dynamicsService.logMessage) don't yet.
  */
 export type WhatsAppParty = { table: 'contact' | 'new_lead'; id: string };
 

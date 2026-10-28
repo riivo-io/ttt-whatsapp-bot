@@ -131,7 +131,7 @@ test('Tina\'s own row is unchanged: under the request, else the contact or lead'
     assert.ok(!('riivo_WhatsAppCommunications_activity_parties' in whatsappCommunicationRow({ text: 'x', direction: 'Outgoing', phone: PHONE })));
 });
 
-test('Tina\'s own row has the client as From or To: a contact, or a lead', () => {
+test('a row with its client has them as From or To: a contact, or a lead', () => {
     const row = (direction: 'Incoming' | 'Outgoing', party: { table: 'contact' | 'new_lead'; id: string }) =>
         whatsappCommunicationRow({ text: 'Hi', direction, phone: PHONE, regarding: { table: 'riivo_request', id: 'rq' }, party, at: 'T' });
     assert.deepEqual(row('Incoming', { table: 'contact', id: 'ct' }).riivo_WhatsAppCommunications_activity_parties,

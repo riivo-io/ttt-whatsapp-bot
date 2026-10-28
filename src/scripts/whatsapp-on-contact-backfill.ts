@@ -1,7 +1,9 @@
 /**
- * WhatsApp messages on the client's own timeline, for the rows Tina logged before she put the client on them herself
- * (src/domain/whatsappLog.ts WhatsAppParty). A message filed under a request or a claim showed only there; with the
- * client as its From (the client's message) or To (Tina's), it shows on the contact's or lead's timeline too.
+ * WhatsApp messages on the client's own timeline, for rows logged without the client on them: the claims demo's rows
+ * in DEV from before it put the contact on each row (src/domain/whatsappLog.ts WhatsAppParty). A message filed under a
+ * request or a claim showed only there; with the client as its From (the client's message) or To (Tina's), it shows
+ * on the contact's or lead's timeline too. Run in DEV 28 Oct 2026. Not run on production: Tina's own conversations
+ * don't put the client on their rows yet, so a backfill there would cover the past only.
  *
  * Only rows filed under a request (its client, else its lead) or a claim (its contact) with no one but the system's
  * own owner and regarding entries on them yet. Rows filed under the contact or lead already show there; rows TTT's
