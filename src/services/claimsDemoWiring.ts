@@ -14,6 +14,7 @@
  */
 import type { Choice } from '../departments/insurance/claim';
 import type { Dv } from '../departments/insurance/dataverse';
+import { captureDate } from '../departments/insurance/exif';
 import { dataverseFillPorts, type ClaimFormFiles } from '../departments/insurance/fill-dataverse';
 import { CLAIM_STATUSES, type ClaimFileStore } from '../departments/insurance/followon-dataverse';
 import type { ResumePorts } from '../departments/insurance/resume';
@@ -203,7 +204,9 @@ export function claimFolders(ch: DemoChannels): { files: ClaimFileStore; forms: 
                 const link = await put(`/drives/${await driveId()}/root:/${folder(to)}/${encodeURIComponent(cleanName(file.fileName))}:/content?@microsoft.graph.conflictBehavior=rename`,
                     new Uint8Array(bytes), file.mimeType);
                 ch.note?.(`SharePoint: ${file.fileName} filed in ${to.claimReference}`);
-                return link;
+                // TTTFG-5263: the photo's capture date from the bytes as they arrived, for the Photo date before incident
+                // flag. A WhatsApp picture has none (WhatsApp drops it); a photo sent as a document keeps it.
+                return { link, capturedOn: captureDate(new Uint8Array(bytes)) };
             },
         },
         forms: {
