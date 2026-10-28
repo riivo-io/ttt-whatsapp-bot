@@ -229,6 +229,35 @@ export class MetaWhatsAppService {
         }
     }
 
+    /**
+     * TTTFG-4830 (claims demo): an interactive message (reply buttons or a list) built by the caller, as sendMessage
+     * sends text: returns the message id and throws when Meta refuses it, so the caller can fall back to text.
+     */
+    async sendInteractive(to: string, interactive: { type: 'button' | 'list'; body: { text: string }; action: object }): Promise<string | null> {
+        if (!this.token || !this.phoneNumberId) {
+            console.error('Cannot send interactive message: Meta configuration missing');
+            return null;
+        }
+        const payload = {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to,
+            type: 'interactive',
+            interactive: { ...interactive, body: { text: sanitizeForWhatsApp(interactive.body.text) } },
+        };
+        try {
+            const res = await axios.post(`${this.baseUrl}/${this.activePhoneNumberId()}/messages`, payload, {
+                headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+            });
+            const messageId: string | null = res.data?.messages?.[0]?.id || null;
+            console.log(`[Meta WhatsApp] Sent ${interactive.type} to ${to}${messageId ? ` (${messageId})` : ''}`);
+            return messageId;
+        } catch (error: any) {
+            console.error(`[Meta WhatsApp] Failed to send ${interactive.type}:`, error?.response?.data || error.message);
+            throw error;
+        }
+    }
+
     async sendReplyButtons(to: string, text: string, buttons: { id: string; title: string }[]): Promise<void> {
         if (!this.token || !this.phoneNumberId) {
             console.error('Cannot send buttons: Meta configuration missing');

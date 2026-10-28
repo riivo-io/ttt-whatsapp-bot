@@ -12,6 +12,7 @@
  *    filled PDF goes to the client on WhatsApp to look at and the step answers notAvailable, so the claim status doesn't
  *    change. Either way it is the conversation's last message, once every item is in (TTTFG-5196).
  */
+import type { Choice } from '../departments/insurance/claim';
 import type { Dv } from '../departments/insurance/dataverse';
 import { dataverseFillPorts, type ClaimFormFiles } from '../departments/insurance/fill-dataverse';
 import { CLAIM_STATUSES, type ClaimFileStore } from '../departments/insurance/followon-dataverse';
@@ -139,7 +140,8 @@ export interface DemoChannels {
     graph: Graph;
     /** The SharePoint site with the client folders, as Graph names it: 'host:/sites/Name'. */
     site: string;
-    sendText(to: string, text: string): Promise<void>;
+    /** `choices` (TTTFG-4830): the text asks one closed question, and the client can tap one of these to answer. */
+    sendText(to: string, text: string, choices?: Choice[]): Promise<void>;
     sendDocument(to: string, bytes: Buffer, fileName: string, caption: string): Promise<void>;
     /**
      * TTTFG-5212: the morning reminder as Tina's approved WhatsApp template (outside the 24-hour window), its variables
@@ -311,7 +313,7 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
             if (m.kind === 'template' && m.params) {
                 if (!ch.sendTemplate) throw new Error(`No WhatsApp template set up for "${m.name}" outside the 24-hour window`);
                 await ch.sendTemplate(to, m.params);
-            } else await ch.sendText(to, m.text);
+            } else await ch.sendText(to, m.text, m.kind === 'text' ? m.choices : undefined);
             sent(m.text);
         },
     });

@@ -11,7 +11,7 @@ import {
 } from '../../src/domain/claimsDemoHost';
 import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
-import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
+import { SAFETY_TEXT, type AgentActionRow, type ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
 import type { ClientFile, FollowOnClaim, StoredClaimForm } from '../../src/departments/insurance/followon';
 import { isOpenClaim, type OpenClaim, type ResumePorts } from '../../src/departments/insurance/resume';
@@ -153,10 +153,11 @@ test('the whole claim: walkthrough, the questions, the photo, then the form to s
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
     assert.equal(w.rows.length, 1);
-    // TTTFG-4830: what to gather at the scene went out once, after "is anyone hurt", before what happened.
-    const onScene = w.sent.filter((t) => t.startsWith("If you're still on the scene, make sure to grab the following where applicable:\n1. The other car's registration number"));
+    // TTTFG-4830: what to gather at the scene went out once, after what to do if anyone is hurt, before what happened.
+    const onScene = w.sent.filter((t) => t.startsWith("While you're still at the scene, try to get these. They make your claim easier:\n\n1. The other car's *registration number*"));
     assert.equal(onScene.length, 1);
-    assert.ok(w.sent.indexOf(onScene[0]) > w.sent.findIndex((t) => /hurt or in danger/.test(t)));
+    assert.ok(w.sent.indexOf(onScene[0]) > w.sent.indexOf(SAFETY_TEXT));
+    assert.ok(w.sent.indexOf(onScene[0]) < w.sent.findIndex((t) => /in your own words what happened|On what date/.test(t)));
     const opened = w.since().join('\n');
     assert.match(opened, /CLM-000001/); // the acknowledgement
     assert.match(opened, /Who was driving the vehicle\?/); // the follow-on's first question, straight after
@@ -294,7 +295,7 @@ async function openedOnCar(o: { schedule?: (phone: string, token: string) => Pro
     let outcome = '';
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
-    assert.match(w.since().join('\n'), /A few questions about your car\. Answer as best you can, and if you don't know something, just say so\. You can type your answers or send a voice note\.\n1\. What make is the car\?\n2\. What model is it\?/);
+    assert.match(w.since().join('\n'), /A few questions about \*your car\*\. If you don't know something, just say so\. You can type your answers or send a voice note\.\n\n1\. What make is the car\?\n\n2\. What model is it\?/);
     return { w, scheduled, t };
 }
 
@@ -313,7 +314,7 @@ test('TTTFG-4830: part of a batch answered: saved at once, Tina waits, and the c
     assert.deepEqual(w.since(), []);
     assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, token, tick(first, 1)), 'listed');
     const listed = w.since();
-    assert.deepEqual(listed, ["Thanks. I still need these:\n1. What model is it?\n2. What is the car's registration number?"]);
+    assert.deepEqual(listed, ["Thanks. I still need these:\n\n1. What model is it?\n\n2. What is the car's registration number?"]);
     assert.equal(w.store.get(PHONE)?.resume.followOn?.waiting, undefined);
     assert.equal(w.store.get(PHONE)?.lastSent, listed[0]); // the next reply is read against the list as renumbered
 });
@@ -336,7 +337,7 @@ test('TTTFG-4830: with no scheduler (CLAIMS_BATCH_QUIET_MS=0), or when schedulin
         if (schedule === null) delete w.deps.scheduleBatchCheck;
         w.replies.push({ kind: 'value', otherAnswers: [other('carMake', 'Toyota')] });
         await say(w, 'Toyota', tick(DAY1, 30));
-        assert.deepEqual(w.since(), ["Thanks. I still need these:\n1. What model is it?\n2. What is the car's registration number?"]);
+        assert.deepEqual(w.since(), ["Thanks. I still need these:\n\n1. What model is it?\n\n2. What is the car's registration number?"]);
         assert.equal(w.store.get(PHONE)?.resume.followOn?.waiting, undefined);
     }
     assert.equal(batchQuietMs(undefined), 45_000);
@@ -358,7 +359,7 @@ test('TTTFG-4830: the end of the questions lists what the client still has to se
     // "Not yet" to the photos: the list, and Tina stays on it.
     w.replies.push({ kind: 'not-yet' });
     await say(w, "I'll take them tonight", (t = tick(t, 2)));
-    assert.deepEqual(w.since(), ["Thanks, that's all for now. Things we still need from you:\n- Photos of the damage\nPlease send them here when you have them."]);
+    assert.deepEqual(w.since(), ["Thanks, that's all for now. *Things we still need from you:*\n\n- Photos of the damage\n\nPlease send them here when you have them."]);
     assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'still-need');
 
     // 08:00 the next day: the reminder, as a message (the client wrote less than 24 hours ago).
@@ -421,7 +422,7 @@ test('TTTFG-4830: a voice note answering the batch: transcribed with the questio
     assert.match(hints[0], /1\. What make is the car\? 2\. What model is it\?/);
     assert.ok(systems[0].includes(SPOKEN_HELP));
     const said = w.since();
-    assert.equal(said[0], 'From your voice note I noted:\n1. Toyota\n2. Corolla\n3. CA 123456\nIf I misheard anything, just tell me.');
+    assert.equal(said[0], "From your voice note I noted:\n\n1. *What make is the car?* Toyota\n2. *What model is it?* Corolla\n3. *What is the car's registration number?* CA 123456\n\nIf I misheard anything, just tell me.");
     assert.match(said.slice(1).join('\n'), /Please send me photos of the damage/i);
     assert.equal(w.rows[0].answers.carRegistration?.value, 'CA 123456');
 });
