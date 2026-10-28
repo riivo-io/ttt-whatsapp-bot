@@ -18,6 +18,10 @@
  *   CLAIMS_REMINDER_TEMPLATE       TTTFG-5212: the approved WhatsApp template for a reminder outside the 24-hour window
  *                                  (body: REMINDER_TEMPLATE.whatsappBody, 3 variables). Unset: those clients are skipped
  *   CLAIMS_REMINDER_TEMPLATE_LANG  its language code (default en)
+ *   CLAIMS_BROKER_ALERT_DAYS       TTTFG-5212: after this many days without a message from the client, the claim owner
+ *                                  gets a Follow-up that the missing items haven't come (default 5)
+ *   CLAIMS_STOP_AFTER_DAYS         TTTFG-5212: after this many, the reminders stop and the owner gets a Follow-up to
+ *                                  phone the client (default 10; TTTFG-5289 may move it)
  *   CLAIMS_VOICE_NOTES             TTTFG-4830: "off" stops voice notes being transcribed (Tina asks the client to type).
  *                                  On by default; needs OPENAI_API_KEY. CLAIMS_TRANSCRIBE_MODEL, CLAIMS_TRANSCRIBE_LANGUAGE
  *                                  and CLAIMS_VOICE_MAX_SECONDS: see transcribe.service.ts
@@ -30,7 +34,7 @@
  * contact; a voice note with its transcript and the recording attached (writeDemoLog).
  */
 import {
-    batchQuietMs, claimsDemoBatchCheck, filesQuietMs, optionalQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, type ClaimsDemoDeps,
+    batchQuietMs, claimsDemoBatchCheck, filesQuietMs, optionalQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, reminderDays, type ClaimsDemoDeps,
     type DemoConversation, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
@@ -254,6 +258,7 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
         say: (phone, text) => ch.sendText(phone, text),
         signUpLink: SIGN_UP_LINK,
         lastReminderOn: (claimId) => lastReminderPort(ch.dv).lastReminderOn(claimId),
+        lastBrokerStepOn: (claimId, step) => lastReminderPort(ch.dv).lastBrokerStepOn(claimId, step),
         ...((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off'
             ? {}
             : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint, log) }),
@@ -318,8 +323,10 @@ export async function handleClaimsDemoReminder(phone: string, o: { test?: boolea
         // A test by hand goes out even if the client wrote in the last 12 hours (still once per claim per day).
         const r = await claimsDemoReminder(deps(phone, contactId, ch, log), phone, contactId, new Date(), {
             template: !!process.env.CLAIMS_REMINDER_TEMPLATE, ...(o.test ? { quietHours: 0 } : {}),
+            ...reminderDays(process.env.CLAIMS_BROKER_ALERT_DAYS, process.env.CLAIMS_STOP_AFTER_DAYS),
         });
-        const said = r === 'walkthrough' ? 'reporting a claim, no reminder' : r.map((o) => `${o.reference} ${'sent' in o ? `sent (${o.sent})` : o.skipped}`).join(', ') || 'no open claims';
+        const said = r === 'walkthrough' ? 'reporting a claim, no reminder' : r.map((o) => `${o.reference} ${'sent' in o ? `sent (${o.sent})` : o.skipped}`
+            + (o.broker ? `, owner's ${o.broker} Follow-up` : '')).join(', ') || 'no open claims';
         console.log(`[ClaimsDemo] ${phone}: ${o.test ? 'test' : 'morning'} reminder: ${said}; CRM ${stats.reads} reads, ${stats.writes} writes`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} morning reminder failed:`, (e as Error).message, (e as Error).stack);

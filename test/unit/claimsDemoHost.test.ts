@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
-    filesQuietMs, optionalQuietMs, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
+    filesQuietMs, optionalQuietMs, reminderDays, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
 } from '../../src/domain/claimsDemoHost';
 import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
@@ -392,6 +392,38 @@ test('TTTFG-5212: no reminder while the client is reporting a claim; the demo nu
     assert.deepEqual(demoPhones(`27723203629:${CONTACT}, +27 83 285 2913:${CONTACT}, bad`), [
         { phone: '27723203629', contactId: CONTACT }, { phone: '27832852913', contactId: CONTACT },
     ]);
+});
+
+test("TTTFG-5212: the claim owner's day-5 alert and stop-day call go through the host, once each; the days are settings", async () => {
+    const quiet: Row = {
+        id: 'claim-1', reference: 'CLM-000001', contactId: CONTACT, providerId: 'prov-discovery', insurer: 'Discovery Insure', claimType: 'Motor accident',
+        facts: { claimType: 'Motor accident', description: 'Rear-ended at the Claremont robot', incidentAt: '2026-10-12T15:30:00Z', place: 'Claremont',
+            thirdParties: false, saps: false, injuries: false },
+        status: 'Awaiting client docs', signatureStatus: 'Not sent', claimFormId: MOTOR.id, answers: {}, evidence: [], owner: SIPHO,
+        lastClientMessageOn: '2026-10-14T05:00:00.000Z',
+    };
+    const w = world({ rows: [quiet] });
+    const followUps = () => w.actions.filter((a) => a.kind === 'Follow-up');
+
+    // Day 5 (Monday 08:00): the reminder goes as the template, and Sipho gets the alert.
+    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, new Date('2026-10-19T06:00:00Z'), { template: true }),
+        [{ reference: 'CLM-000001', sent: 'template', broker: 'alert', lines: ['The answer to 1 more question', 'Photos of the damage'] }]);
+    assert.deepEqual(followUps().map((a) => [a.owner.name, a.regarding.id, a.template?.name]), [['Sipho', 'claim-1', 'Claim - client quiet (broker alert)']]);
+    assert.match(followUps()[0].detail, /^Claim CLM-000001: the client hasn't sent the missing items in 5 days\. Still needed: /);
+
+    // Day 10 (Saturday): no reminder, and the call. The alert isn't written twice.
+    w.deps.lastBrokerStepOn = async (_id, step) => (step === 'alert' ? '2026-10-19T06:00:05.000Z' : null);
+    w.since();
+    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, new Date('2026-10-24T06:00:00Z'), { template: true }),
+        [{ reference: 'CLM-000001', skipped: 'quiet-too-long', broker: 'call' }]);
+    assert.deepEqual(w.since(), []);
+    assert.deepEqual(followUps().map((a) => a.template?.name), ['Claim - client quiet (broker alert)', 'Claim - client quiet (phone the client)']);
+    assert.match(followUps()[1].detail, /^Claim CLM-000001: please phone the client\. They haven't sent the missing items in 10 days/);
+
+    // CLAIMS_BROKER_ALERT_DAYS and CLAIMS_STOP_AFTER_DAYS: a number above 0, else the package's 5 and 10.
+    assert.deepEqual(reminderDays('3', ' 7 '), { brokerAlertDays: 3, stopAfterDays: 7 });
+    assert.deepEqual(reminderDays(undefined, ''), {});
+    assert.deepEqual(reminderDays('0', 'ten'), {});
 });
 
 // ---- TTTFG-4830: voice notes ----

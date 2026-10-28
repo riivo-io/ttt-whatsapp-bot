@@ -1,21 +1,24 @@
 /**
  * TTTFG-5212 (claims demo): what the 08:00 reminder would send each demo number, read from the demo CRM (TTT DEV) and
- * printed. Nothing is sent and nothing is written: every Dataverse call that isn't a read is refused, and the WhatsApp
- * send and the agent action only print. Run it the evening before, or after changing a claim, to see the morning.
+ * printed, with the claim owner's day-5 and stop-day Follow-ups. Nothing is sent and nothing is written: every Dataverse
+ * call that isn't a read is refused, and the WhatsApp send and the agent actions only print. Run it the evening before,
+ * or after changing a claim, to see the morning.
  *
  *   npx tsx src/scripts/claims-reminder-preview.ts [--at 2026-10-27T06:00:00Z] [--template]
  *
  * The numbers come from CLAIMS_DEMO_NUMBERS (as on Tina). `--at`: when the reminder runs (default: the next 08:00 South
  * African time). `--template`: as if CLAIMS_REMINDER_TEMPLATE were set (clients quiet for over 24 hours get the
- * template). Tina's conversation state isn't read here: a client mid-way through "which claim?" would be skipped there.
+ * template). CLAIMS_BROKER_ALERT_DAYS and CLAIMS_STOP_AFTER_DAYS as on Tina. Tina's conversation state isn't read
+ * here: a client mid-way through "which claim?" would get no reminder there (the Follow-ups still go).
  * Sign-in: `az login` to TTT's tenant.
  */
 import { execFileSync } from 'child_process';
+import type { AgentActionRow } from '../departments/insurance/claim';
 import type { Dv } from '../departments/insurance/dataverse';
 import { remindTurn } from '../departments/insurance/reminder';
 import { NO_RESUME_STATE } from '../departments/insurance/resume';
 import { dataverseReminderPorts } from '../departments/insurance/resume-dataverse';
-import { demoPhones } from '../domain/claimsDemoHost';
+import { demoPhones, reminderDays } from '../domain/claimsDemoHost';
 import { dataverseCall } from '../services/claimsDemoWiring';
 
 const DEV = process.env.CLAIMS_DEMO_DATAVERSE_URL || 'https://tttdevelopment.crm4.dynamics.com';
@@ -63,11 +66,18 @@ async function main() {
         const ports = {
             ...base,
             contactByWhatsApp: async () => ({ id: contactId, firstName }),
-            createAgentAction: async (row: { detail: string }) => { console.log(`  (agent action: ${row.detail})`); return { id: 'preview' }; },
+            createAgentAction: async (row: AgentActionRow) => {
+                console.log(row.kind === 'Follow-up' ? `  FOLLOW-UP for ${row.owner.name}: ${row.detail}` : `  (agent action: ${row.detail})`);
+                return { id: 'preview' };
+            },
         };
         console.log(`${phone} ${firstName} (${contactId})`);
-        const r = await remindTurn(ports, { phone, requestId: '', signUpLink: '' }, NO_RESUME_STATE, contactId, at, { template: args.includes('--template') });
-        for (const o of r.outcomes) console.log(`  ${o.reference}: ${'sent' in o ? `sent as ${o.sent}` : `no reminder (${o.skipped})`}`);
+        const r = await remindTurn(ports, { phone, requestId: '', signUpLink: '' }, NO_RESUME_STATE, contactId, at, {
+            template: args.includes('--template'), ...reminderDays(process.env.CLAIMS_BROKER_ALERT_DAYS, process.env.CLAIMS_STOP_AFTER_DAYS),
+        });
+        for (const o of r.outcomes) {
+            console.log(`  ${o.reference}: ${'sent' in o ? `sent as ${o.sent}` : `no reminder (${o.skipped})`}${o.broker ? `; owner's ${o.broker} Follow-up` : ''}`);
+        }
         if (!r.outcomes.length) console.log('  no open claims');
         console.log('');
     }
