@@ -1,6 +1,6 @@
 console.log('[boot] dynamics.service: before axios');
 import axios from 'axios';
-import { whatsappCommunicationRow, type WhatsAppRegarding } from '../domain/whatsappLog';
+import { whatsappCommunicationRow, type WhatsAppParty, type WhatsAppRegarding } from '../domain/whatsappLog';
 console.log('[boot] dynamics.service: before msal');
 import * as msal from '@azure/msal-node';
 console.log('[boot] dynamics.service: before dotenv');
@@ -1613,14 +1613,29 @@ export class DynamicsService {
             : entity?.type === 'client' ? { table: 'contact', id: entity.id }
             : entity?.type === 'lead' ? { table: 'new_lead', id: entity.id }
             : null;
+        // The client as the message's From/To, so it shows on their contact's or lead's timeline too, not only the request's.
+        const party: WhatsAppParty | null = entity?.type === 'client' ? { table: 'contact', id: entity.id }
+            : entity?.type === 'lead' ? { table: 'new_lead', id: entity.id }
+            : null;
         // The row itself is built in src/domain/whatsappLog.ts, so the claims demo writes the same one (TTTFG-4830).
-        const payload = whatsappCommunicationRow({ text: messageContent, direction, phone: phoneNumber, wamid: messageId, regarding });
+        const row = (p: WhatsAppParty | null) => whatsappCommunicationRow({ text: messageContent, direction, phone: phoneNumber, wamid: messageId, regarding, party: p });
+        const reason = (e: any) => e?.response?.data?.error?.message || e?.message;
 
         try {
-            await this.crmPost('riivo_whatsappcommunicationses', payload, entity?.id || phoneNumber);
+            await this.crmPost('riivo_whatsappcommunicationses', row(party), entity?.id || phoneNumber);
             console.log(`[Dynamics CRM] Logged ${direction} message for ${phoneNumber}${requestId ? ` (request ${requestId})` : ''}`);
         } catch (error: any) {
-            console.error('[Dynamics CRM] Logging failed:', error?.response?.data?.error?.message || error.message);
+            if (!party) {
+                console.error('[Dynamics CRM] Logging failed:', reason(error));
+                return;
+            }
+            // The CRM refused the client as the message's participant: the message is still logged, where it always was.
+            try {
+                await this.crmPost('riivo_whatsappcommunicationses', row(null), entity?.id || phoneNumber);
+                console.warn(`[Dynamics CRM] Logged ${direction} message for ${phoneNumber} without the client as participant:`, reason(error));
+            } catch (retry: any) {
+                console.error('[Dynamics CRM] Logging failed:', reason(retry));
+            }
         }
     }
 

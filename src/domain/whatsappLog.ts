@@ -7,14 +7,24 @@
 /** What a message is filed under on the timeline. */
 export type WhatsAppRegarding = { table: 'riivo_claim' | 'riivo_request' | 'contact' | 'new_lead'; id: string };
 
+/**
+ * The client the message is with: on the row as its From (the client's message) or To (Tina's), as TTT's own WhatsApp
+ * flows set it. A contact's or lead's timeline shows the activities they take part in, so every message shows there
+ * too, whatever record it is filed under (a request, a claim).
+ */
+export type WhatsAppParty = { table: 'contact' | 'new_lead'; id: string };
+
 const SETS: Record<WhatsAppRegarding['table'], string> = {
     riivo_claim: 'riivo_claims', riivo_request: 'riivo_requests', contact: 'contacts', new_lead: 'new_leads',
 };
 const INCOMING = 463630000;
 const OUTGOING = 463630001;
+const FROM = 1;
+const TO = 2;
 
 export function whatsappCommunicationRow(m: {
     text: string; direction: 'Incoming' | 'Outgoing'; phone: string; wamid?: string | null; regarding?: WhatsAppRegarding | null; at?: string;
+    party?: WhatsAppParty | null;
 }): Record<string, unknown> {
     const row: Record<string, unknown> = {
         subject: `WhatsApp ${m.direction}: ${m.phone}`,
@@ -28,6 +38,12 @@ export function whatsappCommunicationRow(m: {
     // CRM link replies and delivery/read receipts back to the message. Omitted when unknown (synthetic/internal messages).
     if (m.wamid) row.riivo_messageid = m.wamid;
     if (m.regarding) row[`regardingobjectid_${m.regarding.table}@odata.bind`] = `/${SETS[m.regarding.table]}(${m.regarding.id})`;
+    if (m.party) {
+        row.riivo_WhatsAppCommunications_activity_parties = [{
+            [`partyid_${m.party.table}@odata.bind`]: `/${SETS[m.party.table]}(${m.party.id})`,
+            participationtypemask: m.direction === 'Incoming' ? FROM : TO,
+        }];
+    }
     return row;
 }
 

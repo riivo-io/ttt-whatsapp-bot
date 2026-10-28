@@ -45,7 +45,8 @@ test('the client\'s message and each of Tina\'s go to the message log and the cl
     const rows = crm.rows();
     assert.equal(rows.length, 3);
     assert.deepEqual(rows[0], whatsappCommunicationRow({
-        text: '1. Toyota 2. Corolla', direction: 'Incoming', phone: PHONE, wamid: 'wamid.in-1', regarding: { table: 'riivo_claim', id: 'cl-1' }, at: '2026-10-26T14:00:00.000Z',
+        text: '1. Toyota 2. Corolla', direction: 'Incoming', phone: PHONE, wamid: 'wamid.in-1', regarding: { table: 'riivo_claim', id: 'cl-1' },
+        party: { table: 'contact', id: 'ct-1' }, at: '2026-10-26T14:00:00.000Z',
     }));
     assert.equal(rows[0]['regardingobjectid_riivo_claim@odata.bind'], '/riivo_claims(cl-1)');
     assert.equal(rows[1].riivo_messagedirection, 463630001);
@@ -80,10 +81,33 @@ test('a recording over the attachment limit: no note, and the row says so', asyn
     assert.equal(voiceNoteNote({ communicationId: 'a', bytes: Buffer.alloc(NOTE_ATTACHMENT_MAX_BYTES + 1), mimeType: 'audio/ogg', seconds: 1, at: 'x' }), null);
 });
 
+const parties = (r: Record<string, unknown>) => r.riivo_WhatsAppCommunications_activity_parties as Record<string, unknown>[] | undefined;
+
+test('the contact is the From of the client\'s message and the To of each of Tina\'s, so all of it shows on the contact too', async () => {
+    const crm = fakeCrm();
+    await writeDemoLog({ dv: crm.dv, saveMessages }, conversation(), WHERE);
+    assert.deepEqual(crm.rows().map(parties), [
+        [{ 'partyid_contact@odata.bind': '/contacts(ct-1)', participationtypemask: 1 }],
+        [{ 'partyid_contact@odata.bind': '/contacts(ct-1)', participationtypemask: 2 }],
+        [{ 'partyid_contact@odata.bind': '/contacts(ct-1)', participationtypemask: 2 }],
+    ]);
+});
+
+test('a contact the CRM refuses as participant: the rows still go under the claim, and the rest of the job goes without it', async () => {
+    const tries: Record<string, unknown>[] = [];
+    const crm = fakeCrm({ refuse: (b) => (tries.push(b), !!parties(b)) });
+    await writeDemoLog({ dv: crm.dv, saveMessages }, conversation(), WHERE);
+    const rows = crm.rows();
+    assert.equal(rows.length, 3);
+    assert.ok(rows.every((r) => r['regardingobjectid_riivo_claim@odata.bind'] === '/riivo_claims(cl-1)' && !parties(r)));
+    assert.equal(tries.length, 4, 'one refused try, then three rows without the contact');
+});
+
 test('a link the CRM refuses falls back to the request, then the contact; the rest of the job follows it', async () => {
     const crm = fakeCrm({ refuse: (b) => 'regardingobjectid_riivo_claim@odata.bind' in b });
     await writeDemoLog({ dv: crm.dv, saveMessages }, conversation(), WHERE);
     assert.deepEqual(crm.rows().map((r) => r['regardingobjectid_riivo_request@odata.bind']), ['/riivo_requests(rq-1)', '/riivo_requests(rq-1)', '/riivo_requests(rq-1)']);
+    assert.ok(crm.rows().every((r) => parties(r)?.length === 1), 'a refused link keeps the contact');
     const noClaim = fakeCrm();
     await writeDemoLog({ dv: noClaim.dv, saveMessages }, conversation(), { phone: PHONE, contactId: 'ct-1' });
     assert.equal(noClaim.rows()[0]['regardingobjectid_contact@odata.bind'], '/contacts(ct-1)');
@@ -104,4 +128,14 @@ test('Tina\'s own row is unchanged: under the request, else the contact or lead'
         riivo_messageid: 'w1', 'regardingobjectid_riivo_request@odata.bind': '/riivo_requests(rq)',
     });
     assert.ok(!('riivo_messageid' in whatsappCommunicationRow({ text: 'x', direction: 'Outgoing', phone: PHONE })));
+    assert.ok(!('riivo_WhatsAppCommunications_activity_parties' in whatsappCommunicationRow({ text: 'x', direction: 'Outgoing', phone: PHONE })));
+});
+
+test('Tina\'s own row has the client as From or To: a contact, or a lead', () => {
+    const row = (direction: 'Incoming' | 'Outgoing', party: { table: 'contact' | 'new_lead'; id: string }) =>
+        whatsappCommunicationRow({ text: 'Hi', direction, phone: PHONE, regarding: { table: 'riivo_request', id: 'rq' }, party, at: 'T' });
+    assert.deepEqual(row('Incoming', { table: 'contact', id: 'ct' }).riivo_WhatsAppCommunications_activity_parties,
+        [{ 'partyid_contact@odata.bind': '/contacts(ct)', participationtypemask: 1 }]);
+    assert.deepEqual(row('Outgoing', { table: 'new_lead', id: 'ld' }).riivo_WhatsAppCommunications_activity_parties,
+        [{ 'partyid_new_lead@odata.bind': '/new_leads(ld)', participationtypemask: 2 }]);
 });
