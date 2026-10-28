@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit b13060b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 573eaf9). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -438,7 +438,7 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
       return ["No problem, take your time. Tap *Ready* when you're ready to begin.", "Tap *Ready* whenever you're ready, and I'll ask my questions."][again ? (again - 1) % 2 : 0];
     case 'summary':
       return again
-        ? ['Is everything in the summary above correct? Please answer yes, or tell me what to change.', 'Is that all correct? Yes, or tell me what to change.'][(again - 1) % 2]
+        ? [`Is everything in the summary above correct? ${SUMMARY_ASK}`, `Is that all correct? ${SUMMARY_ASK}`][(again - 1) % 2]
         : summary(state);
     default: {
       // TTTFG-4830: a yes/no asked for the first time brings its details question with it ("If yes to 1: please send me
@@ -478,13 +478,19 @@ export function summary(state: WalkthroughState): string {
     isTheft(f, state.opening) ? `*Reported to the police (SAPS):* ${yesNo(f.saps)}` : `*Police (SAPS) involved:* ${yesNo(f.saps)}`,
     `*Anyone injured:* ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`,
   ];
-  return ["Here's what I have:", lines.join('\n'), 'Is it all correct?'].join('\n\n');
+  return ["Here's what I have:", lines.join('\n'), `Is it all correct? ${SUMMARY_ASK}`].join('\n\n');
 }
+
+/**
+ * TTTFG-4830 (28 Oct 2026): the summary has one tap, for "correct"; a change is typed (or spoken), with the new value,
+ * so no extra "What should I change?" turn is needed.
+ */
+const SUMMARY_ASK = "Tap *Yes, that's correct*, or type what needs to change.";
 
 /** TTTFG-4830 (28 Oct 2026): the taps for each closed question of the walkthrough. */
 export const YES_NO: Choice[] = [{ title: 'Yes' }, { title: 'No' }];
 export const READY: Choice[] = [{ title: 'Ready' }];
-const SUMMARY_CHOICES: Choice[] = [{ title: "Yes, that's right", reply: "Yes, that's all correct" }, { title: 'Change something' }];
+const SUMMARY_CHOICES: Choice[] = [{ title: "Yes, that's correct" }];
 /** The kinds of claim in the client's words; Claude reads the tap as one of CLAIM_TYPES. */
 export const CLAIM_TYPE_CHOICES: Choice[] = [
   { title: 'Car accident' },
@@ -521,10 +527,16 @@ export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] |
   }
 }
 
-const FOLLOW_UP_DETAIL: Record<FollowUpReason, string> = {
+const FOLLOW_UP_DETAIL: Record<Exclude<FollowUpReason, 'client-question'>, string> = {
   'no-active-policy': 'Client asked on WhatsApp to report a claim but has no active policy on the CRM. Please contact them.',
   'policy-not-on-file': 'Client asked on WhatsApp to report a claim on a policy that is not on the CRM. Please contact them.',
 };
+
+/** TTTFG-4830: the Follow-up for a client's question Tina leaves to a person. */
+export const clientQuestionDetail = (question: string) =>
+  `The client asked on WhatsApp: "${question}". Tina didn't answer it (it's about cover, payment or advice, or she couldn't). Please answer them.`;
+/** TTTFG-4830: what Tina says when she leaves the client's question to a person. `who`: the broker's name, when known. */
+export const toBrokerText = (who = 'your broker') => `That's a good question for ${who}. I've passed it on, and they'll get back to you.`;
 
 export interface TurnResult {
   state: WalkthroughState | null;
@@ -553,9 +565,9 @@ export async function claimTurn(
   let passedOn: { owner: Owner; dueOn?: string } | undefined;
   for (const e of turn.effects.filter((x): x is Extract<Effect, { kind: 'follow-up' }> => x.kind === 'follow-up')) {
     const owner = await ownerFor(ports, e.to === 'broker' ? working?.policyId : undefined);
+    const detail = e.reason === 'client-question' ? clientQuestionDetail(e.question ?? '') : FOLLOW_UP_DETAIL[e.reason];
     const row = await ports.createAgentAction({
-      kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_request', id: conv.requestId }, contactId,
-      detail: FOLLOW_UP_DETAIL[e.reason], at,
+      kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_request', id: conv.requestId }, contactId, detail, at,
     });
     if (e.to === 'team') passedOn = { owner, dueOn: row.dueOn };
   }
@@ -585,6 +597,10 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
       return unknownNumberText(conv.signUpLink);
     case 'safety':
       return SAFETY_TEXT;
+    case 'help':
+      return say.text;
+    case 'to-broker':
+      return toBrokerText();
     case 'on-scene':
       return onSceneText(state!);
     case 'passed-on': {

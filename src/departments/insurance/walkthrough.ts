@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit b13060b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 573eaf9). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -92,6 +92,11 @@ export type Answer =
   | { kind: 'confirm' }
   /** At the summary: the client says something is wrong, with the new values when they gave them. */
   | { kind: 'correct'; facts: Facts; fields?: Fact[] }
+  /**
+   * TTTFG-4830 (28 Oct 2026): the client asked Tina something instead of answering. `help`: Claude's short answer about
+   * Tina's question (what a word means, where to find it); absent: it's for the broker (cover, payment, advice).
+   */
+  | { kind: 'question'; question: string; help?: string }
   | { kind: 'unclear' };
 
 /** Something Tina says. 'ask' is a question Claude may phrase; the rest are fixed text. */
@@ -101,6 +106,10 @@ export type Say =
   | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true; tries?: Record<string, number> }
   /** TTTFG-4830: what to do if anyone is hurt or in danger. Said once, at the start of the reply to the policy. */
   | { kind: 'safety' }
+  /** TTTFG-4830: the answer to the client's question about what Tina asked (Answer 'question'), before she asks again. */
+  | { kind: 'help'; text: string }
+  /** TTTFG-4830: the client's question is for the broker, who got it as a Follow-up. */
+  | { kind: 'to-broker' }
   /**
    * TTTFG-4830: what to gather while still at the scene, for the kind of claim, ending with "tell me when you're ready"
    * (claim.ts onSceneText).
@@ -110,12 +119,14 @@ export type Say =
   /** No active policy, or not the policy on file: a person will contact the client (date from the follow-up). */
   | { kind: 'passed-on'; reason: FollowUpReason };
 
-export type FollowUpReason = 'no-active-policy' | 'policy-not-on-file';
+/** 'client-question' (TTTFG-4830): the client asked something only a person can answer. */
+export type FollowUpReason = 'no-active-policy' | 'policy-not-on-file' | 'client-question';
 
 /** I/O the walkthrough asks for. claim.ts carries it out. */
 export type Effect =
   /** A riivo_agentaction Follow-up. 'broker' = the chosen policy's owner, else the Insurance and Advice team. */
-  | { kind: 'follow-up'; to: 'broker' | 'team'; reason: FollowUpReason }
+  /** `question`: the client's question, for 'client-question'. */
+  | { kind: 'follow-up'; to: 'broker' | 'team'; reason: FollowUpReason; question?: string }
   | { kind: 'open-claim' };
 
 export interface Turn {
@@ -262,6 +273,30 @@ export const SPOKEN_HELP = `The client recorded this message as a voice note; <c
 - The client may speak Afrikaans or another South African language, or mix languages. Give a text answer in English,
   with names, places and numbers as they said them.`;
 
+/**
+ * TTTFG-4830 (28 Oct 2026): told to Claude with every client message (understand.ts, reply.ts). The client may ask
+ * Tina something instead of answering. Claude may explain what Tina asked, in a sentence or two; anything about cover,
+ * payment, the insurer's decision or advice goes to the broker. The gate (gate.ts) checks the answer like any text.
+ */
+export const QUESTION_HELP = `The client may ask Tina something instead of answering: what a word means, why she needs it, where to find it,
+what to do if they don't have it, or they may say they want to change something they told her. Then use kind
+"question", set clientQuestion to what they asked (short, in their words), and:
+- explain: Tina's answer to what the client actually asked, when it is about the claim's questions or documents (what
+  a word means, why it's needed, where to find something, what to do if they don't have it): one or two short
+  sentences, under 35 words, in everyday words (no dashes), as Tina ("I"). For example what a NaTIS document is and
+  where to find it, that a licence number is on the front of the licence card, that a rough time is fine, or that they
+  can tell her the change now. Say only what you're sure of. Tina asks her question again after it, so don't repeat it.
+- forBroker: true, with explain null, when the question is about anything else: whether the claim is covered, will be
+  paid or approved, amounts, the excess, the policy's terms, what the insurer will decide, or advice. Never answer
+  those, and never state a fact about the client's claim or policy that isn't in this conversation.
+A message that answers Tina's question is never kind "question", even if it ends with "?" or also asks something.`;
+
+/** TTTFG-4830: Claude's answer to the client's question, when it's short enough to be one; otherwise the broker's. */
+export function questionHelp(explain: unknown): string | undefined {
+  const t = typeof explain === 'string' ? explain.trim() : '';
+  return t && t.length <= 400 ? t : undefined;
+}
+
 /** The South African date and time of an ISO instant. */
 export function sastParts(iso: string): { date: string; time: string } {
   const local = new Date(new Date(iso).getTime() + 2 * 3600_000).toISOString();
@@ -300,6 +335,14 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     if (s.onSceneSent) return askIn({ ...s, step: nextFactStep(s.facts) }, before);
     return { state: { ...s, step: 'ready', onSceneSent: true }, say: [...before, { kind: 'on-scene' }], effects: [] };
   };
+
+  // TTTFG-4830: a question about what Tina asked gets its short answer, a question only a person can answer goes to the
+  // broker; then she asks again. It isn't a miss, and nothing the client told her changes.
+  if (answer.kind === 'question') {
+    const t = same();
+    if (answer.help) return { ...t, say: [{ kind: 'help', text: answer.help }, ...t.say] };
+    return { ...t, say: [{ kind: 'to-broker' }, ...t.say], effects: [{ kind: 'follow-up', to: 'broker', reason: 'client-question', question: answer.question }] };
+  }
 
   switch (state.step) {
     case 'policy': {
