@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature.ts (commit 573eaf9). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature.ts (commit ba38887). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 step 11): the default signing seam. Tina calls requestClaimSignature(claimId) at the end of
 // the conversation, once every item is in or passed over (TTTFG-5196 moved it there from after the last form

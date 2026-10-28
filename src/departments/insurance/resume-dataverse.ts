@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit 573eaf9). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit ba38887). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
@@ -6,7 +6,7 @@
 // email agent.
 import { dataverseClaimPorts } from './dataverse';
 import { CLAIM_STATUSES, CLAIM_TYPE_VALUES, dataverseFollowOnPorts, type FollowOnDataverseOptions } from './followon-dataverse';
-import type { ReminderPorts } from './reminder';
+import { BROKER_STEPS, type ReminderPorts } from './reminder';
 import { OPEN_CLAIM_STATUSES, type OpenClaim, type OpenClaimsPort, type ResumePorts } from './resume';
 import { REMINDER_TEMPLATE } from './templates';
 
@@ -55,17 +55,20 @@ export function dataverseResumePorts(o: FollowOnDataverseOptions): ResumePorts {
 }
 
 /**
- * TTTFG-5212: when the claim's last morning reminder went out: its Created agent action (named by the claim until
- * TTTFG-4853's Regarding lookup, as the duty of disclosure's).
+ * TTTFG-5212: when the claim's last morning reminder went out (its Created agent action), and when its last broker
+ * Follow-up of a step was written. Found by the wording's name in riivo_subject, and by the claim until TTTFG-4853's
+ * Regarding lookup, as the duty of disclosure's.
  */
-export function lastReminderPort(dv: FollowOnDataverseOptions['dv']): Pick<ReminderPorts, 'lastReminderOn'> {
+export function lastReminderPort(dv: FollowOnDataverseOptions['dv']): Pick<ReminderPorts, 'lastReminderOn' | 'lastBrokerStepOn'> {
+  const lastNamed = async (claimId: string, name: string) => {
+    if (!GUID.test(claimId)) throw new Error(`Not a Dataverse id: ${claimId}`);
+    const r = await dv<{ value: { createdon: string }[] }>('GET', 'riivo_agentactions?$select=createdon&$top=1&$orderby=createdon desc&$filter='
+      + `riivo_sourcemessageid eq 'riivo_claim:${claimId}' and startswith(riivo_subject,'${encodeURIComponent(name)}')`);
+    return r.value[0]?.createdon ?? null;
+  };
   return {
-    async lastReminderOn(claimId) {
-      if (!GUID.test(claimId)) throw new Error(`Not a Dataverse id: ${claimId}`);
-      const r = await dv<{ value: { createdon: string }[] }>('GET', 'riivo_agentactions?$select=createdon&$top=1&$orderby=createdon desc&$filter='
-        + `riivo_sourcemessageid eq 'riivo_claim:${claimId}' and startswith(riivo_subject,'${encodeURIComponent(REMINDER_TEMPLATE.name)}')`);
-      return r.value[0]?.createdon ?? null;
-    },
+    lastReminderOn: (claimId) => lastNamed(claimId, REMINDER_TEMPLATE.name),
+    lastBrokerStepOn: (claimId, step) => lastNamed(claimId, BROKER_STEPS[step].name),
   };
 }
 
