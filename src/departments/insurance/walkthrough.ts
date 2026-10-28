@@ -1,17 +1,19 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 1090503). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit ba38887). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
 // pipeline, so it moves into the shared agent package (TTTFG-4830) as it is.
 //
-// The walkthrough is a state machine in code, not prompt text (TTTFG-5247): a prompt can skip or reorder the "hurt or
-// in danger" question, and the order is the point. Claude only understands each answer (the Answer type) and may
-// phrase each question; the fixed messages (assist number, unknown number, acknowledgement) are code text.
+// The walkthrough is a state machine in code, not prompt text (TTTFG-5247): a prompt can skip or reorder what to do if
+// anyone is hurt, and the order is the point. Claude only understands each answer (the Answer type) and may
+// phrase each question; the fixed messages (what to do if anyone is hurt, unknown number, acknowledgement) are code text.
 //
-// Steps, in the story's order: find client -> confirm policy -> hurt or in danger -> claim type -> what, when and
-// where -> third parties, SAPS and injuries -> summary -> confirmed (the claim opens, status FNOL logged).
-// TTTFG-4830: once the client has answered "hurt or in danger" and Tina knows the kind of claim, she sends what to
-// gather while they are still at the scene (claim.ts onSceneText), once, before the questions about what happened.
+// Steps, in the story's order: find client -> confirm policy -> claim type -> what to gather at the scene, and ready
+// -> what, when and where -> third parties, SAPS and injuries -> summary -> confirmed (the claim opens, FNOL logged).
+// TTTFG-4830 (28 Oct 2026): "Is anyone hurt or in danger?" is no longer a question. The reply to the policy starts with
+// what to do if anyone is (call 10111, come back once everyone is safe), so nobody waits on a yes before getting it.
+// Once Tina knows the kind of claim, she sends what to gather while they are still at the scene (claim.ts
+// onSceneText), once, and waits for the client to say they're ready before the questions about what happened.
 //
 // Only a WhatsApp number on the CRM can open a claim (decided 9 October 2026): an unknown number gets the
 // unknown-number reply, no claim and no follow-up. Tina never asks for an ID number or a policy number.
@@ -54,7 +56,8 @@ export interface Facts {
 }
 export type Fact = keyof Facts;
 
-export type Step = 'policy' | 'danger' | 'claim-type' | 'incident' | 'parties' | 'summary';
+/** 'danger': a conversation saved before 28 Oct 2026 that was asked "Is anyone hurt or in danger?"; read as 'ready'. */
+export type Step = 'policy' | 'ready' | 'danger' | 'claim-type' | 'incident' | 'parties' | 'summary';
 
 /** Stored on the Tina conversation until the client confirms. */
 export interface WalkthroughState {
@@ -89,6 +92,11 @@ export type Answer =
   | { kind: 'confirm' }
   /** At the summary: the client says something is wrong, with the new values when they gave them. */
   | { kind: 'correct'; facts: Facts; fields?: Fact[] }
+  /**
+   * TTTFG-4830 (28 Oct 2026): the client asked Tina something instead of answering. `help`: Claude's short answer about
+   * Tina's question (what a word means, where to find it); absent: it's for the broker (cover, payment, advice).
+   */
+  | { kind: 'question'; question: string; help?: string }
   | { kind: 'unclear' };
 
 /** Something Tina says. 'ask' is a question Claude may phrase; the rest are fixed text. */
@@ -96,24 +104,29 @@ export type Say =
   /** `correcting`: the client said the summary is wrong; ask for the right value(s) instead of reading it again. */
   /** `tries`: how often each question in it was asked before this time (askedKey); absent or 0 is the first time. */
   | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true; tries?: Record<string, number> }
-  | { kind: 'assist'; insurer: string; number: string }
+  /** TTTFG-4830: what to do if anyone is hurt or in danger. Said once, at the start of the reply to the policy. */
+  | { kind: 'safety' }
+  /** TTTFG-4830: the answer to the client's question about what Tina asked (Answer 'question'), before she asks again. */
+  | { kind: 'help'; text: string }
+  /** TTTFG-4830: the client's question is for the broker, who got it as a Follow-up. */
+  | { kind: 'to-broker' }
   /**
-   * TTTFG-4830: what to gather while still at the scene, for the kind of claim (claim.ts onSceneText). `safeFirst`:
-   * the client said someone is hurt or in danger, so it starts "Once everyone is safe".
+   * TTTFG-4830: what to gather while still at the scene, for the kind of claim, ending with "tell me when you're ready"
+   * (claim.ts onSceneText).
    */
-  | { kind: 'on-scene'; safeFirst?: true }
-  /** The insurer has no assist number on file: the general emergency number. */
-  | { kind: 'emergency' }
+  | { kind: 'on-scene' }
   | { kind: 'unknown-number' }
   /** No active policy, or not the policy on file: a person will contact the client (date from the follow-up). */
   | { kind: 'passed-on'; reason: FollowUpReason };
 
-export type FollowUpReason = 'no-active-policy' | 'policy-not-on-file' | 'no-assist-number';
+/** 'client-question' (TTTFG-4830): the client asked something only a person can answer. */
+export type FollowUpReason = 'no-active-policy' | 'policy-not-on-file' | 'client-question';
 
 /** I/O the walkthrough asks for. claim.ts carries it out. */
 export type Effect =
   /** A riivo_agentaction Follow-up. 'broker' = the chosen policy's owner, else the Insurance and Advice team. */
-  | { kind: 'follow-up'; to: 'broker' | 'team'; reason: FollowUpReason }
+  /** `question`: the client's question, for 'client-question'. */
+  | { kind: 'follow-up'; to: 'broker' | 'team'; reason: FollowUpReason; question?: string }
   | { kind: 'open-claim' };
 
 export interface Turn {
@@ -157,16 +170,6 @@ function nextFactStep(f: Facts): Step {
 }
 
 const ask = (step: Step, f: Facts): Say => ({ kind: 'ask', step, missing: missingFor(step, f) });
-
-/**
- * TTTFG-4830: the on-scene checklist, when it is due: the client has just answered "hurt or in danger" (or the claim
- * type, when that came later), the kind of claim is known, and it hasn't gone out yet. Only then, so a conversation
- * already further on never gets it in the middle of its questions.
- */
-function onScene(prev: WalkthroughState, next: WalkthroughState, safeFirst = false): { state: WalkthroughState; say: Say[] } {
-  if (next.onSceneSent || !next.facts.claimType || (prev.step !== 'danger' && prev.step !== 'claim-type')) return { state: next, say: [] };
-  return { state: { ...next, onSceneSent: true }, say: [{ kind: 'on-scene', ...(safeFirst ? { safeFirst: true as const } : {}) }] };
-}
 
 /**
  * The question a fact belongs to. The date and time asked together are "when"; asked for on their own, after part of
@@ -270,6 +273,30 @@ export const SPOKEN_HELP = `The client recorded this message as a voice note; <c
 - The client may speak Afrikaans or another South African language, or mix languages. Give a text answer in English,
   with names, places and numbers as they said them.`;
 
+/**
+ * TTTFG-4830 (28 Oct 2026): told to Claude with every client message (understand.ts, reply.ts). The client may ask
+ * Tina something instead of answering. Claude may explain what Tina asked, in a sentence or two; anything about cover,
+ * payment, the insurer's decision or advice goes to the broker. The gate (gate.ts) checks the answer like any text.
+ */
+export const QUESTION_HELP = `The client may ask Tina something instead of answering: what a word means, why she needs it, where to find it,
+what to do if they don't have it, or they may say they want to change something they told her. Then use kind
+"question", set clientQuestion to what they asked (short, in their words), and:
+- explain: Tina's answer to what the client actually asked, when it is about the claim's questions or documents (what
+  a word means, why it's needed, where to find something, what to do if they don't have it): one or two short
+  sentences, under 35 words, in everyday words (no dashes), as Tina ("I"). For example what a NaTIS document is and
+  where to find it, that a licence number is on the front of the licence card, that a rough time is fine, or that they
+  can tell her the change now. Say only what you're sure of. Tina asks her question again after it, so don't repeat it.
+- forBroker: true, with explain null, when the question is about anything else: whether the claim is covered, will be
+  paid or approved, amounts, the excess, the policy's terms, what the insurer will decide, or advice. Never answer
+  those, and never state a fact about the client's claim or policy that isn't in this conversation.
+A message that answers Tina's question is never kind "question", even if it ends with "?" or also asks something.`;
+
+/** TTTFG-4830: Claude's answer to the client's question, when it's short enough to be one; otherwise the broker's. */
+export function questionHelp(explain: unknown): string | undefined {
+  const t = typeof explain === 'string' ? explain.trim() : '';
+  return t && t.length <= 400 ? t : undefined;
+}
+
 /** The South African date and time of an ISO instant. */
 export function sastParts(iso: string): { date: string; time: string } {
   const local = new Date(new Date(iso).getTime() + 2 * 3600_000).toISOString();
@@ -296,14 +323,26 @@ export function start(contact: { id: string; firstName: string } | null, policie
 
 /** One client message. */
 export function advance(state: WalkthroughState, answer: Answer): Turn {
-  const askIn = (s: WalkthroughState): Turn => { const c = counted(s, ask(s.step, s.facts)); return { state: c.state, say: [c.say], effects: [] }; };
-  const same = (): Turn => askIn(state);
-  // TTTFG-4830: the on-scene checklist goes in front of the next question when it is due.
-  const goTo = (s: WalkthroughState): Turn => {
-    const o = onScene(state, s);
-    const t = askIn(o.state);
-    return { ...t, say: [...o.say, ...t.say] };
+  const askIn = (s: WalkthroughState, before: Say[] = []): Turn => {
+    const c = counted(s, ask(s.step, s.facts));
+    return { state: c.state, say: [...before, c.say], effects: [] };
   };
+  const same = (): Turn => askIn(state);
+  // TTTFG-4830: once the kind of claim is known, the on-scene checklist (once), and Tina waits for "ready" before the
+  // questions about what happened. Until it's known, the claim type is asked first.
+  const toReady = (s: WalkthroughState, before: Say[] = []): Turn => {
+    if (!s.facts.claimType) return askIn({ ...s, step: 'claim-type' }, before);
+    if (s.onSceneSent) return askIn({ ...s, step: nextFactStep(s.facts) }, before);
+    return { state: { ...s, step: 'ready', onSceneSent: true }, say: [...before, { kind: 'on-scene' }], effects: [] };
+  };
+
+  // TTTFG-4830: a question about what Tina asked gets its short answer, a question only a person can answer goes to the
+  // broker; then she asks again. It isn't a miss, and nothing the client told her changes.
+  if (answer.kind === 'question') {
+    const t = same();
+    if (answer.help) return { ...t, say: [{ kind: 'help', text: answer.help }, ...t.say] };
+    return { ...t, say: [{ kind: 'to-broker' }, ...t.say], effects: [{ kind: 'follow-up', to: 'broker', reason: 'client-question', question: answer.question }] };
+  }
 
   switch (state.step) {
     case 'policy': {
@@ -312,7 +351,7 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
         answer.kind === 'policy' ? state.policies.find((p) => p.id === answer.policyId)
         : answer.kind === 'yes' ? only
         : undefined;
-      if (chosen) return goTo({ ...state, policyId: chosen.id, step: 'danger' });
+      if (chosen) return toReady({ ...state, policyId: chosen.id }, [{ kind: 'safety' }]);
       if (answer.kind === 'no' && only) {
         // Not the policy on file: TTT doesn't hold it, so a person takes it from here.
         return {
@@ -324,22 +363,15 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
       return same();
     }
 
-    case 'danger': {
-      if (answer.kind !== 'yes' && answer.kind !== 'no') return same();
-      const next = { ...state, step: nextFactStep(state.facts) };
-      if (answer.kind === 'no') return goTo(next);
-      // AC: the assist number is the first reply, on its own, before any other claim question. TTTFG-4830: the
-      // on-scene checklist after it, as "Once everyone is safe".
-      const policy = state.policies.find((p) => p.id === state.policyId)!;
-      const number = policy.assistNumber?.trim();
-      const o = onScene(state, next, true);
-      return number
-        ? { state: o.state, say: [{ kind: 'assist', insurer: policy.insurer, number }, ...o.say, ask(next.step, next.facts)], effects: [] }
-        : {
-            state: o.state,
-            say: [{ kind: 'emergency' }, ...o.say, ask(next.step, next.facts)],
-            effects: [{ kind: 'follow-up', to: 'broker', reason: 'no-assist-number' }],
-          };
+    case 'danger':
+      // Asked "Is anyone hurt or in danger?" before 28 Oct 2026: whatever the answer, what to do if anyone is, then on.
+      return toReady({ ...state, step: 'ready' }, [{ kind: 'safety' }]);
+
+    case 'ready': {
+      // Anything but a "not yet" moves on; what happened, when or where, if the client already said it, is kept.
+      if (answer.kind === 'no') return same();
+      const facts = answer.kind === 'facts' ? merge(state.facts, answer.facts, state.opening) : state.facts;
+      return askIn({ ...state, facts, step: nextFactStep(facts) });
     }
 
     case 'claim-type':
@@ -347,7 +379,8 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     case 'parties': {
       if (answer.kind !== 'facts') return same();
       const facts = merge(state.facts, answer.facts, state.opening);
-      return goTo({ ...state, facts, step: nextFactStep(facts) });
+      if (state.step === 'claim-type' && facts.claimType) return toReady({ ...state, facts });
+      return askIn({ ...state, facts, step: nextFactStep(facts) });
     }
 
     case 'summary': {
@@ -358,13 +391,13 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
         // Only a value that differs from what is on file is a correction. The model may repeat known values alongside
         // "the date is wrong" (seen 21 Oct 2026); that is not a new date, so Tina asks for it.
         const changed = !sameFacts(facts, state.facts);
-        if (step !== 'summary') return goTo({ ...state, facts, step });
+        if (step !== 'summary') return askIn({ ...state, facts, step });
         if (!changed) {
           // "No, the date is wrong": ask for the right value. No claim yet.
           const fields = answer.kind === 'correct' && answer.fields?.length ? answer.fields : [];
           return { state: { ...state, facts }, say: [{ kind: 'ask', step: 'summary', missing: fields, correcting: true }], effects: [] };
         }
-        return goTo({ ...state, facts, step: 'summary' });
+        return askIn({ ...state, facts, step: 'summary' });
       }
       return same();
     }

@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ABANDONED_AFTER_MS, claimFromClient, claimFromUnknownNumber, type ClaimsHostDeps, type StoredWalkthrough } from '../../src/domain/claimsHost';
-import type { AgentActionRow, ClaimPorts, ClaimRow, Outbound } from '../../src/departments/insurance/claim';
+import { SAFETY_TEXT, type AgentActionRow, type ClaimPorts, type ClaimRow, type Outbound } from '../../src/departments/insurance/claim';
 import type { Policy } from '../../src/departments/insurance/walkthrough';
 
 const PHONE = '+27821234567';
@@ -92,8 +92,8 @@ test('TTTFG-5168 checks 4 to 8 through Tina: a whole claim from first message to
     const w = world({ answers: [
         {}, // first read of "my car was hit": nothing beyond the claim words
         { kind: 'yes' }, // policy confirmed
-        { kind: 'yes' }, // someone is hurt
         { kind: 'facts', claimType: 'Motor accident' },
+        // "ready" after the on-scene list is read without the model (understand.ts READY_WORDS).
         { kind: 'facts', description: 'A car drove into the back of mine at the robot.', incidentDate: '2026-11-03', incidentTime: '14:30', place: 'Main Rd, Claremont' },
         { kind: 'facts', thirdParties: true, thirdPartyDetails: 'the other driver, CA 123-456', saps: false, injuries: true, injuryDetails: 'passenger hurt her neck' },
         { kind: 'correct', wrongFields: ['incidentAt'] },
@@ -103,12 +103,11 @@ test('TTTFG-5168 checks 4 to 8 through Tina: a whole claim from first message to
     const say = (t: string) => claimFromClient(w.deps, PHONE, JANE, t, NOW);
     await say('I need to claim, my car was hit');
     await say('yes');
-    assert.equal(w.texts().at(-1), 'First, is anyone hurt or in danger right now?');
-    await say('yes my passenger');
-    const afterDanger = w.texts().slice(-2);
-    assert.equal(afterDanger[0], "Please call Discovery Insure's emergency assist line now: 0860 751 751. Come back to me once everyone is safe.");
-    assert.doesNotMatch(afterDanger[0], /\?/, 'the assist reply carries no claim question');
+    // TTTFG-4830 (28 Oct 2026): what to do if anyone is hurt is a line, not a question, and comes first.
+    assert.deepEqual(w.texts().slice(-2), [SAFETY_TEXT, 'What kind of claim is it?']);
     await say('car accident');
+    assert.match(w.texts().at(-1)!, /Tap \*Ready\* to begin\.$/);
+    await say('ready');
     await say('yesterday at 14:30, someone drove into the back of me at the robot on Main Rd, Claremont');
     await say('yes the other driver, CA 123-456; no police; my passenger hurt her neck');
     assert.match(w.texts().at(-1)!, /^Here's what I have/);

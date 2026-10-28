@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 1090503). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit ba38887). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212 (first cut, built for the TTTFG-4830 WhatsApp demo): every morning, a client whose claim still needs
 // something is sent the list again ("Things we still need from you"), so the claim doesn't stall on the client's side.

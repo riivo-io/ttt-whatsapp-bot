@@ -8,7 +8,9 @@
  *  - files: "/file <path> [caption]" sends a local photo or PDF as if it came from WhatsApp;
  *  - voice notes (TTTFG-4830): "/voice <path>" sends a local recording (.ogg, .m4a, .mp3, .wav) as a voice note. It
  *    is transcribed for real (OPENAI_API_KEY) and the transcript is printed before Tina's reply;
- *  - Supabase: the conversation is kept in .work/claims-demo/<phone>.json.
+ *  - Supabase: the conversation is kept in .work/claims-demo/<phone>.json;
+ *  - taps (TTTFG-4830): what one message makes Tina say prints as the one WhatsApp message it would be, with its reply
+ *    buttons or list under it ("[tap: Yes | No]"). Type a choice's title, or "/tap 2", to tap it.
  * The claims, documents, agent actions and SharePoint files are real DEV rows and files ("#reset" withdraws the claims).
  *
  *   npx tsx src/scripts/claims-demo-chat.ts --phone 27723203629 --contact <DEV contact id>          chat ("exit" to stop)
@@ -30,7 +32,9 @@ import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import type { Dv } from '../departments/insurance/dataverse';
+import type { Choice } from '../departments/insurance/claim';
 import type { ClientFile } from '../departments/insurance/followon';
+import { interactiveFor, messageMaxChars, outbox, withChoiceLines } from '../domain/claimsOutbox';
 import {
     claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation, type DemoVoice,
 } from '../domain/claimsDemoHost';
@@ -164,10 +168,23 @@ function localSigning(port: number): DemoSigning {
 }
 const signing = signPort ? localSigning(Number(signPort)) : undefined;
 
+/** What Tina's last message offered to tap: typing one of its titles (or "/tap 2") taps it. */
+let lastChoices: Choice[] = [];
+const box = outbox(async (_to, m) => {
+    lastChoices = m.choices ?? [];
+    const interactive = m.choices?.length ? interactiveFor(m.text, m.choices) : null;
+    if (!interactive) return show('Tina', m.choices?.length ? withChoiceLines(m.text, m.choices) : m.text);
+    const taps = interactive.type === 'button'
+        ? interactive.action.buttons.map((b) => b.reply.title)
+        : interactive.action.sections[0].rows.map((r) => `${r.title}${r.description ? ` (${r.description})` : ''}`);
+    show(`Tina [${interactive.type === 'button' ? 'buttons' : 'list'}]`, `${m.text}\n[tap: ${taps.join(' | ')}]`);
+}, messageMaxChars(process.env.CLAIMS_MESSAGE_MAX_CHARS));
+
 const channels: DemoChannels = {
     get dv() { return dv; }, graph, site: SITE,
-    sendText: async (_to, text) => show('Tina', text),
+    sendText: async (to, text, choices) => box.push(to, { text, ...(choices?.length ? { choices } : {}) }),
     sendDocument: async (_to, bytes, fileName, caption) => {
+        await box.flush();
         fs.mkdirSync(OUT, { recursive: true });
         const p = path.join(OUT, fileName);
         fs.writeFileSync(p, bytes);
@@ -191,7 +208,7 @@ const deps: ClaimsDemoDeps = {
     reportedModel: toolModel(UNDERSTAND_MODEL, 'record_known_answers'),
     openRequest: (c, p, text) => openDemoRequest(dv, c, p, text),
     withdrawOpenClaims: (c) => withdrawOpenClaims(dv, c),
-    say: async (_p, text) => show('Tina', text),
+    say: (p, text) => channels.sendText(p, text),
     signUpLink: 'https://www.ttt-tax.co.za/client-onboarding',
     // TTTFG-4830: the voice note's "media id" is the local file's path.
     transcribe: async (voice, hint) => {
@@ -224,12 +241,17 @@ async function say(line: string) {
         file = { id: p, fileName: path.basename(p), mimeType, media: mimeType.startsWith('image/') ? 'photo' : 'document' };
         text = m[2];
     }
-    show(`Client (${phone})`, voice ? `🎙️ ${path.basename(voice.id)}` : file ? `📎 ${file.fileName}${text ? ` - ${text}` : ''}` : text);
+    // A tap: a title of what Tina's last message offered, or "/tap 2". It says what the choice says, as on WhatsApp.
+    const n2 = /^\/tap\s+(\d+)\s*$/.exec(line)?.[1];
+    const tapped = n2 ? lastChoices[Number(n2) - 1] : lastChoices.find((c) => c.title.toLowerCase() === line.trim().toLowerCase());
+    if (tapped && !voice && !file) text = tapped.reply ?? tapped.title;
+    show(`Client (${phone})`, voice ? `🎙️ ${path.basename(voice.id)}` : file ? `📎 ${file.fileName}${text ? ` - ${text}` : ''}` : tapped ? `[tapped ${tapped.title}] ${text}` : text);
     const stats = newCrmStats();
     dv = cachedDv(rawDv, stats);
     const outcome = await claimsDemoTurn(deps, {
         phone: phone!, contactId: contactId!, text, file, ...(voice ? { voice } : {}), wamid: `wamid.rehearsal.${Date.now()}.${++n}`,
     }, new Date());
+    await box.flush();
     console.log(`  (${outcome}; CRM ${stats.reads} reads, ${stats.cached} from cache, ${stats.writes} writes)`);
 }
 

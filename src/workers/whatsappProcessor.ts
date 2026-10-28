@@ -785,7 +785,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     // (TTT DEV). Nothing below runs for it. Every other number skips this (unset: no demo numbers at all).
     const demoContact = claimsDemoContact(from);
     if (demoContact) {
-        await handleClaimsDemoMessage({ from, text, document, ...(audio ? { audio: { id: audio.id, mimeType: audio.mimeType } } : {}), wamid }, demoContact);
+        await handleClaimsDemoMessage({ from, text, document, ...(audio ? { audio: { id: audio.id, mimeType: audio.mimeType } } : {}), interactiveId, wamid }, demoContact);
         return;
     }
     // TTTFG-4830: voice notes are read on the claims demo only. For everyone else, as before: no reply.
