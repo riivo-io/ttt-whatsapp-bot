@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit b13060b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit ba38887). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -42,6 +42,12 @@ export const ConditionSchema = z
   .refine((c) => (c.equals === undefined) !== (c.oneOf === undefined), { message: 'a condition needs exactly one of equals or oneOf' });
 export type Condition = z.infer<typeof ConditionSchema>;
 
+/**
+ * TTTFG-4830 (28 Oct 2026): other words for an item, used when `when` holds. "A photo of the driver's licence" left the
+ * client guessing whose; with a variant it's "your driver's licence" when they were driving.
+ */
+export const ItemVariantSchema = z.object({ when: ConditionSchema, prompt: z.string().min(1), name: z.string().min(1).optional() });
+
 /** One question or evidence item on a form's question list. */
 export const QuestionItemSchema = z.object({
   /** Unique within the form; `answer:<key>` in the field map points here (`answer:<key>.<n>` for a grouped question). */
@@ -60,6 +66,11 @@ export const QuestionItemSchema = z.object({
   choices: z.array(z.string()).optional(),
   /** Ask only when an earlier answer, or a CRM value, matches. */
   onlyIf: ConditionSchema.optional(),
+  /**
+   * TTTFG-4830: the first variant whose `when` holds replaces `prompt` (and `name`) (progress.ts formItems). The prompt
+   * itself is the wording while it isn't known yet. Not for a question in a group.
+   */
+  variants: z.array(ItemVariantSchema).optional(),
   /** The repeating group this question belongs to (see QuestionGroup). */
   group: z.string().min(1).optional(),
   /**

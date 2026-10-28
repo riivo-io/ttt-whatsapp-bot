@@ -26,7 +26,7 @@ import { claimTurn, type Conversation } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
 import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyModel, type ReportedModel } from '../departments/insurance/reply';
-import { remindTurn, type ReminderOutcome, type ReminderPorts, type ReminderSettings } from '../departments/insurance/reminder';
+import { remindTurn, type BrokerStep, type ReminderOutcome, type ReminderPorts, type ReminderSettings } from '../departments/insurance/reminder';
 import { NO_RESUME_STATE, resumeTurn, type ResumePorts, type ResumeState } from '../departments/insurance/resume';
 import { understand, type UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
@@ -76,6 +76,18 @@ export const quietSpell = (waitingFor: 'files' | 'optional' | undefined): 'answe
  */
 export function demoPhones(raw: string | undefined): { phone: string; contactId: string }[] {
     return [...parseDemoNumbers(raw)].map(([local, contactId]) => ({ phone: `27${local}`, contactId }));
+}
+
+/**
+ * TTTFG-5212: CLAIMS_BROKER_ALERT_DAYS and CLAIMS_STOP_AFTER_DAYS, how many quiet days before the claim owner's alert,
+ * and before the reminders stop and the owner gets a Follow-up to phone the client. Unset or not above 0: the package's
+ * 5 and 10. Read at every run, so TTTFG-5289 can move the stop day without a deploy.
+ */
+export function reminderDays(alert: string | undefined, stop: string | undefined): Pick<ReminderSettings, 'brokerAlertDays' | 'stopAfterDays'> {
+    const days = (raw: string | undefined) => (raw?.trim() && Number(raw) > 0 ? Number(raw) : undefined);
+    const brokerAlertDays = days(alert);
+    const stopAfterDays = days(stop);
+    return { ...(brokerAlertDays ? { brokerAlertDays } : {}), ...(stopAfterDays ? { stopAfterDays } : {}) };
 }
 
 /** The demo contact for a WhatsApp sender, or null when the number isn't a demo number. */
@@ -146,6 +158,8 @@ export interface ClaimsDemoDeps {
     scheduleBatchCheck?(phone: string, token: string, what: 'answers' | 'files' | 'optional'): Promise<void>;
     /** TTTFG-5212: when the claim's last morning reminder went out (its agent action). Absent: never. */
     lastReminderOn?(claimId: string): Promise<string | null>;
+    /** TTTFG-5212: when the claim owner last got this broker step's Follow-up (day 5's alert, the stop day's call). Absent: never. */
+    lastBrokerStepOn?(claimId: string, step: BrokerStep): Promise<string | null>;
     /**
      * TTTFG-4830: a voice note as text. `hint`: what the client is answering (voiceHint), so names and numbers are
      * heard as they're likely meant. Absent: voice notes are off, and Tina asks the client to type.
@@ -357,10 +371,11 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
 }
 
 /**
- * TTTFG-5212 (first cut): the morning reminder for one demo number, on the number's own queue so it never crosses a
- * message the client is sending. Not while the client is reporting a claim (a 5168 walkthrough in progress).
- * remindTurn() decides per open claim and sends; when it puts the conversation back on a claim's list, that is kept,
- * with the reminder as Tina's last message, so the reply is read against it. Nothing sent: nothing is written.
+ * TTTFG-5212: the morning reminder for one demo number, on the number's own queue so it never crosses a message the
+ * client is sending. Not while the client is reporting a claim (a 5168 walkthrough in progress). remindTurn() decides
+ * per open claim, sends, and writes the claim owner's day-5 and stop-day Follow-ups; when it puts the conversation back
+ * on a claim's list, that is kept, with the reminder as Tina's last message, so the reply is read against it. Nothing
+ * sent: the conversation isn't written.
  */
 export async function claimsDemoReminder(
     deps: ClaimsDemoDeps, phone: string, contactId: string, now: Date, settings: ReminderSettings = {},
@@ -371,7 +386,11 @@ export async function claimsDemoReminder(
         : { contactId, requestId: '', walk: null, resume: NO_RESUME_STATE, held: [], lastSent: null };
     const abandoned = c.updatedAt && now.getTime() - Date.parse(c.updatedAt) > ABANDONED_AFTER_MS;
     if (c.walk && !abandoned) return 'walkthrough';
-    const ports: ReminderPorts = { ...deps.ports(c.requestId, () => {}), lastReminderOn: deps.lastReminderOn ?? (async () => null) };
+    const ports: ReminderPorts = {
+        ...deps.ports(c.requestId, () => {}),
+        lastReminderOn: deps.lastReminderOn ?? (async () => null),
+        lastBrokerStepOn: deps.lastBrokerStepOn ?? (async () => null),
+    };
     const r = await remindTurn(ports, { phone, requestId: c.requestId, signUpLink: deps.signUpLink }, c.resume, contactId, now, settings);
     if (!r.outcomes.some((o) => 'sent' in o)) return r.outcomes;
     c.resume = r.state;

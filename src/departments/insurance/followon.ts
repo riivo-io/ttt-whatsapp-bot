@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit b13060b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit ba38887). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -40,7 +40,7 @@
 // conversation stays on it (phase `still-need`): whatever the client sends next is read against the list, and the
 // morning reminder (reminder.ts) puts a client back on it. "I don't know" to one of those items is "not yet", so it
 // stays the client's to send; the broker takes only what the client can't get.
-import { DEPARTMENT, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
+import { clientQuestionDetail, DEPARTMENT, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import { formatProblem } from './formats';
 import { claimGate } from './gate';
@@ -252,6 +252,11 @@ export type FollowOnInput =
   | { kind: 'not-yet'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true }
   /** Claude could not get a value from the reply (for the item asked; `also` and `corrections` may still apply). */
   | { kind: 'unparsed'; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true }
+  /**
+   * TTTFG-4830 (28 Oct 2026): the client asked Tina something instead of answering. `help`: Claude's short answer about
+   * what Tina asked; absent: the question is for the claim's owner (cover, payment, advice), who gets a Follow-up.
+   */
+  | { kind: 'question'; question: string; help?: string; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true }
   /** `forItem`: Claude's reading of which evidence item the file is, when it can tell (TTTFG-5184). */
   | { kind: 'file'; file: ClientFile; wamid: string; forItem?: string }
   /**
@@ -896,6 +901,7 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
     : applyCorrections(c, w, st.sapsRequired, input.corrections, { at, wamid: input.wamid }, out, st.asking);
   const noted = input.kind === 'file' ? 0 : applyOthers(c, w, st.sapsRequired, input.also, { at, wamid: input.wamid, source: 'same-message' }, out, st.batch ?? st.asking);
 
+  if (input.kind === 'question') return { state: answerQuestion(c, w, st, input, out, at), out };
   if (st.phase === 'address') return { state: advanceAddress(c, w, st, input, out, at), out };
   if (st.phase === 'still-need') return { state: advanceStillNeed(c, w, st, input, out, { corrected, flagged, ownReading, noted }), out };
 
@@ -1061,6 +1067,41 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
   out.push({ kind: 'save-answer', key: item.key, record });
   w.answers[item.key] = record;
   return { state: proceed(c, w, st, out), out };
+}
+
+// ---------------------------------------------------------------------- TTTFG-4830: the client's own questions
+
+/**
+ * The client asked Tina something instead of answering (28 Oct 2026). A question about what she asked gets Claude's
+ * short answer; anything else (cover, payment, advice) goes to the claim's owner as a Follow-up, and Tina says so. Then
+ * she asks what she was asking, again: a question isn't a miss, and the state stays where it was.
+ */
+function answerQuestion(c: Ctx, w: Work, st: FollowOnState, input: Extract<ClientReply, { kind: 'question' }>, out: Out[], at: string): FollowOnState | null {
+  if (input.help) out.push({ kind: 'text', text: input.help });
+  else {
+    out.push({ kind: 'follow-up', detail: clientQuestionDetail(input.question) });
+    out.push({ kind: 'text', text: toBrokerText(c.claim.owner.name) });
+  }
+  if (st.phase === 'saps') {
+    out.push({ kind: 'ask', item: sapsAsk(w.facts), simpler: false, lead: BACK.one });
+    return st;
+  }
+  if (st.phase === 'address') {
+    const item = addressItem(c.claim, st.asking);
+    if (item) out.push({ kind: 'ask', item, simpler: false, lead: BACK.one });
+    return st;
+  }
+  if (st.phase === 'still-need') {
+    const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
+    if (missing.length) out.push({ kind: 'still-missing', items: missing, lead: '' });
+    return st;
+  }
+  if (st.batch) return relist(c, w, st, out, BACK, at, input.wamid);
+  const item = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === st.asking);
+  if (!item) return st;
+  if (st.confirming === item.key) out.push({ kind: 'text', text: allOfThemAgain(item), choices: ALL_OF_THEM_CHOICES });
+  else out.push({ kind: 'ask', item, simpler: false, lead: BACK.one });
+  return st;
 }
 
 // ------------------------------------------------------------------------------------ TTTFG-4830: voice notes
