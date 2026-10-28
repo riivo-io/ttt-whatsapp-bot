@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit b13060b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 573eaf9). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -102,6 +102,15 @@ export function applies(item: QuestionItem, answers: ClaimAnswers, facts?: Claim
   return !item.onlyIf || holds(item.onlyIf, answers, facts);
 }
 
+/**
+ * TTTFG-4830: the item in the words that fit what the client said so far: its first variant whose `when` holds (whose
+ * licence: "your driver's licence" when they were driving), else as written.
+ */
+function worded(item: QuestionItem, answers: ClaimAnswers, facts?: ClaimFacts): QuestionItem {
+  const v = item.variants?.find((x) => holds(x.when, answers, facts));
+  return v ? { ...item, prompt: v.prompt, ...(v.name ? { name: v.name } : {}) } : item;
+}
+
 /** The answer key of a group's "is there another?" question after entry `n`. */
 export const moreKey = (group: string, n: number) => `${group}.more.${n}`;
 
@@ -117,7 +126,7 @@ export function formItems(form: ClaimForm, answers: ClaimAnswers, facts?: ClaimF
   const out: QuestionItem[] = [];
   const placed = new Set<string>();
   for (const item of list) {
-    if (item.group === undefined) { out.push(item); continue; }
+    if (item.group === undefined) { out.push(worded(item, answers, facts)); continue; }
     if (placed.has(item.group)) continue;
     placed.add(item.group);
     const g = (form.questionGroups ?? []).find((x) => x.key === item.group);
