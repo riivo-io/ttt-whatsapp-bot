@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit ba38887). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 39b117f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -10,6 +10,11 @@
 // - two or more: "Is this about your … claim from … or …?" before the message or file is used. A file waits;
 // - a different incident (Claude's yes/no, like `describedAsTheft`): "Is this a new claim?". Only a yes starts the
 //   5168 walkthrough for a second claim.
+// - TTTFG-4830 (28 Oct 2026, from QC): the client says the claim isn't theirs ("I never logged it, this is fraud"), or
+//   Tina can't tell what they need. She stops her questions and asks what they'd like to do, with taps: open a new
+//   claim, carry on with this one, or talk to their broker. "Not theirs" also gives the broker an urgent Follow-up
+//   (NOT_THEIRS), and while that is open the claim is held: Tina asks nothing about it and the morning reminder passes
+//   it over, until the client says it is theirs after all (THEIRS) or the broker closes the Follow-up.
 //
 // The one wrong turn (TTTFG-5262): the claim's progress is never kept in Tina's conversation memory. ResumeState holds
 // only an unanswered question of this file and the follow-on's place in the conversation; what's missing is worked
@@ -22,10 +27,12 @@
 // answers Tina's last question still goes on (it can only be about that claim), but a "hi" or a file starts again from
 // the claim record. Without that cut-off, "hi" two days later is a miss on the old question, and two misses hand a
 // required question to the broker.
-import { claimTurn, sendText, type ClaimPorts, type Conversation } from './claim';
 import {
-  CLAIM_SETTINGS_DEFAULTS, followOnTurn, list, resumeMissing, type ClaimSettings, type ClaimStatus, type ClientReply, type FollowOnPorts,
-  type FollowOnState, type ResumeFile, type StoredClaimForm,
+  claimTurn, clientQuestionDetail, DEPARTMENT, sendText, toBrokerText, type AgentActionRow, type ClaimPorts, type Choice, type Conversation,
+} from './claim';
+import {
+  CLAIM_SETTINGS_DEFAULTS, followOnTurn, list, resumeMissing, type ClaimSettings, type ClaimStatus, type ClientReply, type FollowOnClaim,
+  type FollowOnPorts, type FollowOnState, type ResumeFile, type StoredClaimForm,
 } from './followon';
 import type { QuestionItem } from './contracts';
 import { chased, itemName } from './progress';
@@ -52,6 +59,11 @@ export interface OpenClaim {
   status: ClaimStatus;
   /** riivo_lastclientmessageon. */
   lastClientMessageOn?: string;
+  /**
+   * TTTFG-4830: the client said the claim isn't theirs (NOT_THEIRS, a Follow-up the broker hasn't closed) and hasn't
+   * said since that it is (THEIRS). Tina asks nothing about it, and the morning reminder passes it over.
+   */
+  disputed?: true;
 }
 
 /** The port TTTFG-5188 shares. The client's riivo_claim rows whose status is one of OPEN_CLAIM_STATUSES. */
@@ -84,7 +96,19 @@ export interface ResumeMessage {
    * Kept for a yes to "Is this a new claim?", so the walkthrough doesn't ask it again.
    */
   facts?: Facts;
+  /**
+   * TTTFG-4830, Claude: the client doesn't want to go on with the claim's questions. 'not-theirs': they say the claim
+   * isn't theirs (they never logged it, it's fraud or a mistake). 'something-else': Tina can't tell what they need (the
+   * wrong claim, cancel it, a person, another matter). `said`: the message, for the broker.
+   */
+  offTrack?: { kind: 'not-theirs' | 'something-else'; said: string };
+  /** TTTFG-4830, Claude, for "What would you like to do?" (CLARIFY_CHOICES): what the client chose. */
+  clarify?: ClarifyChoice;
 }
+
+/** TTTFG-4830: the answers to "What would you like to do?". 'nothing': "No, thanks". */
+export type ClarifyChoice = 'new-claim' | 'carry-on' | 'broker' | 'nothing';
+export const CLARIFY_CHOICE_KINDS = ['new-claim', 'carry-on', 'broker', 'nothing'] as const satisfies readonly ClarifyChoice[];
 
 /** A question of this file, waiting for the client's answer. */
 export type Pending =
@@ -94,7 +118,13 @@ export type Pending =
    * `facts`: the new incident as Claude read it. `back`: the follow-on conversation the question interrupted, so a no
    * goes straight back to it.
    */
-  | { kind: 'new-claim'; held: ResumeFile[]; facts?: Facts; back?: FollowOnState };
+  | { kind: 'new-claim'; held: ResumeFile[]; facts?: Facts; back?: FollowOnState }
+  /**
+   * TTTFG-4830: "What would you like to do?" about claim `claimId`. `why` 'disputed': the client said it isn't theirs
+   * (now or before); 'unsure': Tina couldn't tell what they need. `said`: their message, for the broker. `back`: as for
+   * 'new-claim'.
+   */
+  | { kind: 'clarify'; claimId: string; why: 'disputed' | 'unsure'; said?: string; held: ResumeFile[]; back?: FollowOnState };
 
 /** Kept on the Tina conversation between messages. Never what the claim holds. */
 export interface ResumeState {
@@ -112,19 +142,31 @@ export type Decision =
   | { kind: 'continue'; claimId: string }
   /**
    * Back on this claim. With no files, the welcome-back line first (`lead` "Thanks." after a no to "new claim?").
-   * `introSent`: a stale follow-on state of this claim says the duty of disclosure already went out.
+   * `introSent`: a stale follow-on state of this claim says the duty of disclosure already went out. `confirmed`
+   * (TTTFG-4830): the client said a claim they had said wasn't theirs is theirs after all (THEIRS is written first).
    */
-  | { kind: 'resume'; claimId: string; files: ResumeFile[]; lead: 'Welcome back.' | 'Thanks.'; introSent?: true }
+  | { kind: 'resume'; claimId: string; files: ResumeFile[]; lead: 'Welcome back.' | 'Thanks.'; introSent?: true; confirmed?: true }
   /** A no to "new claim?" in the middle of a conversation: straight back to it, without the welcome-back list. */
-  | { kind: 'back'; claimId: string; files: ResumeFile[]; followOn: FollowOnState }
+  | { kind: 'back'; claimId: string; files: ResumeFile[]; followOn: FollowOnState; confirmed?: true }
   /** `ask` false: a file arrived while the question was out; it's held and nothing is said. */
   | { kind: 'ask-which'; claims: OpenClaim[]; held: ResumeFile[]; ask: 'first' | 'again' | false }
   | { kind: 'ask-new'; held: ResumeFile[]; facts?: Facts; back?: FollowOnState; ask: 'first' | 'again' | false }
   /**
    * A yes to "new claim?": the 5168 walkthrough starts with what the client already said about the incident. Held
-   * files are kept for the new claim (the host passes them to the follow-on's start).
+   * files are kept for the new claim (the host passes them to the follow-on's start). `dispute` (TTTFG-4830): the same
+   * message said this other claim isn't theirs; the broker gets NOT_THEIRS first.
    */
-  | { kind: 'start-new'; held: ResumeFile[]; facts?: Facts };
+  | { kind: 'start-new'; held: ResumeFile[]; facts?: Facts; dispute?: { claimId: string; said: string } }
+  /**
+   * TTTFG-4830: "What would you like to do?" about this claim. `dispute`: the client just said it isn't theirs, so the
+   * broker gets NOT_THEIRS first. `question`: the client asked something meanwhile, answered or passed on first.
+   */
+  | {
+    kind: 'clarify'; claimId: string; why: 'disputed' | 'unsure'; said?: string; held: ResumeFile[]; back?: FollowOnState;
+    ask: 'first' | 'again' | false; dispute?: true; question?: { question: string; help?: string };
+  }
+  /** TTTFG-4830: the answer to "What would you like to do?" was their broker or nothing for now. Held files go to the claim. */
+  | { kind: 'clarified'; claimId: string; why: 'disputed' | 'unsure'; choice: 'broker' | 'nothing'; said?: string; held: ResumeFile[] };
 
 export interface DecideInput {
   open: readonly OpenClaim[];
@@ -143,9 +185,41 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
   const u = message.understood;
   const files: ResumeFile[] = u.kind === 'file' ? [{ file: u.file, forItem: message.forItem }] : [];
   const claims = [...open].sort(byIncident);
-  const resumeOrAsk = (held: ResumeFile[], lead: 'Welcome back.' | 'Thanks.'): Decision =>
-    claims.length === 1 ? { kind: 'resume', claimId: claims[0].id, files: held, lead } : { kind: 'ask-which', claims, held, ask: 'first' };
+  // TTTFG-4830: a claim the client said isn't theirs is never resumed or offered in "which claim?". With only such
+  // claims open, Tina asks what they'd like to do instead.
+  const onHold = (c: OpenClaim, more: ResumeFile[]): Decision =>
+    ({ kind: 'clarify', claimId: c.id, why: 'disputed', held: more, ask: 'first' });
+  const resumeOrAsk = (more: ResumeFile[], lead: 'Welcome back.' | 'Thanks.'): Decision => {
+    const live = claims.filter((c) => !c.disputed);
+    if (live.length === 0) return onHold(claims[0], more);
+    return live.length === 1 ? { kind: 'resume', claimId: live[0].id, files: more, lead } : { kind: 'ask-which', claims: live, held: more, ask: 'first' };
+  };
   const p = state.pending;
+
+  if (p?.kind === 'clarify') {
+    const more = [...p.held, ...files];
+    const claim = claims.find((c) => c.id === p.claimId);
+    // The claim closed while the question was out (the broker withdrew it, say): as for any message.
+    if (!claim) return resumeOrAsk(more, 'Welcome back.');
+    const choice = message.clarify ?? (message.newClaim || message.differentIncident ? 'new-claim' : undefined);
+    if (choice === 'new-claim') return { kind: 'start-new', held: more, facts: message.differentIncident ? message.facts : undefined };
+    if (choice === 'carry-on') {
+      const confirmed = p.why === 'disputed' ? { confirmed: true as const } : {};
+      return p.back
+        ? { kind: 'back', claimId: claim.id, files: more, followOn: p.back, ...confirmed }
+        : { kind: 'resume', claimId: claim.id, files: more, lead: 'Thanks.', ...confirmed };
+    }
+    if (choice) return { kind: 'clarified', claimId: claim.id, why: p.why, choice, said: p.said, held: more };
+    // Not theirs, said now about a claim Tina was only unsure about: the broker is told, and the question says so.
+    if (message.offTrack?.kind === 'not-theirs' && p.why !== 'disputed' && !claim.disputed) {
+      return { kind: 'clarify', claimId: claim.id, why: 'disputed', said: message.offTrack.said, held: more, back: p.back, ask: 'first', dispute: true };
+    }
+    const question = u.kind === 'question' ? { question: u.question, ...(u.help ? { help: u.help } : {}) } : undefined;
+    return {
+      kind: 'clarify', claimId: claim.id, why: p.why, said: p.said, held: more, back: p.back,
+      ask: question ? 'first' : files.length ? false : 'again', ...(question ? { question } : {}),
+    };
+  }
 
   if (p?.kind === 'new-claim') {
     const held = [...p.held, ...files];
@@ -179,11 +253,31 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
   // TTTFG-4830 (still need): a reply to the list of what's still needed (the morning reminder too) goes on the list.
   const listed = f?.phase === 'still-need' && f.listedAt ? Date.parse(f.listedAt) : 0;
   const fresh = !!current && now.getTime() - Math.max(last, listed) < resumeAfterHours * HOUR;
+  const back = fresh && !current.disputed ? f! : undefined;
+
+  // TTTFG-4830: "this claim is fraud, I never logged it". The claim it is about is the one Tina is on, else the only
+  // one open. The broker is told at once (unless it's already held), Tina stops her questions and offers a new claim.
+  const about = current ?? (claims.length === 1 ? claims[0] : undefined);
+  const off = message.offTrack;
+  if (off?.kind === 'not-theirs' && about) {
+    if (message.newClaim || message.differentIncident) {
+      return { kind: 'start-new', held: files, facts: message.facts, ...(about.disputed ? {} : { dispute: { claimId: about.id, said: off.said } }) };
+    }
+    return { kind: 'clarify', claimId: about.id, why: 'disputed', said: off.said, held: files, back, ask: 'first', ...(about.disputed ? {} : { dispute: true }) };
+  }
 
   // TTTFG-4830: the client already said it's a new claim, so it isn't asked.
   if (message.newClaim) return { kind: 'start-new', held: files, facts: message.facts };
-  if (message.differentIncident) return { kind: 'ask-new', held: files, facts: message.facts, back: fresh ? f! : undefined, ask: 'first' };
+  if (message.differentIncident) return { kind: 'ask-new', held: files, facts: message.facts, back, ask: 'first' };
 
+  // TTTFG-4830: Tina can't tell what the client needs, and the message answers nothing: she asks, rather than say
+  // "Sorry, I didn't quite get that" and go on with her questions.
+  const answersNothing = (u.kind === 'unparsed' || u.kind === 'question') && !('also' in u && u.also?.length) && !('corrections' in u && u.corrections?.length);
+  if (off?.kind === 'something-else' && about && answersNothing) {
+    return { kind: 'clarify', claimId: about.id, why: about.disputed ? 'disputed' : 'unsure', said: off.said, held: files, back, ask: 'first' };
+  }
+
+  if (current?.disputed) return onHold(current, files);
   if (current) {
     // A late answer to Tina's last question can only be about that claim. A "hi" or a file after a gap starts afresh.
     if (fresh || (u.kind !== 'unparsed' && u.kind !== 'file')) return { kind: 'continue', claimId: current.id };
@@ -209,6 +303,70 @@ export const heldFilesKept = (n: number) =>
   n === 1 ? "I'll add the file you sent to the new claim once it's open." : `I'll add the ${n} files you sent to the new claim once it's open.`;
 /** A no to "Is this a new claim?" in the middle of a conversation: the words in front of the question Tina was on. */
 export const backTo = (claimType: ClaimType) => `No problem, back to your ${claimType.toLowerCase()} claim.`;
+
+/**
+ * TTTFG-4830 (28 Oct 2026): the broker's Follow-up when the client says a claim isn't theirs. Urgent: it may be fraud
+ * on their policy. Found again by its name (riivo_subject) while it is open, to hold the claim (OpenClaim.disputed).
+ * DRAFT WORDING, as the other broker texts.
+ */
+export const NOT_THEIRS = {
+  name: 'Claim - client says not theirs',
+  version: 'draft-1',
+  urgencyReason: 'The client says the claim is not theirs',
+  render: (v: { reference: string; said: string }) => `Claim ${v.reference}: the client says on WhatsApp it isn't theirs or isn't right: `
+    + `"${v.said}". Tina has stopped asking them about it, and the morning reminders are held. Please check it with them (it may be `
+    + 'fraud or a mistake), then withdraw the claim, or close this follow-up to carry on with it.',
+} as const;
+/** TTTFG-4830: the client said a claim they had said wasn't theirs is theirs after all. It lifts the hold. */
+export const THEIRS = {
+  name: 'Claim - client says theirs',
+  version: 'draft-1',
+  render: (v: { reference: string }) => `Claim ${v.reference}: the client said on WhatsApp it is theirs after all, and carried on with it.`,
+} as const;
+/** TTTFG-4830: the Follow-up when the client chose "Talk to my broker". */
+export const talkToBrokerDetail = (reference: string, said?: string) =>
+  `The client asked on WhatsApp to talk to you about claim ${reference}.${said ? ` They wrote: "${said}".` : ''} Please contact them.`;
+
+/** TTTFG-4830: the taps for "What would you like to do?" (WhatsApp buttons: 20 characters at most). */
+export const CLARIFY_CHOICES: Record<ClarifyChoice, Choice> = {
+  'new-claim': { title: 'Open a new claim' },
+  'carry-on': { title: 'Carry on with claim' },
+  broker: { title: 'Talk to my broker' },
+  nothing: { title: 'No, thanks' },
+};
+/** A claim the client says isn't theirs: a new claim first. Otherwise the claim first. Never more than three. */
+export const clarifyChoices = (why: 'disputed' | 'unsure'): Choice[] =>
+  (why === 'disputed' ? (['new-claim', 'nothing', 'carry-on'] as const) : (['carry-on', 'new-claim', 'broker'] as const)).map((k) => CLARIFY_CHOICES[k]);
+
+/** What the texts below say about the claim. */
+export interface ClaimLabel { reference: string; claimType: ClaimType; incidentAt: string; ownerName: string }
+const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+/** "claim *CLM-000313* (motor accident, 26/10/2026)": enough for the client to know which one. */
+const claimRef = (c: ClaimLabel) => `claim *${c.reference}* (${claimWords(c.claimType)}, ${shortDate(c.incidentAt)})`;
+
+/**
+ * TTTFG-4830: "What would you like to do?". `how`: 'dispute' right after the client said it isn't theirs (the broker
+ * was just told); 'first' when Tina raises it; 'again' after a reply she couldn't read; 'after-question' after she
+ * answered or passed on a question.
+ */
+export function clarifyText(why: 'disputed' | 'unsure', claim: ClaimLabel, how: 'dispute' | 'first' | 'again' | 'after-question'): string {
+  const ask = why === 'disputed' ? 'Would you like to open a new claim?' : 'What would you like to do?';
+  if (how === 'again') return `Sorry, I didn't quite get that. ${ask}`;
+  if (how === 'after-question') return ask;
+  if (why === 'unsure') return `Sorry, I'm not sure what you need. I was asking about your ${claimWords(claim.claimType)} claim *${claim.reference}*.\n\n${ask}`;
+  if (how === 'dispute') {
+    return `I'm sorry about that. I've asked ${claim.ownerName} to look into ${claimRef(claim)} and contact you. I won't ask you anything `
+      + 'more about it for now.\n\nWould you like to open a new claim instead?';
+  }
+  return `${sentence(claim.ownerName)} is looking into ${claimRef(claim)}, so I won't ask you anything more about it for now.\n\n${ask}`;
+}
+
+/** TTTFG-4830: the answer to "What would you like to do?" was their broker, or nothing for now. */
+export function clarifiedText(why: 'disputed' | 'unsure', choice: 'broker' | 'nothing', claim: ClaimLabel): string {
+  if (why === 'disputed') return `No problem. ${sentence(claim.ownerName)} will contact you about claim *${claim.reference}*.`;
+  if (choice === 'broker') return `I've asked ${claim.ownerName} to contact you about your ${claimWords(claim.claimType)} claim *${claim.reference}*.`;
+  return 'No problem. Message me here whenever you need me.';
+}
 
 /** "your motor accident claim from 01/11/2026", with the reference when two claims would read the same. */
 function claimLabels(claims: readonly OpenClaim[]): string[] {
@@ -298,6 +456,7 @@ export async function resumeTurn(
     }
 
     case 'resume': {
+      if (d.confirmed) await theirsAfterAll(ports, d.claimId, at);
       if (!d.files.length) await welcomeBack(ports, conv, d.claimId, d.lead, now, settings);
       const r = await followOnTurn(ports, conv, null, { kind: 'resume', claimId: d.claimId, wamid: message.understood.wamid, files: d.files, introSent: d.introSent }, now, settings);
       return { route: 'claim', state: { followOn: r.state, pending: null } };
@@ -315,6 +474,7 @@ export async function resumeTurn(
 
     case 'back': {
       const claim = open.find((c) => c.id === d.claimId)!;
+      if (d.confirmed) await theirsAfterAll(ports, d.claimId, at);
       const r = await followOnTurn(ports, conv, null, {
         kind: 'resume', claimId: d.claimId, wamid: message.understood.wamid, files: d.files, introSent: true,
         lead: backTo(claim.claimType), skipped: d.followOn.skipped,
@@ -323,11 +483,71 @@ export async function resumeTurn(
     }
 
     case 'start-new': {
+      if (d.dispute) await ports.createAgentAction(notTheirsRow(await ports.loadClaim(d.dispute.claimId), d.dispute.said, at));
       if (d.held.length) await sendText(ports, conv, heldFilesKept(d.held.length), null, at);
       const t = await claimTurn(ports, conv, null, { kind: 'start', facts: d.facts }, now);
       return { route: 'new-claim', walkthrough: t.state, held: d.held };
     }
+
+    case 'clarify': {
+      await touchAll();
+      const claim = await ports.loadClaim(d.claimId);
+      const to = { id: claim.id, owner: claim.owner };
+      if (d.dispute) await ports.createAgentAction(notTheirsRow(claim, d.said ?? '', at));
+      if (d.question?.help) await sendText(ports, conv, d.question.help, to, at, claim.contactId);
+      else if (d.question) {
+        await ports.createAgentAction({
+          kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
+          detail: clientQuestionDetail(d.question.question), at,
+        });
+        await sendText(ports, conv, toBrokerText(claim.owner.name), to, at, claim.contactId);
+      }
+      if (d.ask) {
+        const how = d.dispute ? 'dispute' : d.question ? 'after-question' : d.ask === 'again' ? 'again' : 'first';
+        await sendText(ports, conv, clarifyText(d.why, labelOf(claim), how), to, at, claim.contactId, clarifyChoices(d.why));
+      }
+      const pending: Pending = {
+        kind: 'clarify', claimId: d.claimId, why: d.why, held: d.held, ...(d.said ? { said: d.said } : {}), ...(d.back ? { back: d.back } : {}),
+      };
+      return { route: 'claim', state: { followOn: null, pending } };
+    }
+
+    case 'clarified': {
+      await touchAll();
+      const claim = await ports.loadClaim(d.claimId);
+      // Files sent while the question was out are the claim's: the broker sees them there.
+      for (const h of d.held) {
+        if (h.file.media === 'video') await ports.storeVideo(h.file, { claimId: claim.id, itemKey: h.forItem });
+        else await ports.fileToPipeline(h.file, { claimId: claim.id, itemKey: h.forItem });
+      }
+      if (d.why === 'unsure' && d.choice === 'broker') {
+        await ports.createAgentAction({
+          kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
+          detail: talkToBrokerDetail(claim.reference, d.said), at,
+        });
+      }
+      await sendText(ports, conv, clarifiedText(d.why, d.choice, labelOf(claim)), { id: claim.id, owner: claim.owner }, at, claim.contactId);
+      return { route: 'claim', state: NO_RESUME_STATE };
+    }
   }
+}
+
+const labelOf = (c: FollowOnClaim): ClaimLabel => ({ reference: c.reference, claimType: c.claimType, incidentAt: c.facts.incidentAt, ownerName: c.owner.name });
+
+/** TTTFG-4830: the broker's urgent Follow-up for a claim the client says isn't theirs. */
+const notTheirsRow = (claim: FollowOnClaim, said: string, at: string): AgentActionRow => ({
+  kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
+  detail: NOT_THEIRS.render({ reference: claim.reference, said }), urgent: true, urgencyReason: NOT_THEIRS.urgencyReason,
+  template: { name: NOT_THEIRS.name, version: NOT_THEIRS.version }, at,
+});
+
+/** TTTFG-4830: written when the client carries on with a claim they had said wasn't theirs; it lifts the hold. */
+async function theirsAfterAll(ports: ResumePorts, claimId: string, at: string) {
+  const claim = await ports.loadClaim(claimId);
+  await ports.createAgentAction({
+    kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
+    detail: THEIRS.render({ reference: claim.reference }), template: { name: THEIRS.name, version: THEIRS.version }, at,
+  });
 }
 
 /** The welcome-back line, from the claim record: what's missing is worked out now, not remembered. */

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit ba38887). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit 39b117f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the one-page claim summary sheet, for a policy whose insurer has no mapped form (the generic
 // riivo_claimform row). The client signs it like a form, and the broker still fills that insurer's own form by hand

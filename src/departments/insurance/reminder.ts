@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit ba38887). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 39b117f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212 (first cut, built for the TTTFG-4830 WhatsApp demo): every morning, a client whose claim still needs
 // something is sent the list again ("Things we still need from you"), so the claim doesn't stall on the client's side.
@@ -12,6 +12,8 @@
 // - the client's last message is less than `stopAfterDays` old (default 10). 5212 stops the reminders there and hands
 //   the claim to the broker as a call to make (below; TTTFG-5289 may move the day);
 // - it isn't Sunday in South Africa (5212 AC 1);
+// - the client hasn't said the claim isn't theirs (TTTFG-4830: OpenClaim.disputed, while the broker checks it). Such a
+//   claim gets no reminder and no broker step: the broker already has an urgent Follow-up on it;
 // - the claim wasn't reminded already today (its Created agent action), so a second run the same day sends nothing;
 // - WhatsApp allows it: a client who last wrote more than 24 hours ago can only be sent an approved template. With
 //   `template: true` (the host has one) the reminder goes as REMINDER_TEMPLATE's WhatsApp body, the list in one line,
@@ -60,7 +62,7 @@ export interface ReminderPorts extends ResumePorts {
 
 export type ReminderSkip =
   | 'nothing-needed' | 'wrote-recently' | 'quiet-too-long' | 'no-message-yet' | 'reminded-today' | 'outside-24h' | 'question-open'
-  | 'sunday';
+  | 'sunday' | 'disputed';
 /** `broker`: the claim's owner got that step's Follow-up this run. */
 export type ReminderOutcome =
   | { reference: string; sent: 'text' | 'template'; lines: string[]; broker?: BrokerStep }
@@ -152,6 +154,7 @@ export async function remindTurn(
   const reminded: Array<{ ctx: Parameters<typeof resumeMissing>[0]; missing: ReturnType<typeof resumeMissing> }> = [];
   let lastSent: string | undefined;
   for (const o of open) {
+    if (o.disputed) { outcomes.push({ reference: o.reference, skipped: 'disputed' }); continue; }
     const due = step && (await brokerDue(ports, o.id, step, heard!)) ? step : undefined;
     if (!when.ok && !due) { outcomes.push({ reference: o.reference, skipped: when.skipped }); continue; }
     const claim = await ports.loadClaim(o.id);
