@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit fb95cdd). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit b13060b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -40,7 +40,7 @@
 // conversation stays on it (phase `still-need`): whatever the client sends next is read against the list, and the
 // morning reminder (reminder.ts) puts a client back on it. "I don't know" to one of those items is "not yet", so it
 // stays the client's to send; the broker takes only what the client can't get.
-import { DEPARTMENT, type AgentActionRow, type Conversation, type Outbound, type Owner } from './claim';
+import { DEPARTMENT, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import { formatProblem } from './formats';
 import { claimGate } from './gate';
@@ -293,7 +293,7 @@ export const NOTED_OTHERS = "Thanks, I've noted that.";
 /** TTTFG-4830 (voice notes): around what Tina saved from a voice note, said back first (heardText). */
 export const HEARD = { lead: 'From your voice note I noted:', end: 'If I misheard anything, just tell me.' } as const;
 /** TTTFG-4830 (batches): said with the first batch of a conversation. */
-export const BATCH_HINT = `Answer as best you can, and if you don't know something, just say so. ${VOICE_OR_TEXT}`;
+export const BATCH_HINT = `If you don't know something, just say so. ${VOICE_OR_TEXT}`;
 /** TTTFG-4830: what's still open after a reply that answered part of a batch (several, or one). */
 export const STILL_NEED = { many: 'Thanks. I still need these:', one: 'Thanks. I still need this one:' } as const;
 /** TTTFG-4830: a reply that answered none of the batch. One question left is asked "in simpler words", as before. */
@@ -306,6 +306,8 @@ export const allOfThem = (n: number, item: QuestionItem) =>
   `Thanks, I've got ${n === 1 ? 'that one' : `those ${n}`}. ${n === 1 ? 'Is that' : 'Are those'} all ${itemName(item)}, or do you have more?`;
 /** TTTFG-4830: the same, asked again after a reply that wasn't a yes or a no. */
 export const allOfThemAgain = (item: QuestionItem) => `Is that all ${itemName(item)}? Please just answer yes or no.`;
+/** TTTFG-4830 (28 Oct 2026): the taps for allOfThem and allOfThemAgain. */
+export const ALL_OF_THEM_CHOICES: Choice[] = [{ title: "That's all", reply: "Yes, that's all of them" }, { title: 'I have more', reply: 'No, I have more' }];
 /** TTTFG-4830: "No, there are more" to allOfThem. */
 export const SEND_THE_REST = "No problem, send the rest here when you're ready.";
 /** TTTFG-4830: an evidence item of a set number of files (the front and back): fewer came. */
@@ -358,7 +360,8 @@ type Out =
    */
   | { kind: 'ask-batch'; items: QuestionItem[]; lead?: string; intro?: { hint: boolean; same: boolean } }
   | { kind: 'saps-required' }
-  | { kind: 'text'; text: string }
+  /** `choices` (TTTFG-4830): the text asks one closed question, and these answer it. */
+  | { kind: 'text'; text: string; choices?: Choice[] }
   | { kind: 'template'; template: ClaimTemplate; text: string }
   | { kind: 'received'; item: QuestionItem }
   | { kind: 'closing' }
@@ -646,7 +649,8 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
   // Tina doesn't announce it (one message less before the first question).
   applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
-    if (!w.facts.sapsCaseNumber) out.push({ kind: 'saps-instruction' });
+    // TTTFG-4830: "please report it" only to a client who didn't say they had.
+    if (!w.facts.sapsCaseNumber && !c.claim.facts.saps) out.push({ kind: 'saps-instruction' });
     const item = sapsAsk(w.facts);
     out.push({ kind: 'ask', item, simpler: false });
     return { state: { ...st, phase: 'saps', asking: item.key }, out };
@@ -948,7 +952,7 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
       return { state: s, out };
     }
     if (input.kind === 'unparsed' && st.misses < 1) {
-      out.push({ kind: 'text', text: allOfThemAgain(item) });
+      out.push({ kind: 'text', text: allOfThemAgain(item), choices: ALL_OF_THEM_CHOICES });
       return { state: { ...s, misses: st.misses + 1 }, out };
     }
     out.push({ kind: 'received', item });
@@ -1074,26 +1078,23 @@ export function heardValue(item: QuestionItem | undefined, v: string | number | 
 }
 
 /**
- * What Tina saved from a voice note, as she says it back: a value of the question she asked alone; otherwise one line
- * each, by its number in the batch Tina asked (the list the client just answered), then the others by their question.
- * Null when nothing was saved (only "don't know", or nothing understood).
+ * What Tina saved from a voice note, as she says it back: one line each, the question in bold and the answer after it
+ * (TTTFG-4830, 28 Oct 2026), so the client can check each answer at a glance. Answers to the batch Tina asked (the list
+ * the client just answered) keep its numbers; the others follow. Null when nothing was saved (only "don't know", or
+ * nothing understood).
  */
 export function heardText(entries: ReadonlyArray<{ item?: QuestionItem; key: string; value: string | number | boolean }>, st: FollowOnState): string | null {
   if (!entries.length) return null;
   const batch = st.phase === 'items' ? st.batch ?? [] : [];
-  if (entries.length === 1 && entries[0].key === st.asking && !batch.length) {
-    return `${HEARD.lead} ${heardValue(entries[0].item, entries[0].value)}. ${HEARD.end}`;
-  }
   const at = (key: string) => (batch.includes(key) ? batch.indexOf(key) : batch.length);
   const lines = [...entries].sort((a, b) => at(a.key) - at(b.key)).map((e) => {
-    const value = heardValue(e.item, e.value);
-    if (batch.includes(e.key)) return `${batch.indexOf(e.key) + 1}. ${value}`;
-    // The question in Tina's words when it is one ("What make is the car? VW"), otherwise its name ("Your home address:").
+    // The question in Tina's words when it is one ("What make is the car?"), otherwise its name ("Your home address:").
     const asked = e.item?.prompt.split(/(?<=[.?!])\s/)[0].trim();
-    if (asked?.endsWith('?')) return `- ${asked} ${value}`;
-    return `- ${e.item ? capital(itemName(e.item)) : e.key}: ${value}`;
+    const label = asked?.endsWith('?') ? asked : `${e.item ? capital(itemName(e.item)) : e.key}:`;
+    const line = `*${label}* ${heardValue(e.item, e.value)}`;
+    return batch.includes(e.key) ? `${batch.indexOf(e.key) + 1}. ${line}` : line;
   });
-  return [HEARD.lead, ...lines, HEARD.end].join('\n');
+  return [HEARD.lead, lines.join('\n'), HEARD.end].join('\n\n');
 }
 
 /** Out items Tina says to the client (the others are writes). */
@@ -1300,7 +1301,7 @@ function filesIn(c: Ctx, w: Work, st: FollowOnState, item: QuestionItem, out: Ou
   const have = filesFor(item, w.evidence);
   const need = fileCount(item);
   if (need === 'any') {
-    out.push({ kind: 'text', text: allOfThem(have, item) });
+    out.push({ kind: 'text', text: allOfThem(have, item), choices: ALL_OF_THEM_CHOICES });
     return { ...st, confirming: item.key, misses: 0 };
   }
   if (have < need) {
@@ -1449,8 +1450,25 @@ export function askText(item: QuestionItem, simpler: boolean, again = false): st
     ? `${evidenceRequest(item)}${item.required || /if you have/i.test(item.prompt) ? '' : " If you don't have this, just say so."}`
     : item.prompt;
   if (!simpler) return prompt;
-  const choices = item.answerType === 'choice' && item.choices?.length ? `\n${item.choices.map((c, i) => `${i + 1}. ${c}`).join('\n')}` : '';
-  return `Sorry, I didn't quite get that. ${prompt}${HINT[item.answerType] ?? ''}${choices}`;
+  // A choice question's choices are its taps (itemChoices), so they aren't listed in the text; more than a list holds
+  // still are, as before.
+  const many = item.answerType === 'choice' && (item.choices?.length ?? 0) > MAX_CHOICES;
+  const choices = many ? `\n${item.choices!.map((c, i) => `${i + 1}. ${c}`).join('\n')}` : '';
+  return `Sorry, I didn't quite get that. ${prompt}${item.answerType === 'choice' ? '' : HINT[item.answerType] ?? ''}${choices}`;
+}
+
+/** TTTFG-4830: the most choices one question offers to tap (a WhatsApp list holds ten). More are typed, as before. */
+export const MAX_CHOICES = 10;
+
+/**
+ * TTTFG-4830 (28 Oct 2026): what the client can tap to answer one question: Yes or No, a choice question's choices, or
+ * for a file Tina asks for, that they don't have it. Nothing for an answer in their own words.
+ */
+export function itemChoices(item: QuestionItem, again = false): Choice[] | undefined {
+  if (item.kind === 'evidence') return [{ title: again ? 'Not yet' : item.required ? "I don't have it yet" : "I don't have it" }];
+  if (item.answerType === 'yes/no') return YES_NO;
+  if (item.answerType === 'choice' && item.choices?.length && item.choices.length <= MAX_CHOICES) return item.choices.map((c) => ({ title: c }));
+  return undefined;
 }
 
 const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
@@ -1484,14 +1502,17 @@ export function batchLines(items: readonly QuestionItem[], choices = false): str
   });
 }
 
-/** TTTFG-4830: a batch as Tina sends it: the lead and the intro, then the questions numbered from 1. */
+/**
+ * TTTFG-4830: a batch as Tina sends it: the lead and the intro (the topic in bold), then the questions numbered from 1,
+ * with a blank line between them so each one stands out (28 Oct 2026).
+ */
 export function batchText(items: readonly QuestionItem[], o: { lead?: string; intro?: { hint: boolean; same: boolean } } = {}): string {
   const intro = o.intro
-    ? `${o.intro.same ? 'A few more questions about' : o.intro.hint ? 'A few questions about' : 'Next, a few questions about'} ${batchTopic(items)}.`
+    ? `${o.intro.same ? 'A few more questions about' : o.intro.hint ? 'A few questions about' : 'Next, a few questions about'} *${batchTopic(items)}*.`
       + (o.intro.hint ? ` ${BATCH_HINT}` : '')
     : undefined;
   const lines = batchLines(items, !o.intro).map((l, i) => `${i + 1}. ${l}`);
-  return [[o.lead, intro].filter(Boolean).join(' '), ...lines].filter(Boolean).join('\n');
+  return [[o.lead, intro].filter(Boolean).join(' '), ...lines].filter(Boolean).join('\n\n');
 }
 
 /** TTTFG-5254 step 14. The sign line only while a signing link is out: not when signed, and not when none was sent. */
@@ -1509,7 +1530,7 @@ export const list = (names: string[]) => {
   return n.length < 2 ? n.join('') : `${n.slice(0, -1).join(', ')} and ${n.at(-1)}`;
 };
 
-/** TTTFG-4830 (still need): the heading of the list, in the client's words. */
+/** TTTFG-4830 (still need): the heading of the list, in the client's words (in bold in the list's message). */
 export const STILL_NEED_HEADING = 'Things we still need from you:';
 
 /** "the vehicle registration number" as a line of a list: "Vehicle registration number". */
@@ -1541,7 +1562,7 @@ export function stillNeedLines(items: readonly QuestionItem[], answers: ClaimAns
 export function stillMissingText(items: readonly QuestionItem[], lead: string = ALL_FOR_NOW): string {
   const lines = stillNeedLines(items);
   const them = itOrThem(lines);
-  return [[lead, STILL_NEED_HEADING].filter(Boolean).join(' '), ...lines.map((l) => `- ${l}`), `Please send ${them} here when you have ${them}.`].join('\n');
+  return [[lead, `*${STILL_NEED_HEADING}*`].filter(Boolean).join(' '), lines.map((l) => `- ${l}`).join('\n'), `Please send ${them} here when you have ${them}.`].join('\n\n');
 }
 
 // ----------------------------------------------------------------------------------------------------- the turn
@@ -1596,7 +1617,7 @@ export async function followOnTurn(
     ports.createAgentAction({
       kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, detail, at, template,
     });
-  const say = (text: string) => sendClaimText(ports, conv, text, claim, at);
+  const say = (text: string, choices?: Choice[]) => sendClaimText(ports, conv, text, claim, at, choices);
   const setStatus = async (to: ClaimStatus) => {
     if (status === to) return;
     await ports.setStatus(claimId, to);
@@ -1612,7 +1633,7 @@ export async function followOnTurn(
       case 'ask': {
         const text = askText(o.item, o.simpler, o.again);
         const phrased = ports.phrase ? await ports.phrase(text, { key: o.item.key, simpler: o.simpler }) : text;
-        await say(o.lead ? `${o.lead} ${phrased}` : phrased);
+        await say(o.lead ? `${o.lead} ${phrased}` : phrased, itemChoices(o.item, o.again));
         break;
       }
       case 'ask-batch':
@@ -1623,7 +1644,7 @@ export async function followOnTurn(
         await ports.setSapsRequired(claimId);
         break;
       case 'text':
-        await say(o.text);
+        await say(o.text, o.choices);
         break;
       case 'template':
         await ports.send(conv.phone, { kind: 'template', name: o.template.name, version: o.template.version, text: o.text });
@@ -1676,8 +1697,11 @@ export async function followOnTurn(
   return { state: step.state };
 }
 
-/** Every text Tina sends on the claim passes the policy gate. A blocked one becomes the holding line and a Follow-up. */
-async function sendClaimText(ports: FollowOnPorts, conv: Conversation, text: string, claim: FollowOnClaim, at: string) {
+/**
+ * Every text Tina sends on the claim passes the policy gate. A blocked one becomes the holding line (without its
+ * `choices`) and a Follow-up.
+ */
+async function sendClaimText(ports: FollowOnPorts, conv: Conversation, text: string, claim: FollowOnClaim, at: string, choices?: Choice[]) {
   const gate = claimGate(text);
   if (!gate.ok) {
     await ports.createAgentAction({
@@ -1685,5 +1709,5 @@ async function sendClaimText(ports: FollowOnPorts, conv: Conversation, text: str
       detail: `Tina's reply on claim ${claim.reference} was blocked by the ${gate.rule} rule ("${gate.matched}"). The client got the holding line. Please update them.`,
     });
   }
-  await ports.send(conv.phone, { kind: 'text', text: gate.text });
+  await ports.send(conv.phone, { kind: 'text', text: gate.text, ...(gate.ok && choices?.length ? { choices } : {}) });
 }

@@ -24,6 +24,9 @@
  *   CLAIMS_SIGN_TEMPLATE_SIGNED_OFF  TTTFG-5196: "yes" lets the "ready to sign" message go out (draft-1 wording until
  *                                  Insurance and Advice signs it off). Otherwise the claim owner gets a Follow-up and
  *                                  the client no link. Needs the signing page set up (src/signing/env.ts: SIGNING_PUBLIC_URL)
+ *   CLAIMS_MESSAGE_MAX_CHARS       TTTFG-4830: what one client message makes Tina say goes out as one WhatsApp message,
+ *                                  split only past this many characters (default 700; 0: each part on its own). See
+ *                                  src/domain/claimsOutbox.ts, which also sends the taps (reply buttons and lists)
  * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql); signing_requests (20261027120000).
  * TTTFG-4830: every message in and out also goes where Tina keeps her own: Supabase's message log (sessions and
  * messages) and the demo CRM's timeline (riivo_whatsappcommunications), under the claim, else the request, else the
@@ -42,6 +45,7 @@ import { lastReminderPort } from '../departments/insurance/resume-dataverse';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
+import { interactiveFor, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, type OutPart } from '../domain/claimsOutbox';
 import {
     cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
     type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
@@ -97,48 +101,69 @@ const graph: Graph = async (method, path, body, contentType) => {
     });
 };
 
-/** TTTFG-4830: every send goes into `log` as well (what WhatsApp didn't deliver says so), for writeDemoLog. */
-const channels = (stats: CrmStats, log: DemoLog): DemoChannels => ({
-    dv: dataverse(stats),
-    graph,
-    site: process.env.CLAIMS_DEMO_SHAREPOINT_SITE || DEV_SITE,
-    // A send Meta refuses is tried once more, then logged with Meta's reason. It never stops the turn halfway: the claim
-    // is already written, so the conversation state must be saved with it.
-    sendText: async (to, text) => {
-        const at = new Date().toISOString();
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            try {
-                const wamid = await metaWhatsAppService.sendMessage(to, text);
-                if (!wamid) console.warn(`[ClaimsDemo] WhatsApp send to ${to} returned no message id`);
-                log.outbound.push({ text, at, wamid });
-                return;
-            } catch (e: any) {
-                console.error(`[ClaimsDemo] WhatsApp send to ${to} refused (attempt ${attempt}):`, JSON.stringify(e?.response?.data ?? e?.message));
-                if (attempt === 1) await new Promise((r) => setTimeout(r, 2000));
-            }
+/**
+ * TTTFG-4830: one message as WhatsApp gets it: with its choices as buttons or a list when they fit (interactiveFor),
+ * else as numbered lines. A send Meta refuses is tried once more, then (with choices) once as plain text with the lines,
+ * then logged with Meta's reason. It never stops the turn halfway: the claim is already written, so the conversation
+ * state must be saved with it.
+ */
+async function deliver(to: string, m: OutPart, log: DemoLog): Promise<void> {
+    const at = new Date().toISOString();
+    const interactive = m.choices?.length ? interactiveFor(m.text, m.choices) : null;
+    const lines = m.choices?.length ? withChoiceLines(m.text, m.choices) : m.text;
+    const tries: (() => Promise<string | null>)[] = interactive
+        ? [() => metaWhatsAppService.sendInteractive(to, interactive), () => metaWhatsAppService.sendInteractive(to, interactive), () => metaWhatsAppService.sendMessage(to, lines)]
+        : [() => metaWhatsAppService.sendMessage(to, lines), () => metaWhatsAppService.sendMessage(to, lines)];
+    for (const [i, send] of tries.entries()) {
+        try {
+            const wamid = await send();
+            if (!wamid) console.warn(`[ClaimsDemo] WhatsApp send to ${to} returned no message id`);
+            log.outbound.push({ text: interactive && i < 2 ? loggedText(m) : lines, at, wamid });
+            return;
+        } catch (e: any) {
+            console.error(`[ClaimsDemo] WhatsApp send to ${to} refused (attempt ${i + 1}):`, JSON.stringify(e?.response?.data ?? e?.message));
+            if (i === 0) await new Promise((r) => setTimeout(r, 2000));
         }
-        log.outbound.push({ text: `${text}\n(WhatsApp didn't deliver this message.)`, at });
-    },
-    sendDocument: async (to, bytes, fileName, caption) => {
-        const at = new Date().toISOString();
-        const r = await metaWhatsAppService.sendDocument(to, bytes, fileName, caption);
-        if (!r.delivered) console.warn(`[ClaimsDemo] Document ${fileName} to ${to} not delivered: ${r.error ?? (r.dryRun ? 'dry run' : 'unknown')}`);
-        log.outbound.push({ text: `${caption}\n📎 ${fileName}${r.delivered ? '' : "\n(WhatsApp didn't deliver this document.)"}`, at });
-    },
-    ...(process.env.CLAIMS_REMINDER_TEMPLATE ? {
-        sendTemplate: async (to: string, params: string[]) => {
+    }
+    log.outbound.push({ text: `${lines}\n(WhatsApp didn't deliver this message.)`, at });
+}
+
+/**
+ * TTTFG-4830: every send goes into `log` as well (what WhatsApp didn't deliver says so), for writeDemoLog. Texts wait in
+ * the outbox until flush(), at the end of the job, so one client message gets one message back (claimsOutbox.ts); a
+ * document or a template goes after the texts before it.
+ */
+const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Promise<void> } => {
+    const box = outbox((to, m) => deliver(to, m, log), messageMaxChars(process.env.CLAIMS_MESSAGE_MAX_CHARS));
+    return {
+        dv: dataverse(stats),
+        graph,
+        site: process.env.CLAIMS_DEMO_SHAREPOINT_SITE || DEV_SITE,
+        sendText: async (to, text, choices) => box.push(to, { text, ...(choices?.length ? { choices } : {}) }),
+        flush: () => box.flush(),
+        sendDocument: async (to, bytes, fileName, caption) => {
+            await box.flush();
             const at = new Date().toISOString();
-            const r = await metaWhatsAppService.sendTemplate(to, {
-                name: process.env.CLAIMS_REMINDER_TEMPLATE!, languageCode: process.env.CLAIMS_REMINDER_TEMPLATE_LANG || 'en', bodyVariables: params,
-            });
-            if (!r.delivered) throw new Error(`WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE} to ${to} refused: ${r.error ?? 'unknown'}`);
-            log.outbound.push({ text: `WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE}: ${params.join(' | ')}`, at });
+            const r = await metaWhatsAppService.sendDocument(to, bytes, fileName, caption);
+            if (!r.delivered) console.warn(`[ClaimsDemo] Document ${fileName} to ${to} not delivered: ${r.error ?? (r.dryRun ? 'dry run' : 'unknown')}`);
+            log.outbound.push({ text: `${caption}\n📎 ${fileName}${r.delivered ? '' : "\n(WhatsApp didn't deliver this document.)"}`, at });
         },
-    } : {}),
-    mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
-    note: (text) => console.log(`[ClaimsDemo] ${text}`),
-    signing: signing(),
-});
+        ...(process.env.CLAIMS_REMINDER_TEMPLATE ? {
+            sendTemplate: async (to: string, params: string[]) => {
+                await box.flush();
+                const at = new Date().toISOString();
+                const r = await metaWhatsAppService.sendTemplate(to, {
+                    name: process.env.CLAIMS_REMINDER_TEMPLATE!, languageCode: process.env.CLAIMS_REMINDER_TEMPLATE_LANG || 'en', bodyVariables: params,
+                });
+                if (!r.delivered) throw new Error(`WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE} to ${to} refused: ${r.error ?? 'unknown'}`);
+                log.outbound.push({ text: `WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE}: ${params.join(' | ')}`, at });
+            },
+        } : {}),
+        mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
+        note: (text) => console.log(`[ClaimsDemo] ${text}`),
+        signing: signing(),
+    };
+};
 
 /** TTTFG-5196: the signing page, when it's set up. Its callback comes back to /webhook/claim-signed (handleClaimSigned). */
 function signing(): DemoSigning | undefined {
@@ -271,6 +296,8 @@ export interface DemoInbound {
     document?: { id: string; filename: string; mimeType: string };
     /** TTTFG-4830: a voice note or audio file. */
     audio?: { id: string; mimeType: string };
+    /** TTTFG-4830: the id of a reply button or list row the client tapped; a claims choice's id says what the tap means. */
+    interactiveId?: string;
     wamid?: string;
 }
 
@@ -290,6 +317,7 @@ export async function handleClaimsDemoBatchCheck(phone: string, token: string): 
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} batch check failed:`, (e as Error).message, (e as Error).stack);
     }
+    await ch.flush();
     await writeLog(ch, log, phone, contactId, null);
 }
 
@@ -324,6 +352,7 @@ export async function handleClaimsDemoReminder(phone: string, o: { test?: boolea
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} morning reminder failed:`, (e as Error).message, (e as Error).stack);
     }
+    await ch.flush();
     await writeLog(ch, log, phone, contactId, null);
 }
 
@@ -343,13 +372,16 @@ export async function handleClaimsDemoMessage(m: DemoInbound, contactId: string)
     const ch = channels(stats, log);
     const before = await supabaseService.getClaimConversation(m.from).catch(() => null);
     try {
+        // A tap on a claims choice is read as what it says ("1. Discovery Insure Motor policy (DI-1)"), not its short title.
+        const text = tappedText(m.interactiveId) ?? m.text;
         const outcome = await claimsDemoTurn(deps(m.from, contactId, ch, log), {
-            phone: m.from, contactId, text: m.text, file, ...(m.audio ? { voice: m.audio } : {}), wamid: m.wamid || `wamid.local.${Date.now()}`,
+            phone: m.from, contactId, text, file, ...(m.audio ? { voice: m.audio } : {}), wamid: m.wamid || `wamid.local.${Date.now()}`,
         }, new Date());
         console.log(`[ClaimsDemo] ${m.from}: ${outcome} in ${Date.now() - started}ms; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes${stats.throttled ? `, ${stats.throttled} throttled` : ''}`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${m.from} failed after ${Date.now() - started}ms:`, (e as Error).message, (e as Error).stack);
         await ch.sendText(m.from, 'Sorry, something went wrong on my side. Please send that again in a minute.');
     }
+    await ch.flush();
     await writeLog(ch, log, m.from, contactId, before);
 }

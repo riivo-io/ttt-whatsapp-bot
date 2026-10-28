@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit fb95cdd). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit b13060b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -44,14 +44,16 @@ export const DEADLINE_PASSED_TEMPLATE = {
     `For this incident, that date was ${longDate(v.deadline)}. ${v.ownerName} will take it from here.`,
 } as const;
 
-/** Sent word for word before the first form question (see the open question on the order in the report). */
+/**
+ * Sent word for word before the first form question (see the open question on the order in the report). draft-2
+ * (TTTFG-4830, 28 Oct 2026): shorter, the ask in bold; the first questions follow in the same message.
+ */
 export const DISCLOSURE_TEMPLATE = {
   name: 'Claim - duty of disclosure',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
   render: () =>
-    "Before I ask the insurer's questions: please tell the insurer all the facts that matter to this claim, honestly and in full. " +
-    "If you're not sure whether something matters, please tell me anyway.",
+    "*Please give the insurer all the facts that matter, honestly and in full.* If you're not sure whether something matters, tell me anyway.",
 } as const;
 
 export type ClaimTemplate = typeof DEADLINE_UPCOMING_TEMPLATE | typeof DEADLINE_PASSED_TEMPLATE | typeof DISCLOSURE_TEMPLATE;

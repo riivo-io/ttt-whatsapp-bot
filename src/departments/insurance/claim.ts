@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit fb95cdd). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit b13060b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -57,15 +57,23 @@ export interface AgentActionRow {
   /** The client (riivo_agentaction.riivo_client), so the row shows on the client's record and in My Day. */
   contactId?: string;
   detail: string;
-  /** A Follow-up a person must act on now (someone hurt, no assist number): Urgent, due within 2 working hours. */
+  /** A Follow-up a person must act on now: Urgent, due within 2 working hours. */
   urgent?: true;
   at: string;
   /** For a template send: which template and which version went out, and the text exactly as sent. */
   template?: { name: string; version: string; text?: string };
 }
 
+/**
+ * TTTFG-4830 (28 Oct 2026): an answer the client can tap instead of typing (a WhatsApp reply button or list row).
+ * `reply`: what the tap says, read like a typed reply (default: the title). The host shows them as it can: buttons for
+ * up to three short ones, a list for more, or numbered lines under the text.
+ */
+export interface Choice { title: string; description?: string; reply?: string }
+
 export type Outbound =
-  | { kind: 'text'; text: string }
+  /** `choices` (TTTFG-4830): the message asks one closed question, and these answer it. */
+  | { kind: 'text'; text: string; choices?: Choice[] }
   /**
    * `params` (TTTFG-5212): the template's variables, in order, when it has to go out as an approved WhatsApp template
    * (outside the 24-hour window, the morning reminder). Without them the client is inside the window: send `text`.
@@ -104,11 +112,11 @@ export interface Conversation {
  */
 export const FNOL_TEMPLATE = {
   name: 'Claim - FNOL logged',
-  version: 'draft-1',
+  // draft-2 (TTTFG-4830, 28 Oct 2026): shorter, with the reference in bold. The next question follows in the same message.
+  version: 'draft-2',
   approved: false,
   render: (v: { firstName: string; reference: string; ownerName: string }) =>
-    `Hi ${v.firstName}, we've logged your claim. Your claim reference is ${v.reference}.\n\n` +
-    `I'll now ask a few more questions the insurer needs, and ${v.ownerName} will check your claim.\n\n` +
+    `Thanks ${v.firstName}, your claim is logged. Your claim reference is *${v.reference}*, and ${v.ownerName} will check it.\n\n` +
     'TTT uses AI-assisted tools to help handle claims. A person at TTT makes every decision about your claim.',
 } as const;
 
@@ -118,7 +126,7 @@ export const unknownNumberText = (signUpLink: string) =>
   `If you're new, you can sign up here: ${signUpLink}`;
 
 const FACT_QUESTIONS: Record<Fact, string> = {
-  claimType: 'What kind of claim is it? For example a car accident, a stolen car, a hijacking, a windscreen, damage or loss at home, or a lost or stolen item you carry with you.',
+  claimType: 'What kind of claim is it?',
   description: 'Please tell me in your own words what happened.',
   incidentAt: 'On what date and at roughly what time did it happen?',
   incidentDate: 'On what date did it happen?',
@@ -210,115 +218,119 @@ const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
 };
 
 /**
- * TTTFG-4830: what to gather while the client is still at the scene, by kind of claim, sent once right after "is anyone
- * hurt or in danger" (walkthrough.ts onScene), so they have it all before the questions start. `when` opens the
- * message ("If you're still on the scene"); `towLine`: a car that may need a tow, so the insurer's assist line is
- * given for it (when it's on file).
+ * TTTFG-4830: what to do if anyone is hurt or in danger, at the start of the reply to the policy. A line, not a question
+ * (28 Oct 2026): before, "Is anyone hurt or in danger?" waited on a yes before the client got the number to call.
+ */
+export const SAFETY_TEXT = '*If anyone is hurt or in danger, call 10111 now*, and come back to me once everyone is safe.';
+
+/**
+ * TTTFG-4830: what to gather while the client is still at the scene, by kind of claim, sent once the kind is known
+ * (walkthrough.ts), so they have it all before the questions start. One short line each, the thing to get in bold.
+ * `towLine`: a car that may need a tow, so the insurer's assist line is given for it (when it's on file).
  * DRAFT WORDING (decision D11): the Insurance and Advice department approves it before go-live.
  */
-export const ON_SCENE: Record<ClaimKind, { when: string; lead: string; items: string[]; towLine?: true }> = {
+const EASIER = 'They make your claim easier:';
+export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLine?: true }> = {
   motor: {
-    when: "If you're still on the scene", lead: 'make sure to grab the following where applicable:', towLine: true,
+    lead: `While you're still at the scene, try to get these. ${EASIER}`, towLine: true,
     items: [
-      "The other car's registration number (number plate)",
-      "The other driver's name and phone number, and a photo of their driver's licence",
-      'Photos of both cars and the damage, and of the scene (the road, and any signs or robots)',
-      "The other driver's insurer, if they know it",
-      'The names and phone numbers of anyone who saw it',
-      "If the police come: the officer's name and the accident report (AR) number",
+      "The other car's *registration number*",
+      "The other driver's *name, number and insurer*, and a photo of their *licence*",
+      '*Photos* of both cars, the damage and the road',
+      'Names and numbers of anyone who *saw it*',
+      'If the police come: the *accident report (AR) number*',
     ],
   },
   windscreen: {
-    when: "If you're still on the scene", lead: 'make sure to grab the following where applicable:',
+    lead: `While you're still there, try to get these. ${EASIER}`,
     items: [
-      'Photos of the damaged glass, close up and from further away',
-      'If a truck or another vehicle threw something up: its registration number, or the company name on it',
-      'Where it happened: the road, and the nearest exit or landmark',
+      '*Photos* of the damaged glass, close up and from further away',
+      'If a truck threw something up: its *registration* or company name',
+      '*Where* it happened: the road, and the nearest exit or landmark',
     ],
   },
   'motor-theft': {
-    when: "While it's fresh", lead: 'these help the most where applicable:',
+    lead: `As soon as you can, try to do these. ${EASIER}`,
     items: [
-      'Call your tracking company right away, if the car has one',
-      'Report it to the police (SAPS) and get the case number',
-      'Photos of where the car was parked, and of any broken glass',
-      "Ask security at the building or centre for the CCTV footage, and note the guard's name",
-      'Your parking ticket, if you have one',
-      'The names and phone numbers of anyone who saw anything',
+      'Call your *tracking company* now, if the car has one',
+      'Report it to the *police (SAPS)* and get the case number',
+      '*Photos* of where the car was parked, and of any broken glass',
+      'Ask security at the building or centre for the *CCTV footage*',
+      'Keep your *parking ticket*, if you have one',
+      'Names and numbers of anyone who *saw anything*',
     ],
   },
   hijacking: {
-    when: "Once you're safe", lead: 'these help the most where applicable:',
+    lead: `Once you're safe, try to do these. ${EASIER}`,
     items: [
-      'Report it to the police (SAPS) on 10111 and get the case number',
-      'Call your tracking company right away, if the car has one',
-      'Write down what you remember about them and their vehicle: how many there were, what they looked like, and the make, colour and registration',
-      'Which way they went',
-      'The names and phone numbers of anyone who saw it',
+      'Report it to the *police (SAPS)* on 10111 and get the case number',
+      'Call your *tracking company* now, if the car has one',
+      'Write down what you remember: *how many* there were, what they looked like, and their car',
+      '*Which way* they went',
+      'Names and numbers of anyone who *saw it*',
     ],
   },
   home: {
-    when: "If you're at the property now", lead: 'make sure to do the following where applicable:',
+    lead: `If you're at the property, try to do these. ${EASIER}`,
     items: [
-      "Stop more damage if it's safe to, for example turn off the water at the mains or switch off the geyser",
-      'Take photos of the damage before you clean up or fix anything',
-      'Keep the damaged items: the assessor may want to see them',
-      'The name and number of the plumber, electrician or contractor, and their report or quote',
+      "*Stop more damage* if it's safe, for example turn off the water or the geyser",
+      'Take *photos* of the damage before you clean up or fix anything',
+      '*Keep the damaged items*: the assessor may want to see them',
+      "The contractor's *name and number*, and their report or quote",
     ],
   },
   'home-theft': {
-    when: "If you're at the property now", lead: 'these help the most where applicable:',
+    lead: `If you're at the property, try to do these. ${EASIER}`,
     items: [
-      "Don't touch or clean up anything until the police have been",
-      'Report it to the police (SAPS) and get the case number',
-      'Photos of how they got in (a broken window, door or lock) and of the rooms',
-      "A list of what's missing",
-      'Your alarm or armed response company\'s report, and any CCTV footage',
-      'The names and phone numbers of neighbours or anyone who saw anything',
+      "*Don't touch anything* until the police have been",
+      'Report it to the *police (SAPS)* and get the case number',
+      '*Photos* of how they got in, and of the rooms',
+      "A *list of what's missing*",
+      'Your *alarm or armed response* report, and any CCTV footage',
+      'Names and numbers of anyone who *saw anything*',
     ],
   },
   'lost-item': {
-    when: "While it's fresh", lead: 'these help the most where applicable:',
+    lead: `As soon as you can, try to do these. ${EASIER}`,
     items: [
-      "Ask where you lost it (lost and found, security or the venue), and note the name of the person you spoke to",
-      "For a phone: ask your network to block the SIM, and note the phone's IMEI number (it's on the box)",
-      'Report the loss to the police (SAPS) and get the reference number',
-      "Proof that it's yours: the receipt, the box, or a photo of you with it",
+      'Ask at *lost and found* or security, and note who you spoke to',
+      "For a phone: ask your network to *block the SIM*, and note the *IMEI number* (it's on the box)",
+      'Report the loss to the *police (SAPS)* and get the reference number',
+      "*Proof it's yours*: the receipt, the box, or a photo of you with it",
     ],
   },
   'stolen-item': {
-    when: "If you're still where it happened", lead: 'these help the most where applicable:',
+    lead: `If you're still where it happened, try to do these. ${EASIER}`,
     items: [
-      'Report it to the police (SAPS) and get the case number',
-      "Ask security at the shop or centre for the CCTV footage, and note the guard's name",
-      "For a phone: ask your network to block the SIM and blacklist the phone (they'll need its IMEI number, it's on the box)",
-      'The names and phone numbers of anyone who saw it',
+      'Report it to the *police (SAPS)* and get the case number',
+      'Ask security at the shop or centre for the *CCTV footage*',
+      "For a phone: ask your network to *block the SIM and the phone* (they'll need the IMEI number on the box)",
+      'Names and numbers of anyone who *saw it*',
     ],
   },
   other: {
-    when: "If you're still on the scene", lead: 'make sure to grab the following where applicable:',
+    lead: `While you're still there, try to get these. ${EASIER}`,
     items: [
-      'Photos of the damage and of where it happened',
-      'The names and phone numbers of anyone involved or who saw it',
-      'Keep anything damaged: the assessor may want to see it',
+      '*Photos* of the damage and of where it happened',
+      'Names and numbers of anyone *involved or who saw it*',
+      '*Keep anything damaged*: the assessor may want to see it',
     ],
   },
 };
-export const ON_SCENE_PHOTOS = 'You can send me photos here at any time.';
+
+/** TTTFG-4830: the end of the on-scene message: why the questions come, and the "Ready" the client taps to start them. */
+export const READY_TEXT = "Next, I'll ask about what happened. Your insurer needs the answers for your claim. Tap *Ready* to begin.";
 
 /**
- * TTTFG-4830: the on-scene checklist for this claim. `safeFirst`: someone is hurt or in danger, so it starts "Once
- * everyone is safe". A car that may need a tow gets the insurer's assist line for it, when it's on file.
+ * TTTFG-4830: the on-scene checklist for this claim, then READY_TEXT. A car that may need a tow gets the insurer's
+ * assist line for it, when it's on file.
  */
-export function onSceneText(state: WalkthroughState, safeFirst = false): string {
+export function onSceneText(state: WalkthroughState): string {
   const c = ON_SCENE[claimKind(state.facts, state.opening)];
-  const when = !safeFirst ? c.when : /^(Once|While)\b/.test(c.when) ? 'Once everyone is safe' : `Once everyone is safe, ${lowerFirst(c.when)}`;
   const policy = state.policies.find((p) => p.id === state.policyId);
   const number = policy?.assistNumber?.trim();
-  const tow = c.towLine && number
-    ? `If the car needs a tow, call ${policy!.insurer} on ${number}, and don't let a tow truck you didn't call take it.`
-    : undefined;
-  return [`${when}, ${c.lead}`, ...c.items.map((item, i) => `${i + 1}. ${item}`), ...(tow ? [tow] : []), ON_SCENE_PHOTOS].join('\n');
+  const tow = c.towLine && number ? `Need a tow? Call ${policy!.insurer} on ${number}. Don't use a tow truck you didn't call.` : undefined;
+  return [c.lead, c.items.map((item, i) => `${i + 1}. ${item}`).join('\n'), ...(tow ? [tow] : []), READY_TEXT].join('\n\n');
 }
 
 const EXAMPLE_TIME = 'Your best estimate is fine, for example "about 11pm" or "around 6 in the morning".';
@@ -417,12 +429,13 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
         return [`Is this claim about your ${one}?`, `Sorry, I just need to check: is this claim about your ${one}? Please answer yes or no.`,
           `Is it your ${one}? Yes or no?`][again ? ((again - 1) % 2) + 1 : 0];
       }
-      return [`Which policy is this claim about?\n${list}`, `Which one is it? Please reply with its number:\n${list}`,
+      // TTTFG-4830: the policies are also the choices the client taps (policyChoices), so the first ask needn't list them.
+      return ['Which policy is this claim about?', `Which one is it? Please pick it from the list, or reply with its number:\n${list}`,
         `Please reply with 1${state.policies.length > 1 ? `, 2${state.policies.length > 2 ? ' or another number' : ''}` : ''}:\n${list}`][again ? ((again - 1) % 2) + 1 : 0];
     }
+    case 'ready':
     case 'danger':
-      return ['First, is anyone hurt or in danger right now?', 'Sorry, I need to check this first: is anyone hurt or in danger right now? Please answer yes or no.',
-        'Is anyone hurt or in danger right now? Yes or no?'][again ? ((again - 1) % 2) + 1 : 0];
+      return ["No problem, take your time. Tap *Ready* when you're ready to begin.", "Tap *Ready* whenever you're ready, and I'll ask my questions."][again ? (again - 1) % 2 : 0];
     case 'summary':
       return again
         ? ['Is everything in the summary above correct? Please answer yes, or tell me what to change.', 'Is that all correct? Yes, or tell me what to change.'][(again - 1) % 2]
@@ -430,46 +443,87 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
     default: {
       // TTTFG-4830: a yes/no asked for the first time brings its details question with it ("If yes to 1: please send me
       // their details"), so the yes and the details can come in one reply. Two or more questions are numbered, so the
-      // client can answer by number.
+      // client can answer by number, with a blank line between them so each stands out. A yes/no asked on its own is
+      // tapped (Yes or No buttons), so its details are asked after a yes.
       const parts: string[] = [];
       for (const f of missing) {
         const n = tries[askedKey(f)] ?? 0;
         parts.push(factQuestion(f, state.facts, n, state.opening));
         const details = f === 'thirdParties' ? thirdPartyDetailsIfYes(state) : f === 'injuries' ? INJURY_DETAILS_IF_YES : undefined;
-        if (details && n === 0) parts.push(`If yes to ${parts.length}: ${details}`);
+        if (details && n === 0 && missing.length > 1) parts.push(`If yes to ${parts.length}: ${details}`);
       }
       // "Thanks." belongs at the start of the message, once, not in the middle of it.
       const thanks = parts.some((p) => p.startsWith('Thanks. '));
       const clean = parts.map((p) => p.replace(/^Thanks\. /, ''));
-      const text = clean.length > 1 ? clean.map((p, i) => `${i + 1}. ${p}`).join('\n') : clean.join(' ');
+      const many = clean.length > 1;
+      const text = many ? clean.map((p, i) => `${i + 1}. ${p}`).join('\n\n') : clean.join(' ');
       // TTTFG-4830 (voice notes): the first "what happened" says they can answer by voice note.
-      const voice = missing.includes('description') && !(tries[askedKey('description')] ?? 0) ? `${clean.length > 1 ? '\n' : ' '}${VOICE_OR_TEXT}` : '';
-      return `${thanks ? `Thanks.${clean.length > 1 ? '\n' : ' '}` : ''}${text}${voice}`;
+      const voice = missing.includes('description') && !(tries[askedKey('description')] ?? 0) ? `${many ? '\n\n' : ' '}${VOICE_OR_TEXT}` : '';
+      return `${thanks ? `Thanks.${many ? '\n\n' : ' '}` : ''}${text}${voice}`;
     }
   }
 }
 
-/** SPEC-04 step 10: read back a summary for the client to confirm. */
+/** SPEC-04 step 10: read back a summary for the client to confirm. TTTFG-4830: each label in bold, the question last. */
 export function summary(state: WalkthroughState): string {
   const f = state.facts;
   const p = state.policies.find((x) => x.id === state.policyId)!;
-  return [
-    "Here's what I have. Is it all correct?",
-    `Policy: ${p.insurer} ${p.product}`,
-    `Claim: ${f.claimType}`,
-    `When: ${f.incidentAt ? when(f.incidentAt) : ''}`,
-    `Where: ${f.place}`,
-    `What happened: ${f.description}`,
-    isTheft(f, state.opening) ? `Who did it or saw it: ${f.thirdPartyDetails ?? 'not known'}` : `Anyone else involved: ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
-    isTheft(f, state.opening) ? `Reported to the police (SAPS): ${yesNo(f.saps)}` : `Police (SAPS) involved: ${yesNo(f.saps)}`,
-    `Anyone injured: ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`,
-  ].join('\n');
+  const lines = [
+    `*Policy:* ${p.insurer} ${p.product}`,
+    `*Claim:* ${f.claimType}`,
+    `*When:* ${f.incidentAt ? when(f.incidentAt) : ''}`,
+    `*Where:* ${f.place}`,
+    `*What happened:* ${f.description}`,
+    isTheft(f, state.opening) ? `*Who did it or saw it:* ${f.thirdPartyDetails ?? 'not known'}` : `*Anyone else involved:* ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
+    isTheft(f, state.opening) ? `*Reported to the police (SAPS):* ${yesNo(f.saps)}` : `*Police (SAPS) involved:* ${yesNo(f.saps)}`,
+    `*Anyone injured:* ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`,
+  ];
+  return ["Here's what I have:", lines.join('\n'), 'Is it all correct?'].join('\n\n');
+}
+
+/** TTTFG-4830 (28 Oct 2026): the taps for each closed question of the walkthrough. */
+export const YES_NO: Choice[] = [{ title: 'Yes' }, { title: 'No' }];
+export const READY: Choice[] = [{ title: 'Ready' }];
+const SUMMARY_CHOICES: Choice[] = [{ title: "Yes, that's right", reply: "Yes, that's all correct" }, { title: 'Change something' }];
+/** The kinds of claim in the client's words; Claude reads the tap as one of CLAIM_TYPES. */
+export const CLAIM_TYPE_CHOICES: Choice[] = [
+  { title: 'Car accident' },
+  { title: 'Stolen car' },
+  { title: 'Hijacking' },
+  { title: 'Windscreen or glass' },
+  { title: 'Damage or theft at home', description: 'For example a burst geyser, a storm or a break-in' },
+  { title: 'Lost or stolen item', description: 'Something you carry, like a phone, a laptop or a bag' },
+  { title: 'Something else' },
+];
+/** The client's policies, by insurer; the tap says the policy's number in the list, as a typed reply would. */
+const policyChoices = (ps: Policy[]): Choice[] =>
+  ps.map((p, i) => ({ title: p.insurer, description: `${p.product} policy (${p.policyNumber})`, reply: `${i + 1}. ${describe(p)}` }));
+
+/**
+ * TTTFG-4830: what the client can tap to answer what this Say asks, or nothing when the answer is the client's own
+ * words. A yes/no of the parties step is tapped only when it's asked on its own.
+ */
+export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] | undefined {
+  if (say.kind === 'on-scene') return READY;
+  if (say.kind !== 'ask' || say.correcting || !state) return undefined;
+  switch (say.step) {
+    case 'policy':
+      return state.policies.length === 1 ? YES_NO : policyChoices(state.policies);
+    case 'ready':
+    case 'danger':
+      return READY;
+    case 'claim-type':
+      return CLAIM_TYPE_CHOICES;
+    case 'summary':
+      return SUMMARY_CHOICES;
+    default:
+      return say.missing.length === 1 && ['thirdParties', 'saps', 'injuries'].includes(say.missing[0]) ? YES_NO : undefined;
+  }
 }
 
 const FOLLOW_UP_DETAIL: Record<FollowUpReason, string> = {
   'no-active-policy': 'Client asked on WhatsApp to report a claim but has no active policy on the CRM. Please contact them.',
   'policy-not-on-file': 'Client asked on WhatsApp to report a claim on a policy that is not on the CRM. Please contact them.',
-  'no-assist-number': 'Client reporting a claim said someone is hurt or in danger. The insurer has no assist number on file, so Tina gave 112. Please contact them now.',
 };
 
 export interface TurnResult {
@@ -501,14 +555,15 @@ export async function claimTurn(
     const owner = await ownerFor(ports, e.to === 'broker' ? working?.policyId : undefined);
     const row = await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_request', id: conv.requestId }, contactId,
-      detail: FOLLOW_UP_DETAIL[e.reason], at, ...(e.reason === 'no-assist-number' ? { urgent: true as const } : {}),
+      detail: FOLLOW_UP_DETAIL[e.reason], at,
     });
     if (e.to === 'team') passedOn = { owner, dueOn: row.dueOn };
   }
 
   let lastSent: string | undefined;
   for (const say of turn.say) {
-    lastSent = await sendText(ports, conv, render(say, turn.state ?? working, conv, passedOn), null, at, contactId);
+    const st = turn.state ?? working;
+    lastSent = await sendText(ports, conv, render(say, st, conv, passedOn), null, at, contactId, choicesFor(say, st));
   }
 
   if (turn.effects.some((e) => e.kind === 'open-claim')) {
@@ -528,12 +583,10 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
   switch (say.kind) {
     case 'unknown-number':
       return unknownNumberText(conv.signUpLink);
-    case 'assist':
-      return `Please call ${say.insurer}'s emergency assist line now: ${say.number}. Come back to me once everyone is safe.`;
-    case 'emergency':
-      return 'Please call 112 for emergency help now. Come back to me once everyone is safe.';
+    case 'safety':
+      return SAFETY_TEXT;
     case 'on-scene':
-      return onSceneText(state!, say.safeFirst);
+      return onSceneText(state!);
     case 'passed-on': {
       const why = say.reason === 'no-active-policy' ? "I can't see an active policy for you on our system" : "I can only open a claim on a policy we have on file";
       const by = passedOn?.dueOn ? ` by ${new Date(passedOn.dueOn).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', weekday: 'long', day: 'numeric', month: 'long' })}` : '';
@@ -545,9 +598,10 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
 }
 
 /** Every outbound text passes the policy gate (gate.ts claimGate). A blocked text becomes the holding line and a
- *  Follow-up. Returns the text that went out. */
+ *  Follow-up, without its `choices`. Returns the text that went out. */
 export async function sendText(
   ports: ClaimPorts, conv: Conversation, text: string, claim: { id: string; owner: Owner } | null, at: string, contactId?: string,
+  choices?: Choice[],
 ): Promise<string> {
   const gate = claimGate(text);
   if (!gate.ok) {
@@ -559,7 +613,7 @@ export async function sendText(
       at,
     });
   }
-  await ports.send(conv.phone, { kind: 'text', text: gate.text });
+  await ports.send(conv.phone, { kind: 'text', text: gate.text, ...(gate.ok && choices?.length ? { choices } : {}) });
   return gate.text;
 }
 
