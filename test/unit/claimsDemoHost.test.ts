@@ -579,3 +579,54 @@ test('TTTFG-5196: quiet on the optional item after the last required one: the ne
     assert.equal(optionalQuietMs(undefined), 600_000);
 });
 
+
+test('TTTFG-4830 (QC, 28 Oct): "this claim is fraud, I never logged it" on the list: Tina stops, tells the broker, and offers a new claim', async () => {
+    const w = world();
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
+    await say(w, 'Me, Adriaan', (t = tick(t, 2)));
+    w.replies.push({ kind: 'not-yet' });
+    await say(w, "I'll take them tonight", (t = tick(t, 2)));
+    w.since();
+
+    const fraud = 'Can you help me this claim is fraud or hijacked because I never logged it';
+    w.replies.push({ kind: 'question', clientQuestion: 'Can you help me?', forBroker: true, offTrack: 'not-theirs' });
+    assert.equal(await say(w, fraud, (t = tick(t, 30))), 'follow-on');
+    assert.deepEqual(w.since(), ["I'm sorry about that. I've asked Sipho to look into claim *CLM-000001* (motor accident, 22/10/2026) and contact you. "
+        + "I won't ask you anything more about it for now.\n\nWould you like to open a new claim instead?"]);
+    const followUp = w.actions.at(-1)!;
+    assert.equal(followUp.kind, 'Follow-up');
+    assert.equal(followUp.urgent, true);
+    assert.match(followUp.detail, new RegExp(`"${fraud}"`));
+    assert.equal(w.store.get(PHONE)?.resume.pending?.kind, 'clarify');
+
+    // The "Open a new claim" tap is read without Claude, and the walkthrough starts.
+    assert.equal(await say(w, 'Open a new claim', (t = tick(t, 1))), 'new-claim');
+    assert.match(w.since().join('\n'), /Discovery Insure/); // the policy question
+    assert.notEqual(w.store.get(PHONE)?.walk, null);
+});
+
+test('TTTFG-4830 (QC, 28 Oct): "Can we not continue with this claim?" at the summary: Tina asks, "Stop here" ends it with nothing logged', async () => {
+    const w = world();
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    // Through to the summary, a photo on the way.
+    for (let i = 0; i < 6 && !/Here's what I have/.test(w.sent.at(-1) ?? ''); i++) await say(w, 'reply', (t = tick(t, 1)));
+    await say(w, '', (t = tick(t, 1)), photo);
+    assert.match(w.sent.join('\n'), /Here's what I have/);
+    w.since();
+    const understandModel = w.deps.understandModel;
+    w.deps.understandModel = async () => ({ ...blankAnswer, kind: 'stop' });
+    assert.equal(await say(w, 'Can we not continue with this claim because it is a fraudulent claim?', (t = tick(t, 1))), 'walkthrough');
+    assert.deepEqual(w.since(), ["Would you like me to stop? I haven't logged a claim yet, so nothing goes to your insurer."]);
+    w.deps.understandModel = understandModel;
+    // The "Stop here" tap is read without Claude.
+    assert.equal(await say(w, 'Stop here', (t = tick(t, 1))), 'walkthrough');
+    assert.deepEqual(w.since(), ["No problem, I've stopped, and no claim was logged. If you want to report something later, just send me a message."]);
+    assert.equal(w.rows.length, 0);
+    assert.equal(w.store.get(PHONE)?.walk, null);
+    assert.deepEqual(w.store.get(PHONE)?.held, []); // the photo doesn't go to their next claim
+});

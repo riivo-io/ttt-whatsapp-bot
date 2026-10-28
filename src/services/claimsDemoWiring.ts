@@ -391,10 +391,18 @@ export interface DemoLogPorts {
  * One job's messages, where Tina keeps her own: Supabase's message log, and the CRM timeline (riivo_whatsappcommunications
  * rows, as dynamicsService.logMessage writes them), with a voice note's recording attached to its row as a note.
  * Filed under the claim the conversation is on, else its request, else the contact: a claim has no link to its
- * request, so the claim is where the broker looks. A link the CRM refuses falls back to the next one. The contact is
+ * request, so the claim is where the broker looks. A link the CRM refuses falls back to the next one; a write that timed
+ * out or failed on the CRM's side may have gone through, so it is never written again (QC, 28 Oct 2026: on a slow DEV,
+ * one reply showed four times on the timeline, 20 seconds apart, each under the next link). The contact is
  * each row's From or To, so the whole conversation shows on the contact's timeline too; if the CRM refuses it there,
  * the job's rows go without it. Never throws: the conversation has happened; a failed write is logged.
  */
+/** A failed write the CRM may still have made: no answer in time, or an error on its side (5xx). A refusal (4xx) wasn't. */
+export function mayBeWritten(e: unknown): boolean {
+    const err = e as Error | undefined;
+    return err?.name === 'TimeoutError' || err?.name === 'AbortError' || /^Dataverse \w+ \S+ 5\d\d\b/.test(err?.message ?? '');
+}
+
 export async function writeDemoLog(
     ports: DemoLogPorts, log: DemoLog, where: { phone: string; contactId: string; claimId?: string; requestId?: string },
 ): Promise<void> {
@@ -426,6 +434,10 @@ export async function writeDemoLog(
                     party = p;
                     return r?.activityid ?? null;
                 } catch (e) {
+                    if (mayBeWritten(e)) {
+                        console.warn(`[ClaimsDemo] ${where.phone}: timeline row under ${regardings[tried]?.table ?? 'nothing'} not confirmed, so not written again:`, (e as Error).message);
+                        return null;
+                    }
                     console.warn(`[ClaimsDemo] ${where.phone}: timeline row under ${regardings[tried]?.table ?? 'nothing'}${p ? ' with the contact' : ''} refused:`, (e as Error).message);
                 }
             }

@@ -5,18 +5,20 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inboundText, newDemoLog, writeDemoLog, type DemoLog } from '../../src/services/claimsDemoWiring';
+import { inboundText, mayBeWritten, newDemoLog, writeDemoLog, type DemoLog } from '../../src/services/claimsDemoWiring';
 import { NOTE_ATTACHMENT_MAX_BYTES, voiceNoteNote, whatsappCommunicationRow } from '../../src/domain/whatsappLog';
 import type { Dv } from '../../src/departments/insurance/dataverse';
 
 const PHONE = '27723203629';
 const WHERE = { phone: PHONE, contactId: 'ct-1', claimId: 'cl-1', requestId: 'rq-1' };
 
-function fakeCrm(o: { refuse?: (body: Record<string, unknown>) => boolean } = {}) {
+function fakeCrm(o: { refuse?: (body: Record<string, unknown>) => boolean; slow?: (body: Record<string, unknown>) => Error | null } = {}) {
     const posts: { path: string; body: Record<string, unknown> }[] = [];
     const dv = (async (_method: string, path: string, body?: unknown) => {
         const b = body as Record<string, unknown>;
         if (o.refuse?.(b)) throw new Error('400 undeclared property');
+        const late = o.slow?.(b);
+        if (late) { posts.push({ path, body: b }); throw late; } // written, but the answer didn't come back in time
         posts.push({ path, body: b });
         return path.startsWith('riivo_whatsappcommunicationses') ? { activityid: `act-${posts.length}` } : undefined;
     }) as Dv;
@@ -138,4 +140,16 @@ test('a row with its client has them as From or To: a contact, or a lead', () =>
         [{ 'partyid_contact@odata.bind': '/contacts(ct)', participationtypemask: 1 }]);
     assert.deepEqual(row('Outgoing', { table: 'new_lead', id: 'ld' }).riivo_WhatsAppCommunications_activity_parties,
         [{ 'partyid_new_lead@odata.bind': '/new_leads(ld)', participationtypemask: 2 }]);
+});
+
+test('QC 28 Oct: a row whose write timed out is not written again under the next link, so a reply shows once', async () => {
+    const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    const crm = fakeCrm({ slow: (b) => (b.riivo_messageid === 'wamid.out-1' ? timeout : null) });
+    await writeDemoLog({ dv: crm.dv, saveMessages }, conversation(), WHERE);
+    const texts = crm.rows().map((r) => r.description);
+    assert.deepEqual(texts, ['1. Toyota 2. Corolla', 'Thanks. Next, a few questions about the finance on your car.', 'Please send me photos of the damage.']);
+    // The next row still goes under the claim, with the contact.
+    assert.equal(crm.rows()[2]['regardingobjectid_riivo_claim@odata.bind'], '/riivo_claims(cl-1)');
+    assert.ok(mayBeWritten(new Error('Dataverse POST riivo_whatsappcommunicationses 503 Service unavailable')));
+    assert.ok(!mayBeWritten(new Error('Dataverse POST riivo_whatsappcommunicationses 400 bad lookup')));
 });

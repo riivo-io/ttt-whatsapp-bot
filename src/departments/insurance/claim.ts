@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit ba38887). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit b56d936). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -9,7 +9,7 @@
 // into Tina (epic TTTFG-4830).
 import { claimGate } from './gate';
 import {
-  advance, askedKey, complete, isTheft, sastParts, start, VOICE_OR_TEXT,
+  advance, askedKey, complete, isTheft, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION, STOPPED_TEXT, VOICE_OR_TEXT,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
 } from './walkthrough';
 
@@ -59,6 +59,8 @@ export interface AgentActionRow {
   detail: string;
   /** A Follow-up a person must act on now: Urgent, due within 2 working hours. */
   urgent?: true;
+  /** TTTFG-4830: why it is urgent (riivo_urgencyreason), when it isn't the 5168 one (someone hurt, no assist number). */
+  urgencyReason?: string;
   at: string;
   /**
    * For a template send: which template and which version went out, and the text exactly as sent. For a Follow-up in
@@ -347,7 +349,9 @@ const lowerFirst = (t: string) => t.charAt(0).toLowerCase() + t.slice(1);
  */
 function askedAgain(fact: Fact, f: Facts, n: number, opening?: string): string {
   const base = BY_KIND[claimKind(f, opening)][fact] ?? FACT_QUESTIONS[fact];
-  const yesNo = [`${base} Please just answer yes or no.`, `Sorry, I didn't catch that. ${base} Yes or no?`, `Just a yes or a no, please: ${lowerFirst(base)}`];
+  // TTTFG-4830 (QC): no "Sorry, I didn't catch that" here: a question asked again isn't always one Tina couldn't read.
+  // When it is, walkthrough.ts says so first (NOT_UNDERSTOOD).
+  const yesNo = [`${base} Please just answer yes or no.`, `${base} Yes or no?`, `Just a yes or a no, please: ${lowerFirst(base)}`];
   const ways: Record<Fact, string[]> = {
     incidentTime: [
       `Thanks. Roughly what time was that? ${EXAMPLE_TIME}`,
@@ -493,6 +497,8 @@ const SUMMARY_ASK = "Tap *Yes, that's correct*, or type what needs to change.";
 /** TTTFG-4830 (28 Oct 2026): the taps for each closed question of the walkthrough. */
 export const YES_NO: Choice[] = [{ title: 'Yes' }, { title: 'No' }];
 export const READY: Choice[] = [{ title: 'Ready' }];
+/** TTTFG-4830 (QC): "Would you like me to stop?" (understand.ts reads these taps without a model). */
+export const STOP_CHOICES: Choice[] = [{ title: 'Stop here' }, { title: 'Carry on' }];
 const SUMMARY_CHOICES: Choice[] = [{ title: "Yes, that's correct" }];
 /** The kinds of claim in the client's words; Claude reads the tap as one of CLAIM_TYPES. */
 export const CLAIM_TYPE_CHOICES: Choice[] = [
@@ -514,6 +520,7 @@ const policyChoices = (ps: Policy[]): Choice[] =>
  */
 export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] | undefined {
   if (say.kind === 'on-scene') return READY;
+  if (say.kind === 'stop-ask') return STOP_CHOICES;
   if (say.kind !== 'ask' || say.correcting || !state) return undefined;
   switch (say.step) {
     case 'policy':
@@ -601,7 +608,14 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
     case 'safety':
       return SAFETY_TEXT;
     case 'help':
+    case 'lead':
       return say.text;
+    case 'paused':
+      return PAUSED_TEXT;
+    case 'stop-ask':
+      return say.again ? STOP_AGAIN : STOP_QUESTION;
+    case 'stopped':
+      return STOPPED_TEXT;
     case 'to-broker':
       return toBrokerText();
     case 'on-scene':

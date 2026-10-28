@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit ba38887). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reply.ts (commit b56d936). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830 (claims on Tina): Claude reads one WhatsApp message from a client who has an open claim and says what it
 // means for resume.ts (a ResumeMessage). It is the follow-on's half of understand.ts: TTTFG-5176 and TTTFG-5184 left
@@ -21,18 +21,23 @@
 // batch question the message answers (in otherAnswers, like the others) and lists the ones the client says they don't
 // know (dontKnow). Each value is checked against its own question, and the reading is a { kind: 'batch' } input.
 //
+// TTTFG-4830 (28 Oct 2026, from QC): Claude also says when the client is off track (offTrack): the claim isn't theirs,
+// or they want something other than the claim's questions. resume.ts then asks what they'd like to do; the answer is
+// `clarify`, and a tap on one of its buttons is read here without a model call.
+//
 // Pure, apart from the model port. No zod, as understand.ts.
 import type { QuestionItem } from './contracts';
 import { applies, formItems, itemName, missingItems, SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY, type ClaimFacts } from './progress';
 import type { ClaimAnswers } from './contracts';
 import { ADDRESS_KEY, addressItem, BARE_NO, batchLines, type ClientFile, type FollowOnPorts, type OtherAnswer, type StoredClaimForm } from './followon';
-import type { OpenClaim, OpenClaimsPort, Pending, ResumeMessage, ResumeState } from './resume';
+import { CLARIFY_CHOICE_KINDS, CLARIFY_CHOICES, type ClarifyChoice, type OpenClaim, type OpenClaimsPort, type Pending, type ResumeMessage, type ResumeState } from './resume';
 import { CLAIM_TYPES, QUESTION_HELP, questionHelp, sastParts, SPOKEN_HELP, type ClaimType, type Facts } from './walkthrough';
 
 /** The model call. The host implements it with structured output (or a forced tool call) against REPLY_SCHEMA. */
 export type ReplyModel = (req: { system: string; user: string; schema: typeof REPLY_SCHEMA }) => Promise<unknown>;
 
 const KINDS = ['value', 'not-yet', 'saps', 'question', 'unparsed'] as const;
+const OFF_TRACK = ['not-theirs', 'something-else'] as const;
 const nullable = (type: string, extra: Record<string, unknown> = {}) => ({ anyOf: [{ type, ...extra }, { type: 'null' }] });
 /** A value for one question, by key, in the same three typed fields as the main answer. */
 const OTHER_ANSWER = {
@@ -48,7 +53,7 @@ export const REPLY_SCHEMA = {
   additionalProperties: false,
   required: ['kind', 'valueText', 'valueNumber', 'valueBool', 'sapsCaseNumber', 'sapsStation', 'differentIncident', 'chosenClaim',
     'yesNo', 'wantsNewClaim', 'forItem', 'claimType', 'description', 'incidentDate', 'place', 'otherAnswers', 'corrections', 'dontKnow',
-    'clientQuestion', 'explain', 'forBroker'],
+    'clientQuestion', 'explain', 'forBroker', 'offTrack', 'clarify'],
   properties: {
     kind: { type: 'string', enum: [...KINDS] },
     valueText: nullable('string'),
@@ -73,6 +78,10 @@ export const REPLY_SCHEMA = {
     clientQuestion: nullable('string'),
     explain: nullable('string'),
     forBroker: { type: 'boolean' },
+    /** TTTFG-4830: the client doesn't want to go on with the claim's questions (resume.ts asks what they'd like to do). */
+    offTrack: nullable('string', { enum: [...OFF_TRACK] }),
+    /** TTTFG-4830: the answer to Tina's "What would you like to do?". */
+    clarify: nullable('string', { enum: [...CLARIFY_CHOICE_KINDS] }),
   },
 } as const;
 
@@ -139,6 +148,15 @@ give some of it, in any order:
 Use kind "not-yet" when the client only says they don't have them yet, will send them later or don't know. Otherwise use
 kind "unparsed" (otherAnswers, sapsCaseNumber and sapsStation are read whatever the kind).`;
 
+/** TTTFG-4830: Tina asked "What would you like to do?" (resume.ts clarifyText). */
+const CLARIFY_HELP = `Tina stopped her questions on the claim and asked the client what they would like to do (<tina_asked>): open a
+new claim, carry on with the claim, talk to their broker, or nothing for now. Set clarify:
+- "new-claim" when they want to open a new claim, or start telling her about something else that happened;
+- "carry-on" when they want to carry on with the claim, or say it is theirs after all;
+- "broker" when they want to talk to their broker or a person;
+- "nothing" when they say no thanks, nothing for now, or that they don't need anything.
+Null if you can't tell. Use kind "unparsed", or "question" when they ask something.`;
+
 const claimLine = (c: OpenClaim, i: number) => `${i + 1}. ${c.claimType} claim ${c.reference}, incident on ${sastParts(c.incidentAt).date}`;
 
 function askingHelp(ctx: ReplyContext): string {
@@ -147,6 +165,7 @@ function askingHelp(ctx: ReplyContext): string {
       + 'the client picks one (by number, type or date). Leave it null if you can\'t tell.';
   }
   if (ctx.pending?.kind === 'new-claim') return 'Tina asked "Is this a new claim?". Set yesNo to the client\'s yes or no; null if they didn\'t say.';
+  if (ctx.pending?.kind === 'clarify') return CLARIFY_HELP;
   if (ctx.sapsStep) {
     return 'Tina asked for the SAPS (police) case number and/or the police station. Use kind "saps" with sapsCaseNumber and '
       + 'sapsStation as the client gave them. Use kind "not-yet" when the client has no case number yet or hasn\'t reported it.';
@@ -208,6 +227,16 @@ Also:
   (YYYY-MM-DD) and place if the client gave them.
 - wantsNewClaim: true only when the client says in so many words that they want to report or open a new claim, or
   that this is a new or different claim ("I'd like to open a new claim"). Otherwise false.
+- offTrack: null unless the client shows they don't want to go on with this claim's questions:
+  - "not-theirs": the client says the claim Tina is asking about isn't theirs or shouldn't exist: they never reported
+    or logged it, someone else did, it's fraud or a mistake, or they don't have the policy, car or item it is about.
+    This holds even when they ask for help with it ("can you help me, I never logged this claim").
+  - "something-else": the message doesn't answer Tina, and the client wants something other than her questions on this
+    claim: they say it's the wrong claim, they don't know what it is or why she is asking, they want to cancel or
+    withdraw it or talk to a person, or they write about another matter.
+  A message that answers any of Tina's questions, says they don't know or will send it later, asks what a question
+  means, or reports a new incident (differentIncident) is never "something-else". Wanting to stop for now and carry on
+  later is not off track either.
 - forItem: only when the client sent a file. The key of the item in <missing_evidence> the file is, judged from the
   caption, the file name and Tina's last question. When Tina asked for one of them, it is that one unless the caption
   or the file name clearly says it is another: clients often send several files for one item (the front and the back,
@@ -291,7 +320,7 @@ function valueFor(item: QuestionItem, r: { valueText?: unknown; valueNumber?: un
 }
 
 /** Code's check of what Claude returned. Anything that doesn't fit becomes 'unparsed' (or no choice, no yes/no). */
-export function toResumeMessage(raw: unknown, ctx: ReplyContext, file: ClientFile | undefined, wamid: string, now: Date): ResumeMessage {
+export function toResumeMessage(raw: unknown, ctx: ReplyContext, file: ClientFile | undefined, wamid: string, now: Date, text?: string): ResumeMessage {
   const r: Raw = raw && typeof raw === 'object' ? (raw as Raw) : {};
   const caseNumber = str(r.sapsCaseNumber);
   const station = str(r.sapsStation);
@@ -350,6 +379,9 @@ export function toResumeMessage(raw: unknown, ctx: ReplyContext, file: ClientFil
     if (chosen && ctx.pending.claimIds.includes(chosen.id)) message.chosenClaim = chosen.id;
   }
   if (ctx.pending?.kind === 'new-claim' && typeof r.yesNo === 'boolean') message.yesNo = r.yesNo;
+  // TTTFG-4830: off track, or the answer to "What would you like to do?". A file is never off track.
+  if (!file && ctx.open.length && (OFF_TRACK as readonly unknown[]).includes(r.offTrack)) message.offTrack = { kind: r.offTrack as (typeof OFF_TRACK)[number], said: text ?? '' };
+  if (ctx.pending?.kind === 'clarify' && (CLARIFY_CHOICE_KINDS as readonly unknown[]).includes(r.clarify)) message.clarify = r.clarify as ClarifyChoice;
   // TTTFG-4830: "I'd like to open a new claim" needs no "Is this a new claim?" (only with an open claim to tell apart).
   if (r.wantsNewClaim === true && ctx.open.length && !file) message.newClaim = true;
   const forItem = str(r.forItem);
@@ -392,6 +424,9 @@ export async function readReply(
   model: ReplyModel, ctx: ReplyContext, text: string, file: ClientFile | undefined, wamid: string, now: Date,
   opts: { spoken?: boolean } = {},
 ): Promise<ResumeMessage> {
+  // TTTFG-4830: a tap on one of "What would you like to do?"'s buttons says what it means; no model needed.
+  const tapped = ctx.pending?.kind === 'clarify' && !file ? clarifyTap(text) : undefined;
+  if (tapped) return { understood: { kind: 'unparsed', wamid }, differentIncident: false, clarify: tapped };
   const { system, user } = replyPrompt(ctx, text, file, now, opts.spoken);
   let raw: unknown;
   try {
@@ -399,7 +434,7 @@ export async function readReply(
   } catch {
     raw = null;
   }
-  const m = toResumeMessage(raw, ctx, file, wamid, now);
+  const m = toResumeMessage(raw, ctx, file, wamid, now, text.trim());
   // TTTFG-4830: a message that is only "no" answers the question Tina asked; it can't take back an earlier answer.
   if (BARE_NO.test(text) && 'corrections' in m.understood) {
     const { corrections: _dropped, ...rest } = m.understood as typeof m.understood & { corrections?: unknown };
@@ -407,6 +442,12 @@ export async function readReply(
   }
   if (opts.spoken && m.understood.kind !== 'file') m.understood = { ...m.understood, spoken: true };
   return m;
+}
+
+/** TTTFG-4830: the choice a reply is, when it is exactly one of CLARIFY_CHOICES' taps (as typed or tapped). */
+export function clarifyTap(text: string): ClarifyChoice | undefined {
+  const t = text.trim().replace(/[.!]+$/, '').toLowerCase();
+  return CLARIFY_CHOICE_KINDS.find((k) => (CLARIFY_CHOICES[k].reply ?? CLARIFY_CHOICES[k].title).toLowerCase() === t);
 }
 
 /**

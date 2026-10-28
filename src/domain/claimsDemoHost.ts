@@ -271,6 +271,11 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         if (m.text.trim()) c.said = [...(c.said ?? []), m.text.trim()];
         if (!r.claim) {
             c.walk = r.state;
+            // TTTFG-4830 (QC): the client stopped, or a person takes it from here: nothing carries over to a next claim.
+            if (!r.state) {
+                c.held = [];
+                c.said = [];
+            }
             return done('walkthrough');
         }
         // The claim is open: the follow-on starts at once, with any files the client sent on the way and the form
