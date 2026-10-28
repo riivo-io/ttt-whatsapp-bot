@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit 39b117f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit b56d936). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 39b117f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit b56d936). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -14,6 +14,12 @@
 // what to do if anyone is (call 10111, come back once everyone is safe), so nobody waits on a yes before getting it.
 // Once Tina knows the kind of claim, she sends what to gather while they are still at the scene (claim.ts
 // onSceneText), once, and waits for the client to say they're ready before the questions about what happened.
+//
+// TTTFG-4830 (QC, 28 Oct 2026): a numbered list of questions is asked once. After a reply Tina can't read, the rest of
+// that step is asked one question at a time (oneByOne), with Yes and No to tap: the same list again and again went in
+// circles, because a bare "yes" to two yes/no questions answers neither. And the client can stop: "I'll carry on later"
+// keeps what they said for when they're back; "I don't want to go on with this claim" asks once whether to stop, and a
+// yes ends it with nothing logged.
 //
 // Only a WhatsApp number on the CRM can open a claim (decided 9 October 2026): an unknown number gets the
 // unknown-number reply, no claim and no follow-up. Tina never asks for an ID number or a policy number.
@@ -80,6 +86,14 @@ export interface WalkthroughState {
   opening?: string;
   /** TTTFG-4830: the on-scene checklist has gone out (it goes once). */
   onSceneSent?: true;
+  /** TTTFG-4830 (QC): the facts Tina's last question asked for; a bare "yes" or "no" answers only those. */
+  lastAsked?: Fact[];
+  /** TTTFG-4830 (QC): the step Tina asks one question at a time, after a reply to its list she couldn't read. */
+  oneByOne?: Step;
+  /** TTTFG-4830: the client said they'd carry on later. Their next message picks up where they stopped. */
+  paused?: true;
+  /** TTTFG-4830: the client said they don't want to go on with the claim, and Tina asked whether to stop. */
+  stopping?: true;
 }
 
 /** What Claude understood from the client's message. Code decides what happens next. */
@@ -97,6 +111,10 @@ export type Answer =
    * Tina's question (what a word means, where to find it); absent: it's for the broker (cover, payment, advice).
    */
   | { kind: 'question'; question: string; help?: string }
+  /** TTTFG-4830: "let me stop, I'll carry on later". */
+  | { kind: 'pause' }
+  /** TTTFG-4830: the client doesn't want to go on with this claim ("can we not continue with it?"). */
+  | { kind: 'stop' }
   | { kind: 'unclear' };
 
 /** Something Tina says. 'ask' is a question Claude may phrase; the rest are fixed text. */
@@ -117,7 +135,15 @@ export type Say =
   | { kind: 'on-scene' }
   | { kind: 'unknown-number' }
   /** No active policy, or not the policy on file: a person will contact the client (date from the follow-up). */
-  | { kind: 'passed-on'; reason: FollowUpReason };
+  | { kind: 'passed-on'; reason: FollowUpReason }
+  /** TTTFG-4830: fixed words in front of the next question ("Welcome back."). */
+  | { kind: 'lead'; text: string }
+  /** TTTFG-4830: "No problem. Send me a message when you're ready…" */
+  | { kind: 'paused' }
+  /** TTTFG-4830: "Would you like me to stop?", with Stop here and Carry on to tap. */
+  | { kind: 'stop-ask'; again?: true }
+  /** TTTFG-4830: stopped, nothing logged. */
+  | { kind: 'stopped' };
 
 /** 'client-question' (TTTFG-4830): the client asked something only a person can answer. */
 export type FollowUpReason = 'no-active-policy' | 'policy-not-on-file' | 'client-question';
@@ -180,6 +206,9 @@ export const askedKey = (f: Fact): string => (f === 'incidentAt' ? 'when' : f ==
 /** TTTFG-4830: an ask, with how often each of its questions was asked before; the state counts this time. */
 function counted(state: WalkthroughState, say: Say): { state: WalkthroughState; say: Say } {
   if (say.kind !== 'ask' || say.correcting) return { state, say };
+  // TTTFG-4830 (QC): what this ask asks for, so a bare yes or no is read against it. Asked one at a time: the first.
+  if (state.oneByOne === say.step && say.missing.length > 1) say = { ...say, missing: [say.missing[0]] };
+  const lastAsked = FACT_STEPS.includes(say.step) ? say.missing : undefined;
   const keys = say.missing.length ? [...new Set(say.missing.map(askedKey))] : [say.step];
   // The summary is "the same question" only while it says the same: after a correction it's read out in full again.
   const counter = (k: string) => (k === 'summary' ? `summary:${JSON.stringify(state.facts)}` : k);
@@ -187,7 +216,8 @@ function counted(state: WalkthroughState, say: Say): { state: WalkthroughState; 
   const after = (k: string) => ((k === 'when-time' || k === 'when-date') && (asked.when ?? 0) > 0 ? 1 : 0);
   const tries = Object.fromEntries(keys.map((k) => [k, (asked[counter(k)] ?? 0) + after(k)]));
   for (const k of keys) asked[counter(k)] = (asked[counter(k)] ?? 0) + 1;
-  return { state: { ...state, asked }, say: { ...say, tries } };
+  const { lastAsked: _l, ...rest } = state;
+  return { state: { ...rest, asked, ...(lastAsked ? { lastAsked } : {}) }, say: { ...say, tries } };
 }
 
 /** TTTFG-4830: words that say something was stolen (with the claim type, isTheft decides). */
@@ -291,6 +321,27 @@ what to do if they don't have it, or they may say they want to change something 
   those, and never state a fact about the client's claim or policy that isn't in this conversation.
 A message that answers Tina's question is never kind "question", even if it ends with "?" or also asks something.`;
 
+/** TTTFG-4830: the fixed words of stopping and carrying on later (DRAFT WORDING, as the rest of the walkthrough's). */
+export const PAUSED_TEXT = "No problem. Send me a message when you're ready, and we'll carry on from where we stopped.";
+export const STOP_QUESTION = "Would you like me to stop? I haven't logged a claim yet, so nothing goes to your insurer.";
+export const STOP_AGAIN = "Sorry, I didn't quite get that. Should I stop, or carry on with your claim?";
+export const STOPPED_TEXT = "No problem, I've stopped, and no claim was logged. If you want to report something later, just send me a message.";
+export const WELCOME_BACK = 'Welcome back.';
+/** TTTFG-4830 (QC): said only when Tina couldn't read the reply (not because a question is asked again). */
+export const NOT_UNDERSTOOD = "Sorry, I didn't quite get that.";
+export const CARRY_ON = "No problem, let's carry on.";
+
+/**
+ * TTTFG-4830 (QC): told to Claude with every walkthrough message (understand.ts). A client who wants out says so in
+ * many ways, often as a question; before, "Can we not continue with this claim?" went to the broker as a question and
+ * Tina asked for the summary again.
+ */
+export const STOP_HELP = `The client may not want to go on with Tina's questions right now:
+- kind "stop": they don't want to go on reporting this claim at all, even when they say it as a question ("can we not
+  continue with this claim?"): they want to cancel it, say it isn't a real claim or is fraud, or started it by mistake.
+- kind "pause": they want to stop for now and carry on later ("let me stop, we'll continue later", "I'm driving").
+A message that answers Tina's question is never "stop" or "pause".`;
+
 /** TTTFG-4830: Claude's answer to the client's question, when it's short enough to be one; otherwise the broker's. */
 export function questionHelp(explain: unknown): string | undefined {
   const t = typeof explain === 'string' ? explain.trim() : '';
@@ -328,6 +379,8 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     return { state: c.state, say: [...before, c.say], effects: [] };
   };
   const same = (): Turn => askIn(state);
+  // TTTFG-4830 (QC): a reply Tina couldn't read. She says so, and the rest of a list of questions goes one at a time.
+  const missed = (): Turn => askIn({ ...state, oneByOne: state.step }, [{ kind: 'lead', text: NOT_UNDERSTOOD }]);
   // TTTFG-4830: once the kind of claim is known, the on-scene checklist (once), and Tina waits for "ready" before the
   // questions about what happened. Until it's known, the claim type is asked first.
   const toReady = (s: WalkthroughState, before: Say[] = []): Turn => {
@@ -335,6 +388,26 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     if (s.onSceneSent) return askIn({ ...s, step: nextFactStep(s.facts) }, before);
     return { state: { ...s, step: 'ready', onSceneSent: true }, say: [...before, { kind: 'on-scene' }], effects: [] };
   };
+
+  // TTTFG-4830 (QC): Tina asked whether to stop. Yes ends the walkthrough with nothing logged; no carries on.
+  if (state.stopping) {
+    const { stopping: _s, ...on } = state;
+    if (answer.kind === 'yes' || answer.kind === 'stop') return { state: null, say: [{ kind: 'stopped' }], effects: [] };
+    if (answer.kind === 'no') return askIn(on, [{ kind: 'lead', text: CARRY_ON }]);
+    if (answer.kind === 'pause') return { state: { ...on, paused: true }, say: [{ kind: 'paused' }], effects: [] };
+    return { state, say: [{ kind: 'stop-ask', again: true }], effects: [] };
+  }
+  if (answer.kind === 'stop') {
+    const { paused: _p, ...on } = state;
+    return { state: { ...on, stopping: true }, say: [{ kind: 'stop-ask' }], effects: [] };
+  }
+  if (answer.kind === 'pause') return { state: { ...state, paused: true }, say: [{ kind: 'paused' }], effects: [] };
+  if (state.paused) {
+    const { paused: _p, ...back } = state;
+    // Back after "I'll carry on later": a "hi" isn't a miss on the question; Tina asks it again.
+    if (answer.kind === 'unclear') return askIn(back, [{ kind: 'lead', text: WELCOME_BACK }]);
+    return advance(back, answer);
+  }
 
   // TTTFG-4830: a question about what Tina asked gets its short answer, a question only a person can answer goes to the
   // broker; then she asks again. It isn't a miss, and nothing the client told her changes.
@@ -377,9 +450,11 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     case 'claim-type':
     case 'incident':
     case 'parties': {
-      if (answer.kind !== 'facts') return same();
+      if (answer.kind !== 'facts') return missed();
       const facts = merge(state.facts, answer.facts, state.opening);
       if (state.step === 'claim-type' && facts.claimType) return toReady({ ...state, facts });
+      // Nothing new (Claude repeated what Tina already had): a miss too.
+      if (sameFacts(facts, state.facts)) return missed();
       return askIn({ ...state, facts, step: nextFactStep(facts) });
     }
 

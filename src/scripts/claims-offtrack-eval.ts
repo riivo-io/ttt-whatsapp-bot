@@ -6,7 +6,9 @@
  * reply.ts reads `offTrack` ('not-theirs' or 'something-else') and resume.ts asks what the client would like to do,
  * offering a new claim. This runs the real reply prompt (reply.ts readReply) on that message and others like it, on the
  * same list, and on the replies to "What would you like to do?", and prints what Claude read and what Tina would do
- * (resume.ts decide). Nothing is written to the CRM or sent on WhatsApp.
+ * (resume.ts decide). Then the walkthrough messages from QC round 1 of TTTFG-5543 (understand.ts): a bare "yes" to one
+ * question asked alone, "policy" for police, "can we not continue with this claim?" at the summary, "let me stop, we'll
+ * continue later" at the policy. Nothing is written to the CRM or sent on WhatsApp.
  *
  *   npx tsx src/scripts/claims-offtrack-eval.ts [--only fraud,cancel]
  *
@@ -21,6 +23,8 @@ import type { QuestionItem } from '../departments/insurance/contracts';
 import type { FollowOnState } from '../departments/insurance/followon';
 import { readReply, type ReplyContext, type ReplyModel } from '../departments/insurance/reply';
 import { clarifyText, decide, type OpenClaim, type Pending, type ResumeState } from '../departments/insurance/resume';
+import { understand, type UnderstandModel } from '../departments/insurance/understand';
+import { STOP_QUESTION, type WalkthroughState } from '../departments/insurance/walkthrough';
 
 const KEY_VAULT = 'tttagentdevkv62pa5f';
 const UNDERSTAND_MODEL = process.env.CLAIMS_UNDERSTAND_MODEL || 'claude-sonnet-4-6';
@@ -86,6 +90,22 @@ const CASES: Case[] = [
     { id: 'carry-on', on: 'unsure', say: 'ok carry on', want: { clarify: ['carry-on'] } },
 ];
 
+/** The walkthrough (understand.ts): what Tina asked, the client's reply, and the Answer kind it should read as. */
+const MOMENTUM = { id: 'p1', providerId: 'mo', insurer: 'Momentum Insure', product: 'Motor', policyNumber: 'MO-TEST', assistNumber: '' };
+const WALK: WalkthroughState = {
+    contactId: 'c', firstName: 'Lungile', policies: [MOMENTUM, { ...MOMENTUM, id: 'p2', insurer: 'Discovery Insure', policyNumber: 'DI-TEST' }], step: 'parties',
+    policyId: 'p1', onSceneSent: true, facts: { claimType: 'Motor accident', description: 'Car hit the pothole', incidentAt: '2026-10-23T03:00:00+02:00', place: 'Montana' },
+};
+const WALK_CASES: { id: string; say: string; state: WalkthroughState; asked: string; want: string[] }[] = [
+    { id: 'w-yes-one', say: 'yes', state: { ...WALK, facts: { ...WALK.facts, thirdParties: false }, lastAsked: ['saps'] }, asked: 'Were the police (SAPS) involved? Please just answer yes or no.', want: ['facts'] },
+    { id: 'w-policy', say: 'The policy was involved yes', state: { ...WALK, facts: { ...WALK.facts, thirdParties: false }, lastAsked: ['saps'] }, asked: 'Were the police (SAPS) involved? Please just answer yes or no.', want: ['facts', 'yes'] },
+    { id: 'w-only-me', say: 'only me', state: { ...WALK, lastAsked: ['thirdParties'] }, asked: 'Was anyone else involved, for example another driver? Please just answer yes or no.', want: ['facts', 'no'] },
+    { id: 'w-not-continue', say: 'Can we not continue with this claim because it is a fraudulent claim/Hijacking claim?', state: { ...WALK, step: 'summary', facts: { ...WALK.facts, thirdParties: false, saps: true, injuries: false } }, asked: 'Is it all correct?', want: ['stop'] },
+    { id: 'w-later', say: 'Let me stop the claim we will continue later', state: { ...WALK, step: 'policy', policyId: undefined, facts: {} }, asked: 'Which policy is this claim about?', want: ['pause'] },
+    { id: 'w-stop-yes', say: 'yes please stop', state: { ...WALK, step: 'summary', stopping: true }, asked: STOP_QUESTION, want: ['yes'] },
+    { id: 'w-approved', say: 'Will the insurer pay for this?', state: { ...WALK, step: 'summary' }, asked: 'Is it all correct?', want: ['question'] },
+];
+
 let claude: Anthropic | undefined;
 const model: ReplyModel = async (req) => {
     claude ??= new Anthropic({
@@ -121,7 +141,14 @@ async function main() {
             m.newClaim && 'newClaim'].filter(Boolean).join(', ');
         console.log(`${ok ? 'OK  ' : 'MISS'} ${c.id.padEnd(15)} "${c.say}"\n     read: ${read}\n     Tina: ${d.kind}${d.kind === 'clarify' ? ` (${d.why}${d.dispute ? ', broker told' : ''})` : ''}\n`);
     }
-    console.log(`${right}/${run.length} read as expected (${UNDERSTAND_MODEL}).`);
+    const walk = WALK_CASES.filter((c) => !only || only.includes(c.id));
+    for (const c of walk) {
+        const a = await understand(model as unknown as UnderstandModel, c.state, c.asked, c.say, NOW);
+        const ok = c.want.includes(a.kind);
+        if (ok) right++;
+        console.log(`${ok ? 'OK  ' : 'MISS'} ${c.id.padEnd(15)} "${c.say}"\n     read: ${JSON.stringify(a)}\n`);
+    }
+    console.log(`${right}/${run.length + walk.length} read as expected (${UNDERSTAND_MODEL}).`);
 }
 
 main().catch((e) => {
