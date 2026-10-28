@@ -23,7 +23,7 @@ import {
     claimSigningStep, onClaimFormSigned, type SignedCallback, type SigningRequestCreated, type SigningRequestInput,
 } from '../departments/insurance/signing';
 import { dataverseSigningPorts } from '../departments/insurance/signing-dataverse';
-import { voiceNoteNote, whatsappCommunicationRow, type WhatsAppRegarding } from '../domain/whatsappLog';
+import { voiceNoteNote, whatsappCommunicationRow, type WhatsAppParty, type WhatsAppRegarding } from '../domain/whatsappLog';
 
 const OPT = 463630000;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -391,8 +391,9 @@ export interface DemoLogPorts {
  * One job's messages, where Tina keeps her own: Supabase's message log, and the CRM timeline (riivo_whatsappcommunications
  * rows, as dynamicsService.logMessage writes them), with a voice note's recording attached to its row as a note.
  * Filed under the claim the conversation is on, else its request, else the contact: a claim has no link to its
- * request, so the claim is where the broker looks. A link the CRM refuses falls back to the next one. Never throws:
- * the conversation has happened; a failed write is logged.
+ * request, so the claim is where the broker looks. A link the CRM refuses falls back to the next one. The contact is
+ * each row's From or To, so the whole conversation shows on the contact's timeline too; if the CRM refuses it there,
+ * the job's rows go without it. Never throws: the conversation has happened; a failed write is logged.
  */
 export async function writeDemoLog(
     ports: DemoLogPorts, log: DemoLog, where: { phone: string; contactId: string; claimId?: string; requestId?: string },
@@ -415,13 +416,18 @@ export async function writeDemoLog(
         null,
     ];
     let tried = 0;
-    const post = async (row: (regarding: WhatsAppRegarding | null) => Record<string, unknown>): Promise<string | null> => {
+    let party: WhatsAppParty | null = { table: 'contact', id: where.contactId };
+    const post = async (row: (regarding: WhatsAppRegarding | null, party: WhatsAppParty | null) => Record<string, unknown>): Promise<string | null> => {
         for (; tried < regardings.length; tried++) {
-            try {
-                const r = await ports.dv<{ activityid?: string }>('POST', 'riivo_whatsappcommunicationses?$select=activityid', row(regardings[tried]), { returnRow: true });
-                return r?.activityid ?? null;
-            } catch (e) {
-                console.warn(`[ClaimsDemo] ${where.phone}: timeline row under ${regardings[tried]?.table ?? 'nothing'} refused:`, (e as Error).message);
+            // With the contact, then without: refused both ways, it's the link that's refused.
+            for (const p of party ? [party, null] : [null]) {
+                try {
+                    const r = await ports.dv<{ activityid?: string }>('POST', 'riivo_whatsappcommunicationses?$select=activityid', row(regardings[tried], p), { returnRow: true });
+                    party = p;
+                    return r?.activityid ?? null;
+                } catch (e) {
+                    console.warn(`[ClaimsDemo] ${where.phone}: timeline row under ${regardings[tried]?.table ?? 'nothing'}${p ? ' with the contact' : ''} refused:`, (e as Error).message);
+                }
             }
         }
         return null;
@@ -431,7 +437,7 @@ export async function writeDemoLog(
         const i = log.inbound;
         const tooBig = !!i.voice?.bytes && !voiceNoteNote({ communicationId: '-', bytes: i.voice.bytes, mimeType: i.voice.mimeType, seconds: null, at: i.at });
         const text = `${inboundText(i)}${tooBig ? ' (the recording is over the 5 MB attachment limit, so it is not attached)' : ''}`;
-        const id = await post((regarding) => whatsappCommunicationRow({ text, direction: 'Incoming', phone: where.phone, wamid: i.wamid, regarding, at: i.at }));
+        const id = await post((regarding, party) => whatsappCommunicationRow({ text, direction: 'Incoming', phone: where.phone, wamid: i.wamid, regarding, party, at: i.at }));
         if (id && i.voice?.bytes && !tooBig) {
             try {
                 await ports.dv('POST', 'annotations', voiceNoteNote({ communicationId: id, bytes: i.voice.bytes, mimeType: i.voice.mimeType, seconds: i.voice.seconds, at: i.at }));
@@ -441,7 +447,7 @@ export async function writeDemoLog(
         }
     }
     for (const o of log.outbound) {
-        await post((regarding) => whatsappCommunicationRow({ text: o.text, direction: 'Outgoing', phone: where.phone, wamid: o.wamid, regarding, at: o.at }));
+        await post((regarding, party) => whatsappCommunicationRow({ text: o.text, direction: 'Outgoing', phone: where.phone, wamid: o.wamid, regarding, party, at: o.at }));
     }
 }
 
