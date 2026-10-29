@@ -6,6 +6,8 @@
  * Off unless CLAIMS_ENABLED=true. This repo deploys to production on every push to main, and claims are not meant to
  * be live in PROD yet (21 Oct 2026). The switch is a deployment switch, not an agent setting: once on, opening a claim
  * is always live (decision D7).
+ * TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER, a TTT number the client can call about the claim, said on the
+ * burst-geyser list. Unset or blank: not said (see claimsHost.ts claimsContactNumber).
  */
 import Anthropic from '@anthropic-ai/sdk';
 import type { ClaimPorts, Outbound } from '../departments/insurance/claim';
@@ -13,7 +15,7 @@ import { dataverseClaimPorts } from '../departments/insurance/dataverse';
 import type { IntentModel } from '../departments/insurance/intent';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
-import { claimFromClient, claimFromUnknownNumber, type ClaimsHostDeps, type ClaimsOutcome } from '../domain/claimsHost';
+import { claimFromClient, claimFromUnknownNumber, claimsContactNumber, type ClaimsHostDeps, type ClaimsOutcome } from '../domain/claimsHost';
 import type { CrmEntity } from '../types/crm.types';
 import { RateLimitError } from '../utils/anthropicRateLimit';
 import { dynamicsService } from './dynamics.service';
@@ -62,6 +64,7 @@ function deps(from: string, sessionId: string | null, entity: CrmEntity | null, 
     return {
         enabled: claimsEnabled(),
         signUpLink: SIGN_UP_LINK,
+        contactNumber: claimsContactNumber(process.env.CLAIMS_CONTACT_NUMBER),
 
         async load(phone) {
             const row = await supabaseService.getClaimWalkthrough(phone);

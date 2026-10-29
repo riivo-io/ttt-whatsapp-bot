@@ -6,12 +6,13 @@
  * is said and written; this module only joins its parts the way the DEV drivers do:
  *  - a 5168 walkthrough in progress: Claude reads the reply (understand.ts), claimTurn() asks the next question;
  *  - the walkthrough opens the claim: the 5176 follow-on starts at once (SAPS step, duty of disclosure, the form's
- *    questions, the filled form, then the evidence). What the client said while reporting it already answers some of
- *    the form's questions (reportedAnswers): those are filled in, not asked;
+ *    questions, the evidence, then the filled form to sign, even with items still to come). What the client said while
+ *    reporting it already answers some of the form's questions (reportedAnswers): those are filled in, not asked;
  *  - otherwise: Claude reads the message against the open claims (reply.ts) and resumeTurn() (5184) decides which claim
  *    it belongs to, or that there is none. When it answers part of a batch of the form's questions, Tina waits for the
  *    rest and the queue brings back a check after a quiet spell (claimsDemoBatchCheck);
- *  - no open claim: a claim report starts the walkthrough under a new riivo_request; anything else gets the demo hello.
+ *  - no open claim: a claim report starts the walkthrough under a new riivo_request, with what the report already
+ *    says read first (openingFacts); anything else gets the demo hello.
  * "#reset" withdraws the demo client's open claims and forgets the conversation, so a demo can start clean.
  * A voice note (TTTFG-4830) is transcribed first (deps.transcribe, with Tina's last message as the hint) and read as
  * what the client said, with Claude told it is a transcript; the package says back what it saved from it. One that
@@ -22,15 +23,15 @@
  * Pure apart from the injected deps (Tina's Ports pattern), so it is tested without Meta, Dataverse, Supabase or Claude.
  * src/services/claimsDemo.service.ts wires the real ones.
  */
-import { claimTurn, type Conversation } from '../departments/insurance/claim';
+import { claimTurn } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
 import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyModel, type ReportedModel } from '../departments/insurance/reply';
 import { remindTurn, type BrokerStep, type ReminderOutcome, type ReminderPorts, type ReminderSettings } from '../departments/insurance/reminder';
 import { NO_RESUME_STATE, resumeTurn, type ResumePorts, type ResumeState } from '../departments/insurance/resume';
-import { understand, type UnderstandModel } from '../departments/insurance/understand';
+import { openingFacts, understand, type UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
-import { ABANDONED_AFTER_MS, withOpeningFacts } from './claimsHost';
+import { ABANDONED_AFTER_MS, claimsConversation } from './claimsHost';
 
 export const RESET_COMMAND = '#reset';
 
@@ -148,6 +149,8 @@ export interface ClaimsDemoDeps {
     /** Tina's own fixed texts (the hello, the reset, a file kept for later), outside the package. */
     say(phone: string, text: string): Promise<void>;
     signUpLink: string;
+    /** TTTFG-4830: CLAIMS_CONTACT_NUMBER (claimsHost.ts claimsContactNumber). Absent: the client isn't given a TTT number. */
+    contactNumber?: string;
     /**
      * TTTFG-4830: calls claimsDemoBatchCheck(phone, token) after a quiet spell, on the phone's own queue, so it comes
      * after anything the client sends meanwhile. With it, Tina waits for the rest of a part-answered batch of questions,
@@ -241,7 +244,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         await deps.save(m.phone, c);
         return outcome;
     };
-    const conv = (): Conversation => ({ phone: m.phone, requestId: c.requestId, signUpLink: deps.signUpLink });
+    const conv = () => claimsConversation(m.phone, c.requestId, deps.signUpLink, deps.contactNumber);
 
     // ---- TTTFG-4830: a voice note is read as what the client said ----
     const spoken = !!m.voice;
@@ -340,8 +343,11 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     }
     c.requestId = requestId;
     c.said = [m.text.trim()];
-    const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start' }, now);
-    c.walk = t.state && (await withOpeningFacts(deps.understandModel, t.state, m.text, now));
+    // TTTFG-4830 (28 Oct 2026): what the report already says goes into the start, so the policy question offers only the
+    // policies that fit the claim. As before, a failed read here only means Tina asks for it.
+    const opening = await openingFacts(deps.understandModel, m.text, now);
+    const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start', ...opening }, now);
+    c.walk = t.state;
     return done('started');
 }
 
@@ -357,7 +363,7 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
     if (!c || !followOn || followOn.waiting !== token) return 'stale';
     let last: string | undefined;
     const ports = deps.ports(c.requestId, (text) => { last = text; });
-    const conversation = { phone, requestId: c.requestId, signUpLink: deps.signUpLink };
+    const conversation = claimsConversation(phone, c.requestId, deps.signUpLink, deps.contactNumber);
     let r = await followOnTurn(ports, conversation, followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
     const again = r.state?.waiting;
     if (again && again !== token) {
@@ -396,7 +402,7 @@ export async function claimsDemoReminder(
         lastReminderOn: deps.lastReminderOn ?? (async () => null),
         lastBrokerStepOn: deps.lastBrokerStepOn ?? (async () => null),
     };
-    const r = await remindTurn(ports, { phone, requestId: c.requestId, signUpLink: deps.signUpLink }, c.resume, contactId, now, settings);
+    const r = await remindTurn(ports, claimsConversation(phone, c.requestId, deps.signUpLink, deps.contactNumber), c.resume, contactId, now, settings);
     if (!r.outcomes.some((o) => 'sent' in o)) return r.outcomes;
     c.resume = r.state;
     if (r.lastSent) c.lastSent = r.lastSent;

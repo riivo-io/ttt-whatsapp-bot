@@ -9,6 +9,7 @@ import {
     batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
     filesQuietMs, optionalQuietMs, reminderDays, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
 } from '../../src/domain/claimsDemoHost';
+import { claimsContactNumber } from '../../src/domain/claimsHost';
 import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
 import { SAFETY_TEXT, type AgentActionRow, type ClaimRow } from '../../src/departments/insurance/claim';
@@ -48,7 +49,7 @@ const blankAnswer = { kind: 'unclear', policyNumber: null, claimType: null, desc
 const blankReply = { kind: 'unparsed', valueText: null, valueNumber: null, valueBool: null, sapsCaseNumber: null, sapsStation: null, differentIncident: false,
     chosenClaim: null, yesNo: null, forItem: null, claimType: null, description: null, incidentDate: null, place: null, otherAnswers: [], corrections: [] };
 
-function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, unknown>[]; form?: StoredClaimForm } = {}) {
+function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, unknown>[]; form?: StoredClaimForm; policies?: Policy[]; signing?: boolean } = {}) {
     const form = o.form ?? MOTOR;
     const reportedSeen: string[] = [];
     const rows: Row[] = o.rows ?? [];
@@ -64,7 +65,7 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
     const row = (id: string) => rows.find((r) => r.id === id)!;
     const ports = (sentTo: (t: string) => void): ResumePorts => ({
         contactByWhatsApp: async () => ({ id: CONTACT, firstName: 'Adriaan' }),
-        activePolicies: async () => [POLICY],
+        activePolicies: async () => o.policies ?? [POLICY],
         policyOwner: async () => ({ kind: 'user', id: SIPHO.id, firstName: 'Sipho', enabled: true }),
         insuranceTeam: async () => ({ id: 't-ia', name: 'the Insurance and Advice team' }),
         createClaim: async (r) => {
@@ -97,7 +98,13 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
             return { documentId: `doc-${filed.length}` };
         },
         storeVideo: async () => ({ documentId: 'v' }),
-        requestClaimSignature: async (id) => (signatureCalls.push(id), 'notAvailable'),
+        // `signing`: the signing page is set up, so the link goes out and the claim says so (as signature-fill.ts does).
+        requestClaimSignature: async (id) => {
+            signatureCalls.push(id);
+            if (!o.signing) return 'notAvailable';
+            row(id).signatureStatus = 'Link sent';
+            return 'sent';
+        },
         createAgentAction: async (r) => (actions.push(r), { id: `aa-${actions.length}`, dueOn: '2026-10-24T15:00:00Z' }),
         send: async (_to, m) => { sent.push(m.text); sentTo(m.text); },
     });
@@ -166,20 +173,59 @@ test('the whole claim: walkthrough, the questions, the photo, then the form to s
 
     w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
     assert.equal(await say(w, 'Me, Adriaan', (t = tick(t, 2))), 'follow-on');
-    assert.deepEqual(w.signatureCalls, []); // TTTFG-5196: the form waits for the evidence
+    assert.deepEqual(w.signatureCalls, []); // the form waits until everything has been asked
     assert.equal(w.rows[0].answers.driverName?.value, 'Me, Adriaan');
     assert.match(w.since().join('\n'), /Please send me photos of the damage/i);
 
     w.replies.push({});
     assert.equal(await say(w, '', (t = tick(t, 2)), photo), 'follow-on');
     assert.deepEqual(w.filed.map((f) => [f.file.id, f.claimId, f.itemKey]), [['media-1', 'claim-1', 'damagePhoto']]);
-    // TTTFG-4830: photos of the damage are any number, so Tina asks whether that's all of them before she finishes.
-    assert.deepEqual(w.since(), ["Thanks, I've got that one. Is that all the photos of the damage, or do you have more?"]);
-    w.replies.push({ kind: 'value', valueBool: true });
-    assert.equal(await say(w, 'Yes', (t = tick(t, 1))), 'follow-on');
-    assert.match(w.since()[0], /^Thanks, I've got the photos of the damage\./);
+    // TTTFG-4830 (28 Oct 2026, TTT's feedback): no "Is that all the photos, or do you have more?". The client sent what
+    // they have, and that was the last thing to ask: TTT's closing line, and the form to sign, once.
+    assert.deepEqual(w.since(), ["Thanks, I've got the photos of the damage.", 'Thank you for submitting the details. One of our consultants will be in contact with you.']);
     assert.equal(w.store.get(PHONE)?.resume.followOn, null); // nothing more to ask
     assert.deepEqual(w.signatureCalls, ['claim-1']); // the form, once, at the end
+    assert.match(w.actions.at(-1)!.detail, /^Claim CLM-000001 \(Motor accident, Discovery Insure\) is ready to register with the insurer/);
+});
+
+test('TTTFG-4830 (28 Oct 2026): the report is read before the walkthrough starts, so the policy question offers only the policies that fit', async () => {
+    const HOME: Policy = { id: 'pol-home', providerId: 'prov-discovery', insurer: 'Discovery Insure', product: 'Household', policyNumber: 'DI-HOME', assistNumber: '' };
+    const w = world({ policies: [HOME, POLICY] });
+    const reads: { sentBefore: number; user: string }[] = [];
+    const understandModel = w.deps.understandModel;
+    w.deps.understandModel = async (req) => (reads.push({ sentBefore: w.sent.length, user: req.user }), understandModel(req));
+    assert.equal(await say(w, 'Someone drove into the back of my car at the Claremont robot', DAY1), 'started');
+    // One read of the report, before Tina says anything.
+    assert.equal(reads.length, 1);
+    assert.equal(reads[0].sentBefore, 0);
+    assert.match(reads[0].user, /Someone drove into the back of my car at the Claremont robot/);
+    // A car accident: only the motor policy is offered; the household one is kept in case the client says no.
+    assert.deepEqual(w.since(), ['Is this claim about your Discovery Insure Motor policy (DI-9)?']);
+    const walk = w.store.get(PHONE)!.walk!;
+    assert.deepEqual(walk.policies.map((p) => p.id), ['pol-car']);
+    assert.deepEqual(walk.allPolicies?.map((p) => p.id), ['pol-home', 'pol-car']);
+    assert.equal(walk.facts.claimType, 'Motor accident');
+    assert.equal(walk.facts.description, 'Someone drove into the back of my car at the Claremont robot');
+});
+
+test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser list; unset or blank, the list gives no TTT number', async () => {
+    const HOME: Policy = { id: 'pol-home', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Household', policyNumber: 'OM-1', assistNumber: '' };
+    const GEYSER = 'My geyser burst this morning and water came through the bedroom ceiling';
+    const geyserList = async (raw: string | undefined) => {
+        const w = world({ policies: [HOME] });
+        w.deps.contactNumber = claimsContactNumber(raw);
+        w.deps.understandModel = async (req) => ({
+            ...blankAnswer,
+            ...(/which policy the claim is about/.test(req.system) ? { kind: 'yes' } : { kind: 'facts', claimType: 'Property loss or damage', description: GEYSER }),
+        });
+        assert.equal(await say(w, GEYSER, DAY1), 'started');
+        assert.equal(await say(w, 'yes', tick(DAY1, 1)), 'walkthrough');
+        const list = w.sent.find((t) => t.startsWith("If you're at the property")) ?? '';
+        assert.match(list, /Turn off the water/);
+        return list;
+    };
+    assert.match(await geyserList(' 021 555 0100 '), /\n\nYou can also call TTT on 021 555 0100\.\n\n/);
+    for (const raw of [undefined, '', '  ']) assert.doesNotMatch(await geyserList(raw), /call TTT|plumber urgently/i);
 });
 
 test('a photo sent during the walkthrough is kept and filed when the claim opens', async () => {
@@ -347,7 +393,7 @@ test('TTTFG-4830: with no scheduler (CLAIMS_BATCH_QUIET_MS=0), or when schedulin
 });
 
 test('TTTFG-4830: the end of the questions lists what the client still has to send, and the 08:00 reminder (TTTFG-5212) sends it again', async () => {
-    const w = world();
+    const w = world({ signing: true });
     let t = DAY1;
     await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
     let outcome = '';
@@ -356,11 +402,17 @@ test('TTTFG-4830: the end of the questions lists what the client still has to se
     await say(w, 'Me, Adriaan', (t = tick(t, 2)));
     w.since();
 
-    // "Not yet" to the photos: the list, and Tina stays on it.
+    // "Not yet" to the photos: everything has been asked, so the closing line, then the list, and Tina stays on it.
+    // TTTFG-4830 (28 Oct 2026): the form goes out now, with the photos still to come; the broker can register the claim.
     w.replies.push({ kind: 'not-yet' });
     await say(w, "I'll take them tonight", (t = tick(t, 2)));
-    assert.deepEqual(w.since(), ["Thanks, that's all for now. *Things we still need from you:*\n\n- Photos of the damage\n\nPlease send them here when you have them."]);
+    assert.deepEqual(w.since(), [
+        'Thank you for submitting the details. One of our consultants will be in contact with you.',
+        '*Things we still need from you:*\n\n- Photos of the damage\n\nPlease send them here when you have them.',
+    ]);
     assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'still-need');
+    assert.deepEqual(w.signatureCalls, ['claim-1']);
+    assert.match(w.actions.at(-1)!.detail, /is ready to register with the insurer.*Still to come from the client: the photos of the damage/);
 
     // 08:00 the next day: the reminder, as a message (the client wrote less than 24 hours ago).
     const morning = new Date('2026-10-24T06:00:00Z');
@@ -380,8 +432,10 @@ test('TTTFG-4830: the end of the questions lists what the client still has to se
     w.replies.push({});
     assert.equal(await say(w, '', tick(morning, 30), photo), 'follow-on');
     assert.deepEqual(w.filed.map((f) => f.itemKey), ['damagePhoto']);
-    assert.match(w.since().join('\n'), /That's everything the insurer needs for now\./);
+    assert.match(w.since().join('\n'), /Thanks, that's everything we need from you for now\./);
     assert.equal(w.store.get(PHONE)?.resume.followOn, null);
+    assert.deepEqual(w.signatureCalls, ['claim-1']); // the form went out once, the evening before
+    assert.match(w.actions.at(-1)!.detail, /^Claim CLM-000001: the client has now sent everything Tina listed as still to come\./);
 });
 
 test('TTTFG-5212: no reminder while the client is reporting a claim; the demo numbers as WhatsApp numbers', async () => {
@@ -574,7 +628,7 @@ test('TTTFG-5196: quiet on the optional item after the last required one: the ne
     // Nothing from the client: the claim ends without the video, with the link.
     assert.equal(await claimsDemoBatchCheck(w.deps, PHONE, scheduled[1][1], tick(t, 11)), 'listed');
     assert.deepEqual(w.signatureCalls, ['claim-1']);
-    assert.deepEqual(w.since(), ['If you find the dashcam video later, you can still send it here.', "That's everything the insurer needs for now. Sipho will check your claim next."]);
+    assert.deepEqual(w.since(), ['If you find the dashcam video later, you can still send it here.', 'Thank you for submitting the details. One of our consultants will be in contact with you.']);
     assert.equal(w.store.get(PHONE)?.resume.followOn, null);
     assert.equal(optionalQuietMs(undefined), 600_000);
 });
@@ -595,7 +649,8 @@ test('TTTFG-4830 (QC, 28 Oct): "this claim is fraud, I never logged it" on the l
     const fraud = 'Can you help me this claim is fraud or hijacked because I never logged it';
     w.replies.push({ kind: 'question', clientQuestion: 'Can you help me?', forBroker: true, offTrack: 'not-theirs' });
     assert.equal(await say(w, fraud, (t = tick(t, 30))), 'follow-on');
-    assert.deepEqual(w.since(), ["I'm sorry about that. I've asked Sipho to look into claim *CLM-000001* (motor accident, 22/10/2026) and contact you. "
+    // TTTFG-4830 (28 Oct 2026, TTT's feedback): the client is never told the broker's name.
+    assert.deepEqual(w.since(), ["I'm sorry about that. I've asked your broker to look into claim *CLM-000001* (motor accident, 22/10/2026) and contact you. "
         + "I won't ask you anything more about it for now.\n\nWould you like to open a new claim instead?"]);
     const followUp = w.actions.at(-1)!;
     assert.equal(followUp.kind, 'Follow-up');

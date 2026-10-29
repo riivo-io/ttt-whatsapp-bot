@@ -1,16 +1,20 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
 // with its own state machine, keyed by claim id, and its own turn function in the same style.
 //
 // Order, all in code (TTTFG-5254 step 3): SAPS step (when needed) -> notification deadline note (when needed) -> duty
-// of disclosure -> the form's questions -> evidence items, one at a time -> "Things we still need from you" until every
-// required item is in -> complete: evidence complete, the closing line, the signing link. TTTFG-5196 (27 Oct 2026)
-// moved the signing step from after the questions to the end: the form is filled once, with every answer on it (the
-// chased answers and the SAPS case number come in on the list), and the client gets one link, as the last message. A
-// client who goes quiet on an optional item, with nothing required missing, still gets it: after a quiet spell the
-// optional items left are "not yet" and the claim ends (optionalQuiet). Claude only
+// of disclosure -> the form's questions -> evidence items, one at a time -> the closing line and the signing link, with
+// "Things we still need from you" when something is still to come -> complete once every required item is in.
+// TTTFG-5196 (27 Oct 2026) moved the signing step to the end. TTTFG-4830 (28 Oct 2026, TTT's feedback): TTT registers a
+// claim with the insurer as soon as it has the signed form, so the link goes out once everything has been asked, not
+// once everything is in; what's still to come (a SAPS case number, a photo the client said "not yet" to) follows it on
+// the list, and the broker gets a Follow-up that the claim is ready to register (readyToRegister), and again once the
+// client signs (signing.ts). Forms ask only what a client has on hand (contracts.ts `onHand`), so there is little left
+// to come; what the insurer needs and Tina doesn't ask for is on that Follow-up, for TTT to get. A client who goes quiet
+// on an optional item still gets the link, also with something required still to come: after a quiet spell the
+// optional items left are "not yet" and the claim goes on (optionalQuiet). Claude only
 // turns the client's reply into a typed value (FollowOnInput) and may rephrase a question (the `phrase` port). It never
 // decides what comes next, and it writes none of the fixed texts.
 //
@@ -19,8 +23,8 @@
 // client may continue later (TTTFG-5184) or by email (TTTFG-5188).
 //
 // Things this story must not do (TTTFG-5254 "Agent context"):
-// - Flags: Late notification and SAPS case missing are TTTFG-5263's. Nothing here writes riivo_claimflag or
-//   riivo_latenotification, and no flag reaches Tina's reply.
+// - Flags: the risk flags are TTTFG-5263's (flags.ts). followOnTurn calls the claimFlags port once, at the end of the
+//   turn; nothing here writes riivo_claimflag or riivo_latenotification, and no flag reaches Tina's reply.
 // - Filing: Tina never files a file herself. Photos and documents go to the document pipeline (TTTFG-4945) with the
 //   claim id; a video is stored and recorded but never read (no OCR, no model).
 //
@@ -42,11 +46,12 @@
 // stays the client's to send; the broker takes only what the client can't get.
 import { clientQuestionDetail, DEPARTMENT, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
+import type { FlagTrigger } from './flags';
 import { formatProblem } from './formats';
 import { claimGate } from './gate';
 import {
-  applies, chased, deferred, evidenceIn, fileCount, filesFor, formItems, itemName, missingItems, nextBatch, nextItem, sapsStepApplies, SAPS_CASE_KEY,
-  SAPS_ITEMS, SAPS_STATION_KEY,
+  applies, chased, computedTotals, deferred, evidenceIn, formItems, itemName, missingItems, moreKey, nextBatch, nextItem, sapsStepApplies,
+  SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
 import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, type ClaimTemplate } from './templates';
@@ -107,6 +112,11 @@ export interface FollowOnClaim {
   contactAddress?: string | null;
   /** riivo_claim.riivo_evidencecomplete: the end ran once, and the signing step with it. */
   evidenceComplete?: boolean;
+  /**
+   * TTTFG-4830 (29 Oct 2026): the broker's ready-to-register Follow-up exists (READY_TO_REGISTER), so the end ran once,
+   * the signing step with it, even when no link went out and something is still to come.
+   */
+  readySent?: boolean;
 }
 
 /** A file the client sent on WhatsApp. `media` comes from the WhatsApp message type. */
@@ -139,10 +149,17 @@ export interface FollowOnPorts {
   storeVideo(file: ClientFile, to: { claimId: string; itemKey?: string }): Promise<{ documentId: string }>;
   /** The signing seam (signature.ts by default; TTTFG-5192's fill once merged). */
   requestClaimSignature: RequestClaimSignature;
+  /** TTTFG-5263: the staff-only risk flags (flags.ts). Absent: none are raised. */
+  claimFlags?(input: { claimId: string; triggers: FlagTrigger[]; at: string }): Promise<unknown>;
   createAgentAction(row: AgentActionRow): Promise<{ id: string; dueOn?: string }>;
   send(to: string, message: Outbound): Promise<void>;
   /** Claude may rephrase a question in simpler words (never into insurance jargon). Absent: the prompt as written. */
   phrase?(text: string, ask: { key: string; simpler: boolean }): Promise<string>;
+  /**
+   * TTTFG-5200: evidence reached the claim in this turn (a file, or the end of the evidence stage): the completeness
+   * score is worked out again (claimpack.ts updateClaimPack). Absent: no score, as before.
+   */
+  claimEvidence?(claimId: string): Promise<unknown>;
 }
 
 /** Stored on the Tina conversation, keyed by claim id. Where the conversation is, not what the claim holds. */
@@ -181,14 +198,14 @@ export interface FollowOnState {
   /**
    * TTTFG-4830: what Tina is `waiting` for: 'files' when files are coming in for the evidence item she asked (`asking`).
    * Every file sent belongs to it, and she answers once they stop coming (the host waits less long than for answers).
-   * TTTFG-5196: 'optional' when she asked an optional item and nothing required is missing: if the client stays quiet,
-   * the claim ends without the rest (optionalQuiet; the host waits longer than for answers). followOnTurn sets
-   * `waiting` for it on every turn that ends on such an item.
+   * TTTFG-5196: 'optional' when she asked an optional item before the link went out (TTTFG-4830, 29 Oct 2026: also with
+   * something required still to come): if the client stays quiet, the claim goes on without it (optionalQuiet; the host
+   * waits longer than for answers). followOnTurn sets `waiting` for it on every turn that ends on such an item.
    */
   waitingFor?: 'files' | 'optional';
   /**
-   * TTTFG-4830: the evidence item of any number of files (photos of the scene) whose files Tina asked "Are those all of
-   * them?" about. A yes takes her on; a no, or more files, keeps her on it.
+   * TTTFG-4830: before 28 Oct 2026, the evidence item whose files Tina asked "Are those all of them?" about. She no
+   * longer asks (TTT's feedback): what the client sends is what they have. A conversation saved with it moves on.
    */
   confirming?: string;
   /** TTTFG-4830: Tina has said "if you don't know something, just say so" in this conversation. */
@@ -241,6 +258,11 @@ export type FollowOnInput =
    */
   | {
     kind: 'batch'; answers: OtherAnswer[]; dontKnow: string[]; wamid: string; also?: OtherAnswer[]; corrections?: OtherAnswer[]; spoken?: true;
+    /**
+     * TTTFG-4830 (28 Oct 2026): the batch asked about one item and the client gave several ("a phone R20 000 and a TV
+     * R5 000"): the others' values under the next entry numbers (itemValue.2). `answers` holds the first one only.
+     */
+    entries?: OtherAnswer[];
   }
   /**
    * TTTFG-4830: from the host, not the client: the quiet spell after the message `wamid` is over. Tina lists what's still
@@ -303,21 +325,6 @@ export const BATCH_HINT = `If you don't know something, just say so. ${VOICE_OR_
 export const STILL_NEED = { many: 'Thanks. I still need these:', one: 'Thanks. I still need this one:' } as const;
 /** TTTFG-4830: a reply that answered none of the batch. One question left is asked "in simpler words", as before. */
 export const SORRY_BATCH = "Sorry, I didn't quite get that. Could you answer these?";
-/**
- * TTTFG-4830: files for an evidence item of any number (photos of the scene), once they stop coming: Tina asks whether
- * that's all of them before she moves on.
- */
-export const allOfThem = (n: number, item: QuestionItem) =>
-  `Thanks, I've got ${n === 1 ? 'that one' : `those ${n}`}. ${n === 1 ? 'Is that' : 'Are those'} all ${itemName(item)}, or do you have more?`;
-/** TTTFG-4830: the same, asked again after a reply that wasn't a yes or a no. */
-export const allOfThemAgain = (item: QuestionItem) => `Is that all ${itemName(item)}? Please just answer yes or no.`;
-/** TTTFG-4830 (28 Oct 2026): the taps for allOfThem and allOfThemAgain. */
-export const ALL_OF_THEM_CHOICES: Choice[] = [{ title: "That's all", reply: "Yes, that's all of them" }, { title: 'I have more', reply: 'No, I have more' }];
-/** TTTFG-4830: "No, there are more" to allOfThem. */
-export const SEND_THE_REST = "No problem, send the rest here when you're ready.";
-/** TTTFG-4830: an evidence item of a set number of files (the front and back): fewer came. */
-export const theOthers = (have: number, need: number) =>
-  `Thanks, I've got ${have} of the ${need}. Please send me the other${need - have > 1 ? 's' : ' one'} too.`;
 /** TTTFG-4830: a file in the middle of a batch, acknowledged while Tina waits for the rest. */
 export const FILE_SAVED = "Thanks, I've saved that with your claim.";
 /** TTTFG-4830: "Back to my question:" for a batch. */
@@ -379,9 +386,14 @@ type Out =
   | { kind: 'file'; file: ClientFile; itemKey?: string }
   | { kind: 'request-signature' }
   | { kind: 'status'; status: 'Awaiting client docs' }
-  | { kind: 'evidence-complete' }
-  /** TTTFG-4830: open work for the claim's owner (the broker), for example to update the client's address in the CRM. */
-  | { kind: 'follow-up'; detail: string };
+  /** `forTtt` (TTTFG-4830, 29 Oct 2026): what the insurer still needs that Tina doesn't ask the client for (forTtt()). */
+  | { kind: 'evidence-complete'; forTtt?: QuestionItem[] }
+  /**
+   * TTTFG-4830: open work for the claim's owner (the broker), for example to update the client's address in the CRM.
+   * `template`: the fixed wording's name and version (READY_TO_REGISTER). `withoutLink` (29 Oct 2026): the words when the
+   * signing step just before it sent the client no link.
+   */
+  | { kind: 'follow-up'; detail: string; template?: { name: string; version: string }; withoutLink?: string };
 
 /** `waitForMore`: ClaimSettings.waitForMore. */
 export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean }
@@ -440,6 +452,18 @@ const moveOn = ({ waitingOn: _o, batch: _b, relisted: _r, waiting: _w, waitingFo
  * "Thanks.".
  */
 function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thanks.', listLead: string = ALL_FOR_NOW): FollowOnState | null {
+  // TTTFG-4830 (28 Oct 2026): a total the client's amounts already give ("about how much for everything?") is worked
+  // out, not asked. Worked out again when the items change; one the amounts no longer give is dropped and asked.
+  for (const t of computedTotals(c.form, w.answers, w.facts, st.sapsRequired)) {
+    if (t.value === null) {
+      out.push({ kind: 'drop-answer', key: t.key });
+      delete w.answers[t.key];
+      continue;
+    }
+    const record: AnswerRecord = { value: t.value, status: 'answered', at: c.now.toISOString(), source: 'computed' };
+    out.push({ kind: 'save-answer', key: t.key, record });
+    w.answers[t.key] = record;
+  }
   // The SAPS keys belong to the SAPS step; the questions never ask them again.
   const skip = [...st.skipped, SAPS_CASE_KEY, SAPS_STATION_KEY];
   const batch = nextBatch(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip });
@@ -465,21 +489,84 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
       st = { ...st, evidenceStarted: true };
     }
     out.push({ kind: 'ask', item: next, simpler: false, again: deferred(next.key, w.answers), lead });
-    // TTTFG-5196: only optional items stand between the client and the link, so a quiet spell ends the claim.
-    const optionalOnly = !next.required && !missing.length && !st.signingRequested;
-    return { ...st, phase: 'items', asking: next.key, misses: 0, ...(optionalOnly ? { waitingFor: 'optional' as const } : {}) };
+    // TTTFG-5196: a quiet spell on an optional item moves the claim on to the link. TTTFG-4830 (29 Oct 2026): also with
+    // something required still to come (a SAPS case number "not yet"), since the link no longer waits for it.
+    const onOptional = !next.required && !st.signingRequested;
+    return { ...st, phase: 'items', asking: next.key, misses: 0, ...(onOptional ? { waitingFor: 'optional' as const } : {}) };
   }
-  if (!missing.length) {
-    // TTTFG-5196: every item is in or passed over. The form is filled now, with every answer on it, and its link is the
-    // last message: the closing line goes first, without its sign line (closingText: only for a link sent before).
-    out.push({ kind: 'evidence-complete' }, { kind: 'closing' });
-    if (!st.signingRequested) out.push({ kind: 'request-signature' });
-    return null;
+  const ttt = forTtt(c.form, w);
+  const complete: Out = { kind: 'evidence-complete', ...(ttt.length ? { forTtt: ttt } : {}) };
+  if (st.signingRequested) {
+    // The form went out earlier. Everything is in now: evidence complete, and the broker is told.
+    if (!missing.length) {
+      out.push(complete, { kind: 'text', text: EVERYTHING_IN }, { kind: 'follow-up', detail: allInDetail(c.claim) });
+      return null;
+    }
+    out.push({ kind: 'still-missing', items: missing, lead: listLead });
+    return stillNeedState(c, st, missing);
   }
-  // TTTFG-4830 (still need): the list, and the conversation stays on it.
-  out.push({ kind: 'still-missing', items: missing, lead: listLead });
-  return stillNeedState(c, st, missing);
+  // TTTFG-4830 (28 Oct 2026): everything has been asked. The form is filled now, with every answer the client gave, and
+  // its link is the last message: the closing line first, without its sign line (closingText: only for a link sent
+  // before), then what's still to come. The broker can register the claim straight away; the Follow-up's words wait for
+  // the signing step's answer (29 Oct 2026: no "has the form to sign" when no link went).
+  if (!missing.length) out.push(complete);
+  out.push({ kind: 'closing' });
+  if (missing.length) out.push({ kind: 'still-missing', items: missing, lead: '' });
+  const ready = (signature: SignatureStatus) => readyToRegister(c.claim, missing, signature, ttt);
+  out.push({ kind: 'request-signature' }, { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), template: READY_TO_REGISTER });
+  return missing.length ? stillNeedState(c, { ...st, signingRequested: true }, missing) : null;
 }
+
+/**
+ * TTTFG-4830 (29 Oct 2026): the insurer's required evidence Tina doesn't ask a client for (contracts.ts `onHand: false`:
+ * quotes, registration papers, a settlement letter) that applies to this claim and isn't on it. TTT gets it, so the
+ * broker's Follow-up and the evidence complete note name it. A question of that kind is a box on the form, on the fill's
+ * blank list.
+ */
+export function forTtt(form: ClaimForm, w: Pick<Work, 'answers' | 'evidence' | 'facts'>): QuestionItem[] {
+  return form.questionList.filter((q) => q.kind === 'evidence' && q.onHand === false && q.required && !q.group
+    && applies(q, w.answers, w.facts) && !evidenceIn(q, w.evidence));
+}
+
+/** TTTFG-4830 (28 Oct 2026): what Tina says when the last thing still to come arrives after the form went out. */
+export const EVERYTHING_IN = "Thanks, that's everything we need from you for now.";
+
+/**
+ * TTTFG-4830: the ready-to-register Follow-up's name (riivo_subject), so a later conversation finds that the end ran
+ * (followon-dataverse.ts readySent).
+ */
+export const READY_TO_REGISTER = { name: 'Claim - ready to register', version: 'draft-1' } as const;
+
+/**
+ * TTTFG-4830 (28 Oct 2026, TTT's feedback: "will we get notification of the claim while waiting for these items?"): the
+ * broker's Follow-up once the client has answered everything, so the claim is registered with the insurer without
+ * waiting for what's still to come. 29 Oct 2026: it says whether the form is signed ("Form signed: yes/no"): out to sign
+ * (`Link sent`), no link went (`Not sent`), or signed (signing.ts, when the client signs); and what TTT gets itself (forTtt).
+ */
+export function readyToRegister(
+  claim: { reference: string; insurer: string; claimType: string }, still: readonly QuestionItem[], signature: SignatureStatus = 'Link sent',
+  ttt: readonly QuestionItem[] = [],
+): string {
+  const form = signature === 'Signed' ? 'the client has signed the claim form.'
+    : signature === 'Link sent' ? "the client answered Tina's questions on WhatsApp and has the claim form to sign."
+      : "the client answered Tina's questions on WhatsApp, but no signing link went to them, so the claim form isn't signed yet.";
+  const later = still.length ? ` Still to come from the client: ${list(still.map(itemName))}. Tina keeps asking for it; it needn't hold the claim up.` : '';
+  const ours = ttt.length ? ` Not asked of the client, for TTT to get: ${list(ttt.map(itemName))}.` : '';
+  return `Claim ${claim.reference} (${claim.claimType}, ${claim.insurer}) is ready to register with the insurer: ${form}${later}${ours} `
+    + `Please check it and register it with ${claim.insurer}.`;
+}
+
+/**
+ * TTTFG-4830 (28 Oct 2026): the broker's Follow-up when the last item still to come is in. `late` (29 Oct 2026): the
+ * answers that came with it (lateAnswers).
+ */
+export const allInDetail = (claim: Pick<FollowOnClaim, 'reference'>, late: readonly string[] = []) =>
+  `Claim ${claim.reference}: the client has now sent everything Tina listed as still to come${late.length ? `, the last of it ${list([...late])}` : ''}. `
+  + 'Please add it to the claim with the insurer.';
+
+/** TTTFG-4830 (29 Oct 2026): the broker's Follow-up for answers still to come that came in after the end (lateAnswers). */
+export const lateDetail = (claim: Pick<FollowOnClaim, 'reference'>, late: readonly string[]) =>
+  `Claim ${claim.reference}: after Tina's questions were done, the client sent ${list([...late])}. Please add ${late.length === 1 ? 'it' : 'them'} to the claim with the insurer.`;
 
 /**
  * TTTFG-4830 (still need): the state once Tina has listed what the client still has to send. The listed items are
@@ -501,7 +588,7 @@ function intro(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | 
   const d = notificationDeadline(c.claim.facts.incidentAt, c.form.notificationPeriodDays, c.now, c.warningDays);
   if (d) {
     const template = d.variant === 'upcoming' ? DEADLINE_UPCOMING_TEMPLATE : DEADLINE_PASSED_TEMPLATE;
-    const vars = { insurer: c.claim.insurer, periodDays: c.form.notificationPeriodDays, deadline: d.deadline, ownerName: capital(c.claim.owner.name) };
+    const vars = { insurer: c.claim.insurer, periodDays: c.form.notificationPeriodDays, deadline: d.deadline };
     out.push({ kind: 'template', template, text: template.render(vars) });
   }
   out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
@@ -639,6 +726,9 @@ function sapsAsk(f: ClaimFacts): QuestionItem {
   return f.sapsCaseNumber ? SAPS_ITEMS[1] : SAPS_ITEMS[0];
 }
 
+/** The property forms' "Was it stolen, lost or damaged?" question. */
+export const LOSS_KIND_KEY = 'lossKind';
+
 export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly ResumeFile[] = [], reported: readonly OtherAnswer[] = []): Step {
   const w = work(c.claim);
   const out: Out[] = [];
@@ -652,7 +742,17 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
   fileHeld(c, w, files, out, st.sapsRequired);
   // TTTFG-4830: what the client already said while reporting the claim answers those questions; they aren't asked, and
   // Tina doesn't announce it (one message less before the first question).
-  applyOthers(c, w, st.sapsRequired, reported, { at: c.now.toISOString(), source: 'report' }, out);
+  const report = { at: c.now.toISOString(), source: 'report' } as const;
+  applyOthers(c, w, st.sapsRequired, reported, report, out);
+  // TTTFG-4830 (28 Oct 2026): a theft needn't be asked "Was it stolen, lost or damaged?" (Hybrid and Discovery property).
+  const lossKind = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === LOSS_KIND_KEY);
+  if (describedAsTheft && lossKind?.choices?.includes('Stolen') && !w.answers[LOSS_KIND_KEY]) {
+    const record: AnswerRecord = { value: 'Stolen', status: 'answered', at: c.now.toISOString(), source: 'report' };
+    out.push({ kind: 'save-answer', key: LOSS_KIND_KEY, record });
+    w.answers[LOSS_KIND_KEY] = record;
+    // The report's answers that hang on it ("they stole my phone": "Was a cellphone or tablet stolen?") apply now.
+    applyOthers(c, w, st.sapsRequired, reported, report, out);
+  }
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
     // TTTFG-4830: "please report it" only to a client who didn't say they had.
     if (!w.facts.sapsCaseNumber && !c.claim.facts.saps) out.push({ kind: 'saps-instruction' });
@@ -781,13 +881,25 @@ function fileHeld(c: Ctx, w: Work, files: readonly ResumeFile[], out: Out[], sap
   for (const f of files) {
     const open = formItems(c.form, w.answers, w.facts, sapsRequired)
       .filter((i) => i.kind === 'evidence' && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence));
-    const item = open.find((i) => i.key === f.forItem) ?? (open.length === 1 ? open[0] : undefined);
+    const item = namedEvidence(c, w, sapsRequired, f.forItem) ?? (open.length === 1 ? open[0] : undefined);
     out.push({ kind: 'file', file: f.file, itemKey: item?.key });
     if (item) {
       w.evidence.push({ key: item.key });
       if (evidenceIn(item, w.evidence)) out.push({ kind: 'received', item });
     }
   }
+}
+
+/**
+ * The evidence item Claude read a file as (`forItem`), when it applies and has no file yet. TTTFG-4830 (29 Oct 2026):
+ * also one Tina never asks for (`onHand: false`: the panelbeater's quote a client sends anyway), so the file is filed as
+ * what it is and the item Tina asked stays open; it is still never asked or chased.
+ */
+function namedEvidence(c: Ctx, w: Work, sapsRequired: boolean, forItem: string | undefined): QuestionItem | undefined {
+  if (!forItem) return undefined;
+  const item = formItems(c.form, w.answers, w.facts, sapsRequired).find((i) => i.key === forItem)
+    ?? c.form.questionList.find((q) => q.key === forItem && q.onHand === false && !q.group);
+  return item?.kind === 'evidence' && applies(item, w.answers, w.facts) && !evidenceIn(item, w.evidence) ? item : undefined;
 }
 
 /** The required items still missing on the claim, as resume.ts lists them in the welcome-back line. */
@@ -803,7 +915,9 @@ export function resumeMissing(c: Ctx): QuestionItem[] {
  *   caller says so (a stale follow-on state of the same claim). Otherwise it is sent (again), because the disclosure
  *   must come before the first form question;
  * - the signing step was asked for once the signature status says so, or the claim is evidence complete (the two go
- *   together, TTTFG-5196), or it is past the pack. Otherwise it runs at the end, as in a first conversation;
+ *   together, TTTFG-5196), or the broker has the ready-to-register Follow-up (TTTFG-4830: the end ran, with something
+ *   still to come, also when no link went), or it is past the pack. Otherwise it runs at the end, as in a first
+ *   conversation;
  * - the evidence stage has started once the status is past Form sent. Pack complete and Additional info requested are
  *   never set back to Awaiting client docs;
  * - "not yet" items from the earlier conversation are asked again: the client may have them now.
@@ -814,7 +928,7 @@ export function resumeFollowOn(c: Ctx, introSent = false, skipped: readonly stri
   const { status, signatureStatus } = c.claim;
   const st: FollowOnState = {
     claimId: c.claim.id, phase: 'items', asking: '', misses: 0, skipped: [...skipped], sapsRequired,
-    signingRequested: signatureStatus !== 'Not sent' || !!c.claim.evidenceComplete || !isOpenStage(status),
+    signingRequested: signatureStatus !== 'Not sent' || !!c.claim.evidenceComplete || !!c.claim.readySent || !isOpenStage(status),
     evidenceStarted: !BEFORE_EVIDENCE.includes(status),
     introSent: introSent || !!c.claim.introSent || Object.keys(w.answers).some((k) => !isSaps(k)) || w.evidence.length > 0,
   };
@@ -884,8 +998,40 @@ function fitted(st: FollowOnState, input: ClientReply): ClientReply {
 }
 
 export function advanceFollowOn(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>): Step {
-  const step = advanceReply(c, st, raw);
+  const step = lateAnswers(c, st, advanceReply(c, st, raw));
   return 'spoken' in raw && raw.spoken ? withHeard(c, st, raw.wamid, step) : step;
+}
+
+/**
+ * TTTFG-4830 (29 Oct 2026): what was still to come and came in as an answer after the end (the number plate the client
+ * said "not yet" to, the SAPS case number), for the broker: the form went out before it, so the broker adds it, and gets
+ * a Follow-up with each value. When the same message brings the last of it, the all-in Follow-up says them. A file needs
+ * none: it is on the claim, and the pack takes it.
+ */
+function lateAnswers(c: Ctx, st: FollowOnState, step: Step): Step {
+  if (!st.signingRequested) return step;
+  const answers = { ...c.claim.answers };
+  for (const o of step.out) if (o.kind === 'save-answer') answers[o.key] = o.record;
+  const items = formItems(c.form, answers, c.claim.facts, st.sapsRequired);
+  const named = (key: string, value: string | number | boolean) => {
+    const item = items.find((i) => i.key === key) ?? SAPS_ITEMS.find((i) => i.key === key);
+    return `${item ? itemName(item) : key} (${heardValue(item, value)})`;
+  };
+  const late: string[] = [];
+  for (const o of step.out) {
+    if (o.kind === 'save-answer' && o.record.status === 'answered' && o.record.value !== null
+      && (deferred(o.key, c.claim.answers) || st.skipped.includes(o.key))) late.push(named(o.key, o.record.value));
+    if (o.kind === 'save-saps') {
+      if (o.caseNumber) late.push(named(SAPS_CASE_KEY, o.caseNumber));
+      if (o.station) late.push(named(SAPS_STATION_KEY, o.station));
+    }
+  }
+  if (!late.length) return step;
+  const all = step.out.findIndex((o) => o.kind === 'follow-up' && o.detail === allInDetail(c.claim));
+  const out = [...step.out];
+  if (all >= 0) out[all] = { kind: 'follow-up', detail: allInDetail(c.claim, late) };
+  else out.push({ kind: 'follow-up', detail: lateDetail(c.claim, late) });
+  return { ...step, out };
 }
 
 function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>): Step {
@@ -946,23 +1092,22 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
   if (!item || !applies(item, w.answers, w.facts)) {
     // The correction took away the question Tina was asking (no second car, so no second car's make): on to the next.
     if (corrected) out.push({ kind: 'text', text: ownReading ? NOTED_OTHERS : CORRECTED });
+    if (input.kind === 'file') {
+      // TTTFG-4830 (29 Oct 2026): the item Tina asked is no longer on the list (one now `onHand: false`, asked before
+      // the form changed). The file still goes to the pipeline: as the form's evidence item Claude read it as, else the
+      // one Tina asked, else against the claim.
+      const ofForm = (key?: string) => c.form.questionList.find((q) => q.kind === 'evidence' && q.key === key);
+      const target = ofForm(input.forItem) ?? ofForm(st.asking);
+      out.push({ kind: 'file', file: input.file, itemKey: target?.key }, { kind: 'text', text: FILE_SAVED });
+      if (target) w.evidence.push({ key: target.key });
+    }
     return { state: proceed(c, w, { ...st, misses: 0 }, out), out };
   }
 
-  // TTTFG-4830: "Are those all of them?" (an evidence item of any number of files): a yes takes Tina on, a no keeps her
-  // waiting for the rest, "later" moves on with what came; anything else is asked once more, then she moves on.
+  // A conversation saved while Tina asked "Are those all of them?" (before 28 Oct 2026): what came is what they have.
   if (item.kind === 'evidence' && st.confirming === item.key && input.kind !== 'file') {
-    const s = { ...st, waiting: undefined, waitingFor: undefined };
-    if (input.kind === 'value' && input.value === false) {
-      out.push({ kind: 'text', text: SEND_THE_REST });
-      return { state: s, out };
-    }
-    if (input.kind === 'unparsed' && st.misses < 1) {
-      out.push({ kind: 'text', text: allOfThemAgain(item), choices: ALL_OF_THEM_CHOICES });
-      return { state: { ...s, misses: st.misses + 1 }, out };
-    }
     out.push({ kind: 'received', item });
-    return { state: proceed(c, w, s, out), out };
+    return { state: proceed(c, w, { ...st, waiting: undefined, waitingFor: undefined }, out), out };
   }
   // TTTFG-4830: files were coming in for this item and the client wrote before the quiet spell was over: Tina answers
   // about the files now. "I don't have the back" passes over what's missing, as "not yet" does.
@@ -985,9 +1130,8 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
     // photos of the scene); she answers once they stop coming. Only a file the client named themself (a document's own
     // file name, "quote.pdf") can be another item: a camera photo's name is Tina's (image-<time>), so Claude's reading of
     // it is a guess from her question.
-    const other = (item.kind === 'question' || clientNamed(input.file)) && input.forItem && input.forItem !== item.key
-      ? formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === input.forItem && i.kind === 'evidence'
-        && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence))
+    const other = (item.kind === 'question' || clientNamed(input.file)) && input.forItem !== item.key
+      ? namedEvidence(c, w, st.sapsRequired, input.forItem)
       : undefined;
     if (other) {
       out.push({ kind: 'file', file: input.file, itemKey: other.key });
@@ -1080,7 +1224,7 @@ function answerQuestion(c: Ctx, w: Work, st: FollowOnState, input: Extract<Clien
   if (input.help) out.push({ kind: 'text', text: input.help });
   else {
     out.push({ kind: 'follow-up', detail: clientQuestionDetail(input.question) });
-    out.push({ kind: 'text', text: toBrokerText(c.claim.owner.name) });
+    out.push({ kind: 'text', text: toBrokerText() });
   }
   if (st.phase === 'saps') {
     out.push({ kind: 'ask', item: sapsAsk(w.facts), simpler: false, lead: BACK.one });
@@ -1091,16 +1235,13 @@ function answerQuestion(c: Ctx, w: Work, st: FollowOnState, input: Extract<Clien
     if (item) out.push({ kind: 'ask', item, simpler: false, lead: BACK.one });
     return st;
   }
-  if (st.phase === 'still-need') {
-    const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
-    if (missing.length) out.push({ kind: 'still-missing', items: missing, lead: '' });
-    return st;
-  }
+  // The list went out a moment ago; the answer is all the client asked for (28 Oct 2026: "What happens next?" got the
+  // list again).
+  if (st.phase === 'still-need') return st;
   if (st.batch) return relist(c, w, st, out, BACK, at, input.wamid);
   const item = formItems(c.form, w.answers, w.facts, st.sapsRequired).find((i) => i.key === st.asking);
   if (!item) return st;
-  if (st.confirming === item.key) out.push({ kind: 'text', text: allOfThemAgain(item), choices: ALL_OF_THEM_CHOICES });
-  else out.push({ kind: 'ask', item, simpler: false, lead: BACK.one });
+  out.push({ kind: 'ask', item, simpler: false, lead: BACK.one });
   return st;
 }
 
@@ -1159,7 +1300,9 @@ function withHeard(c: Ctx, st: FollowOnState, wamid: string, step: Step): Step {
       if (o.station) entries.push({ item: SAPS_ITEMS.find((i) => i.key === SAPS_STATION_KEY), key: SAPS_STATION_KEY, value: o.station });
     }
   }
-  const text = heardText(entries.filter((e, i) => entries.findIndex((f) => f.key === e.key) === i), st);
+  // A key written twice says what was saved last (TTTFG-4830, 29 Oct 2026: the batch's "no other item" that addEntries
+  // turned into a yes), in the place of its first write.
+  const text = heardText([...new Map(entries.map((e) => [e.key, e])).values()], st);
   if (!text) return step;
   const first = step.out.findIndex((o) => SAYS.has(o.kind));
   const out = [...step.out];
@@ -1222,9 +1365,7 @@ function advanceBatch(
 
   if (input.kind === 'file') {
     // Filed against the claim, as the evidence item Claude read it as when that one is still missing.
-    const item = input.forItem
-      ? list().find((i) => i.key === input.forItem && i.kind === 'evidence' && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence))
-      : undefined;
+    const item = namedEvidence(c, w, st.sapsRequired, input.forItem);
     out.push({ kind: 'file', file: input.file, itemKey: item?.key });
     if (item) w.evidence.push({ key: item.key });
     if (item && evidenceIn(item, w.evidence)) {
@@ -1282,6 +1423,8 @@ function advanceBatch(
     }
     if (later.length) out.push({ kind: 'text', text: broker ? `${sendLater(later)} ${BROKER_THE_OTHERS}` : sendLater(later) });
     else if (broker) out.push({ kind: 'text', text: BROKER_WILL_CHECK });
+    // A voice note's entries are said back with the rest of it (withHeard).
+    if (input.entries?.length && addEntries(c, w, st, input.entries, { at, wamid: input.wamid }, out, !input.spoken)) answered = true;
   }
 
   if (!openBatch(c, w, st).length) return proceed(c, w, st, out, 'Thanks.');
@@ -1293,6 +1436,85 @@ function advanceBatch(
   }
   if (answered) return relist(c, w, st, out, { ...STILL_NEED, count: true }, at, input.wamid);
   return relist(c, w, st, out, back ?? { many: SORRY_BATCH, simpler: true, count: true }, at, input.wamid);
+}
+
+/**
+ * TTTFG-4830 (28 Oct 2026, TTT's feedback: "the values are not separated on the claim form"): the items after the
+ * first that one reply gave, each saved as its own entry of the group (entry 2, 3, …), so each keeps its own amount. The
+ * "is there another?" answer before each one becomes yes, and the client's answer to it (no other item) moves to the
+ * last one they gave. An entry past the form's rows is left out. `readBack` (29 Oct 2026, "and read the list back"):
+ * the entries are said back, each with its amount (entriesText). Returns whether anything was saved.
+ */
+function addEntries(
+  c: Ctx, w: Work, st: FollowOnState, entries: readonly OtherAnswer[], rec: { at: string; wamid: string }, out: Out[], readBack: boolean,
+): boolean {
+  const byEntry = new Map<number, OtherAnswer[]>();
+  for (const e of entries) {
+    const n = Number(/\.(\d+)$/.exec(e.key)?.[1]);
+    if (n > 1) byEntry.set(n, [...(byEntry.get(n) ?? []), e]);
+  }
+  const base = (key: string) => key.replace(/\.\d+$/, '');
+  const group = c.form.questionList.find((q) => q.key === base(entries[0]?.key ?? ''))?.group;
+  const g = group ? c.form.questionGroups.find((x) => x.key === group) : undefined;
+  if (!g) return false;
+  const save = (key: string, value: string | number | boolean) => {
+    const record: AnswerRecord = { value, status: 'answered', at: rec.at, wamid: rec.wamid, source: 'same-message' };
+    out.push({ kind: 'save-answer', key, record });
+    w.answers[key] = record;
+  };
+  let saved = false;
+  let last = 0;
+  let said: AnswerRecord | undefined;
+  for (const n of [...byEntry.keys()].sort((a, b) => a - b)) {
+    if (n > g.max) break;
+    const before = moreKey(g.key, n - 1);
+    // Only the entry right after one the client is on: a gap (entry 3 with no entry 2) is never filled.
+    const after = last ? n - 1 === last : formItems(c.form, w.answers, w.facts, st.sapsRequired).some((i) => i.group === g.key && i.key.endsWith(`.${n - 1}`) && !i.key.includes('.more.'));
+    if (!after) break;
+    const prev = w.answers[before];
+    if (!last && prev?.status === 'answered' && prev.value === false) said = prev;
+    save(before, true);
+    const list = formItems(c.form, w.answers, w.facts, st.sapsRequired);
+    for (const e of byEntry.get(n)!) {
+      const item = list.find((i) => i.key === e.key);
+      const a = w.answers[e.key];
+      if (!item || item.kind !== 'question' || !applies(item, w.answers, w.facts) || (a && a.status !== 'not-yet')) continue;
+      const value = accept(item, e.value);
+      if (value !== undefined && !formatProblem(item, value)) save(e.key, value);
+    }
+    saved = true;
+    last = n;
+  }
+  if (said && last && last < g.max) save(moreKey(g.key, last), false);
+  if (saved && readBack) out.push({ kind: 'text', text: entriesText(c.form, w.answers, g.key, last) });
+  return saved;
+}
+
+/** TTTFG-4830 (C6): in front of the entries one reply gave, said back. */
+export const EACH_NOTED = "I've noted each one separately:";
+
+/**
+ * TTTFG-4830 (C6, 29 Oct 2026): a group's entries 1 to `last` as Tina reads them back, one line each with what the claim
+ * holds for it, in the group's order ("1. Samsung S20, R20 000"). An amount the form takes in rand (the field map's
+ * currency boxes) reads as one.
+ */
+export function entriesText(form: ClaimForm, answers: ClaimAnswers, group: string, last: number): string {
+  const members = form.questionList.filter((q) => q.group === group);
+  const rand = new Set(form.fieldMap.flatMap((e) => (e.format === 'currency' ? [/^answer:(.+?)(\.\d+)?$/.exec(e.source)?.[1]] : [])));
+  const shown = (q: QuestionItem, v: string | number | boolean) => {
+    if (typeof v !== 'number' || !rand.has(q.key)) return heardValue(q, v);
+    const [whole, cents] = String(v).split('.');
+    return `R${whole.replace(/\B(?=(\d{3})+$)/g, ' ')}${cents ? `.${cents}` : ''}`;
+  };
+  const lines: string[] = [];
+  for (let n = 1; n <= last; n++) {
+    const values = members.flatMap((q) => {
+      const a = answers[`${q.key}.${n}`];
+      return a?.status === 'answered' && a.value !== null ? [shown(q, a.value)] : [];
+    });
+    if (values.length) lines.push(`${n}. ${values.join(', ')}`);
+  }
+  return [EACH_NOTED, ...lines].join('\n');
 }
 
 /**
@@ -1334,21 +1556,11 @@ function relist(c: Ctx, w: Work, st: FollowOnState, out: Out[], lead: Relist, at
 export const clientNamed = (file: ClientFile) => !/^(image|document|video|audio)-\d+(\.\w+)?$/i.test(file.fileName);
 
 /**
- * TTTFG-4830: Tina's one answer about the files the client sent for the evidence item she asked: all its files are in
- * (the front and back): thanked and on to the next item; fewer than it needs: asks for the rest; an item of any number
- * (photos of the scene): "Are those all of them?" and she waits for the yes.
+ * TTTFG-4830: Tina's one answer about the files the client sent for the evidence item she asked, once they stop coming:
+ * thanked, and on to the next item. 28 Oct 2026 (TTT's feedback): she no longer asks "Are those all of them?" or for the
+ * back of a licence; what the client sends is what they have, and the broker follows up on anything missing.
  */
 function filesIn(c: Ctx, w: Work, st: FollowOnState, item: QuestionItem, out: Out[]): FollowOnState | null {
-  const have = filesFor(item, w.evidence);
-  const need = fileCount(item);
-  if (need === 'any') {
-    out.push({ kind: 'text', text: allOfThem(have, item), choices: ALL_OF_THEM_CHOICES });
-    return { ...st, confirming: item.key, misses: 0 };
-  }
-  if (have < need) {
-    out.push({ kind: 'text', text: theOthers(have, need) });
-    return st;
-  }
   out.push({ kind: 'received', item });
   return proceed(c, w, st, out);
 }
@@ -1398,7 +1610,7 @@ function advanceStillNeed(
     // As the evidence item Claude read it as, else the only one missing, else against the claim for the pipeline to sort.
     const open = formItems(c.form, w.answers, w.facts, st.sapsRequired)
       .filter((i) => i.kind === 'evidence' && applies(i, w.answers, w.facts) && !evidenceIn(i, w.evidence));
-    const item = open.find((i) => i.key === input.forItem) ?? (open.length === 1 ? open[0] : undefined);
+    const item = namedEvidence(c, w, st.sapsRequired, input.forItem) ?? (open.length === 1 ? open[0] : undefined);
     out.push({ kind: 'file', file: input.file, itemKey: item?.key });
     if (item) w.evidence.push({ key: item.key });
     if (item && evidenceIn(item, w.evidence)) out.push({ kind: 'received', item });
@@ -1421,10 +1633,10 @@ function advanceStillNeed(
 }
 
 /**
- * TTTFG-5196: the client went quiet on an optional item (proceed's `waitingFor: 'optional'`), with nothing required
- * missing. The optional items left are kept as "not yet", as if the client had said so to each (a later conversation
- * doesn't ask them), Tina says they can still send the one she asked, and the claim ends as after the last item: evidence
- * complete, the closing line, the signing link. Something required that came up meanwhile is asked instead.
+ * TTTFG-5196: the client went quiet on an optional item (proceed's `waitingFor: 'optional'`). The optional items left are
+ * kept as "not yet", as if the client had said so to each (a later conversation doesn't ask them), Tina says they can
+ * still send the one she asked, and the claim ends as after the last item: evidence complete (or, TTTFG-4830, what's
+ * still to come), the closing line, the signing link. Something required not asked yet is asked instead.
  */
 function optionalQuiet(c: Ctx, st: FollowOnState): Step {
   const w = work(c.claim);
@@ -1556,12 +1768,15 @@ export function batchText(items: readonly QuestionItem[], o: { lead?: string; in
   return [[o.lead, intro].filter(Boolean).join(' '), ...lines].filter(Boolean).join('\n\n');
 }
 
-/** TTTFG-5254 step 14. The sign line only while a signing link is out: not when signed, and not when none was sent. */
-export function closingText(signature: SignatureStatus, owner: Owner): string {
+/**
+ * TTTFG-5254 step 14. The sign line only while a signing link is out: not when signed, and not when none was sent.
+ * 28 Oct 2026 (TTT's feedback): TTT's own words, and no broker's name.
+ */
+export function closingText(signature: SignatureStatus): string {
   return [
-    "That's everything the insurer needs for now.",
+    'Thank you for submitting the details.',
     signature === 'Link sent' ? 'Please check and sign the form using the link I sent.' : '',
-    `${capital(owner.name)} will check your claim next.`,
+    'One of our consultants will be in contact with you.',
   ].filter(Boolean).join(' ');
 }
 
@@ -1695,7 +1910,7 @@ export async function followOnTurn(
         await say(`Thanks, I've got ${itemName(o.item)}.`);
         break;
       case 'closing':
-        await say(closingText(signature, claim.owner));
+        await say(closingText(signature));
         break;
       case 'still-missing':
         await say(stillMissingText(o.items, o.lead));
@@ -1725,17 +1940,50 @@ export async function followOnTurn(
         break;
       case 'evidence-complete':
         await ports.setEvidenceComplete(claimId);
-        await action(`All required items are in for claim ${claim.reference} (evidence complete).`);
+        // TTTFG-4830 (29 Oct 2026): not "all required items" while the insurer still needs something TTT gets itself.
+        await action(o.forTtt?.length
+          ? `Every item Tina asks the client for is in for claim ${claim.reference} (evidence complete). Still for TTT to get: ${list(o.forTtt.map(itemName))}.`
+          : `All required items are in for claim ${claim.reference} (evidence complete).`);
         break;
       case 'follow-up':
         await ports.createAgentAction({
           kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId,
-          detail: o.detail, at,
+          // TTTFG-4830 (29 Oct 2026): the ready-to-register words when the signing step before it sent no link.
+          detail: o.withoutLink !== undefined && signature !== 'Link sent' ? o.withoutLink : o.detail, at, ...(o.template ? { template: o.template } : {}),
         });
         break;
     }
   }
+  // TTTFG-5200: once, after the turn's writes, so the score reads every file this message brought. An answer counts
+  // when a conditional evidence item depends on it ("If the car was found: …"), and the SAPS step when one tests a claim
+  // column. Best effort: the client's turn is done by now, the next evidence works the score out again, and a pack that
+  // can't be built raises its own Follow-up, so a failure here never fails the turn (it would send the replies twice).
+  if (ports.claimEvidence && step.out.some((o) => movesScore(o, form))) await ports.claimEvidence(claimId).catch(() => undefined);
+
+  // TTTFG-5263: the risk flags, once everything this turn sends has gone out. Tina starts the follow-on straight after the
+  // claim opens; the walkthrough ends with the still-need list or the closing line. Nothing comes back into the turn,
+  // and a failure is logged, never thrown: a flag never slows the claim down (AC 8).
+  const triggers: FlagTrigger[] = [
+    ...(input.kind === 'start' ? ['open' as const] : []),
+    ...(step.out.some((o) => o.kind === 'still-missing' || o.kind === 'closing') ? ['walkthrough-end' as const] : []),
+    ...(step.out.some((o) => o.kind === 'file') ? ['document' as const] : []),
+  ];
+  if (triggers.length && ports.claimFlags) {
+    try {
+      await ports.claimFlags({ claimId, triggers, at });
+    } catch (e) {
+      console.error(`TTTFG-5263: risk flags for claim ${claim.reference} failed: ${e}`);
+    }
+  }
   return { state: step.state };
+}
+
+/** TTTFG-5200: whether an effect can change the completeness score (claimpack.ts completeness). */
+function movesScore(o: Out, form: ClaimForm): boolean {
+  if (o.kind === 'file' || o.kind === 'evidence-complete') return true;
+  const conditions = form.questionList.filter((q) => q.kind === 'evidence' && q.onlyIf).map((q) => q.onlyIf!.key);
+  if (o.kind === 'save-answer' || o.kind === 'drop-answer') return conditions.includes(o.key);
+  return o.kind === 'save-saps' && conditions.some((k) => k.startsWith('crm:'));
 }
 
 /**

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: fill an insurer's claim form from its field map (TTTFG-5172), the client's answers (riivo_answers,
 // TTTFG-5176) and the CRM rows. Pure: PDF bytes, config and values in; filled PDF bytes and the blank boxes out.
@@ -93,9 +93,9 @@ function readCrm(crm: CrmValues, source: string): Read {
 export type Truth = boolean | { unknown: BlankField['key']; reason: BlankReason };
 
 /**
- * Tests an `onlyIf` or `when`. The key is a question key or a `crm:` source. Inside a repeating group, a key naming a
- * question of the same group reads the same entry (`itemType.2` for entry 2). A question that doesn't apply has no
- * answer to test, so a condition on it is false.
+ * Tests an `onlyIf`, `andIf` or `when`. The key is a question key or a `crm:` source. Inside a repeating group, a key
+ * naming a question of the same group reads the same entry (`itemType.2` for entry 2). A question that doesn't apply
+ * has no answer to test, so a condition on it is false.
  */
 export function evaluate(cond: Condition, form: ClaimForm, answers: ClaimAnswers, crm: CrmValues, entry?: number, depth = 0): Truth {
   let read: Read;
@@ -120,7 +120,10 @@ export function entryExists(form: ClaimForm, group: string, n: number, answers: 
   return form.questionList.some((q) => q.group === group && `${q.key}.${n}` in answers);
 }
 
-/** Whether a question applies: its group's and its own `onlyIf`, and for a grouped question, that the entry exists. */
+/**
+ * Whether a question applies: its group's `onlyIf`, its own `onlyIf` and TTTFG-4830's `andIf`, and for a grouped
+ * question, that the entry exists. Either condition ruling it out is enough; it applies when both hold.
+ */
 function applicable(q: QuestionItem, form: ClaimForm, answers: ClaimAnswers, crm: CrmValues, entry: number | undefined, depth = 0): Truth {
   if (depth > 20) return true; // a condition loop is a config error (the validator refuses it); don't recurse forever
   if (q.group) {
@@ -128,13 +131,15 @@ function applicable(q: QuestionItem, form: ClaimForm, answers: ClaimAnswers, crm
     if (g?.onlyIf && evaluate(g.onlyIf, form, answers, crm, undefined, depth) === false) return false;
     if (entry !== undefined && !entryExists(form, q.group, entry, answers)) return false;
   }
-  return q.onlyIf ? evaluate(q.onlyIf, form, answers, crm, entry, depth) : true;
+  const own = q.onlyIf ? evaluate(q.onlyIf, form, answers, crm, entry, depth) : true;
+  const and = q.andIf ? evaluate(q.andIf, form, answers, crm, entry, depth) : true;
+  return own === false || and === false ? false : own === true ? and : own;
 }
 
 /**
- * Reads one source. An `answer:` whose question doesn't apply (an `onlyIf` the client's earlier answer rules out, a
- * group entry the client never gave) is not applicable: the box stays blank but isn't listed. When the deciding answer
- * is itself missing we can't tell, so the box is listed.
+ * Reads one source. An `answer:` whose question doesn't apply (an `onlyIf` or `andIf` the client's earlier answer rules
+ * out, a group entry the client never gave) is not applicable: the box stays blank but isn't listed. When the deciding
+ * answer is itself missing we can't tell, so the box is listed.
  */
 export function resolveSource(source: string, form: ClaimForm, answers: ClaimAnswers, crm: CrmValues): Resolved {
   if (source.startsWith('answer:')) {

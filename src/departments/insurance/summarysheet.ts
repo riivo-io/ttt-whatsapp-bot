@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the one-page claim summary sheet, for a policy whose insurer has no mapped form (the generic
 // riivo_claimform row). The client signs it like a form, and the broker still fills that insurer's own form by hand
@@ -51,7 +51,7 @@ export const SUMMARY_ROWS: { section: string; label: string; source: string; for
 ];
 
 /** The SAPS rows print when the police were involved, or a case number is on file; otherwise they don't apply. */
-const sapsApplies = (crm: CrmValues) => crm.riivo_claim?.riivo_sapsinvolved === true || !!crm.riivo_claim?.riivo_sapscasenumber;
+export const sapsApplies = (crm: CrmValues) => crm.riivo_claim?.riivo_sapsinvolved === true || !!crm.riivo_claim?.riivo_sapscasenumber;
 
 /** What the client confirms by signing the sheet. Draft: Insurance and Advice approves it with the other templates. */
 export const DECLARATION = {
@@ -97,13 +97,80 @@ export async function summarySheet(form: ClaimForm, answers: ClaimAnswers, crm: 
   const insurer = rows.find((r) => r.label === 'Insurer')?.value;
   doc.setTitle(`Claim summary${insurer ? ` - ${insurer}` : ''}`);
 
-  const blocks = toBlocks(rows, font, bold);
+  const blocks = [
+    paragraph('Claim summary', bold, 1.6), paragraph(BLANK_NOTE, font, 1, 0.4), ...sectionedRows(rows, font, bold),
+    paragraph(DECLARATION.text, font, 1, 2), paragraph(SIGN_LINES.map((l) => `${l}: ______________________________`).join('\n\n'), font, 1, 1.5),
+  ];
+  const stamps: SignStamp[] = [];
+  drawBlocks(doc, blocks, fitSize(blocks), (line, at) => {
+    // The signature goes on the line after "Client signature:", the date after "Date:".
+    const sign = SIGN_LINES.find((l) => line.text?.startsWith(`${l}: _`));
+    if (!sign) return;
+    const x = MARGIN + at.block.font.widthOfTextAtSize(`${sign}: `, at.size);
+    const right = MARGIN + at.block.font.widthOfTextAtSize(line.text!, at.size);
+    stamps.push(sign === SIGN_LINES[0]
+      ? { kind: 'signature', page: at.page, x, y: at.y - 2, width: right - x, height: at.size * 2.2 }
+      : { kind: 'date', page: at.page, x: x + 2, y: at.y + 1.5, size: at.size });
+  });
+  return { bytes: await doc.save(), blankFields, rows, pages: doc.getPageCount(), stamps };
+}
+
+// ---------------------------------------------------------------- layout (shared with claimpack.ts's summary page)
+
+/** A heading, a paragraph or a label-and-value row, laid out at a base size. */
+export interface Block {
+  /** Space above, in multiples of the base size. */
+  lead: number;
+  /** Font size relative to the base size. */
+  scale: number;
+  font: PDFFont;
+  /** A row: label in the left column (bold), value to its right; either may wrap. */
+  row?: true;
+  /** A row's label font. */
+  labelFont?: PDFFont;
+  lines: (size: number) => { label?: string; text?: string }[];
+}
+
+const lineHeight = (s: number) => s * 1.3;
+const CONTENT_WIDTH = A4.width - 2 * MARGIN;
+
+/** A paragraph, `scale` times the base size, with `lead` base sizes of space above. */
+export const paragraph = (t: string, f: PDFFont, scale = 1, lead = 0): Block => ({
+  lead, scale, font: f, lines: (s) => wrap(drawable(t, f), f, s * scale, CONTENT_WIDTH).map((text) => ({ text })),
+});
+
+/** The rows, with a heading wherever the section changes. */
+export function sectionedRows(rows: SummaryRow[], font: PDFFont, bold: PDFFont): Block[] {
+  const blocks: Block[] = [];
+  let section = '';
+  for (const r of rows) {
+    if (r.section !== section) blocks.push(paragraph((section = r.section), bold, 1.2, 1));
+    blocks.push({
+      lead: 0.3, scale: 1, font, row: true, labelFont: bold,
+      lines: (s) => {
+        const label = wrap(drawable(r.label, bold), bold, s, LABEL_WIDTH - 8);
+        const value = wrap(drawable(r.value, font), font, s, CONTENT_WIDTH - LABEL_WIDTH);
+        return Array.from({ length: Math.max(label.length, value.length) }, (_, i) => ({ label: label[i], text: value[i] }));
+      },
+    });
+  }
+  return blocks;
+}
+
+const height = (blocks: Block[], size: number) => blocks.reduce((h, b) => h + size * b.lead + b.lines(size).length * lineHeight(size * b.scale), 0);
+
+/** One A4 page: the base size, shrinking (down to MIN_SIZE) until everything fits. */
+export function fitSize(blocks: Block[]): number {
   let size = BASE_SIZE;
   while (size > MIN_SIZE && height(blocks, size) > A4.height - 2 * MARGIN) size -= 0.25;
+  return size;
+}
 
+/** Draws the blocks from the top of a new page, onto more pages if they don't fit. `onLine` sees each line drawn. */
+export function drawBlocks(doc: PDFDocument, blocks: Block[], size: number,
+  onLine?: (line: { label?: string; text?: string }, at: { page: number; y: number; size: number; block: Block }) => void): void {
   let page = doc.addPage([A4.width, A4.height]);
   let y = A4.height - MARGIN;
-  const stamps: SignStamp[] = [];
   for (const b of blocks) {
     const s = size * b.scale;
     y -= size * b.lead;
@@ -113,61 +180,9 @@ export async function summarySheet(form: ClaimForm, answers: ClaimAnswers, crm: 
         y = A4.height - MARGIN;
       }
       y -= lineHeight(s);
-      if (line.label) page.drawText(line.label, { x: MARGIN, y, size: s, font: bold });
+      if (line.label) page.drawText(line.label, { x: MARGIN, y, size: s, font: b.labelFont ?? b.font });
       if (line.text) page.drawText(line.text, { x: b.row ? MARGIN + LABEL_WIDTH : MARGIN, y, size: s, font: b.font });
-      // The signature goes on the line after "Client signature:", the date after "Date:".
-      const sign = SIGN_LINES.find((l) => line.text?.startsWith(`${l}: _`));
-      if (sign) {
-        const x = MARGIN + b.font.widthOfTextAtSize(`${sign}: `, s);
-        const right = MARGIN + b.font.widthOfTextAtSize(line.text!, s);
-        stamps.push(sign === SIGN_LINES[0]
-          ? { kind: 'signature', page: doc.getPageCount(), x, y: y - 2, width: right - x, height: s * 2.2 }
-          : { kind: 'date', page: doc.getPageCount(), x: x + 2, y: y + 1.5, size: s });
-      }
+      onLine?.(line, { page: doc.getPageCount(), y, size: s, block: b });
     }
   }
-  return { bytes: await doc.save(), blankFields, rows, pages: doc.getPageCount(), stamps };
-}
-
-// ---------------------------------------------------------------- layout
-
-/** A heading, a paragraph or a label-and-value row, laid out at a base size. */
-interface Block {
-  /** Space above, in multiples of the base size. */
-  lead: number;
-  /** Font size relative to the base size. */
-  scale: number;
-  font: PDFFont;
-  /** A row: label in the left column (bold), value to its right; either may wrap. */
-  row?: true;
-  lines: (size: number) => { label?: string; text?: string }[];
-}
-
-const lineHeight = (s: number) => s * 1.3;
-const CONTENT_WIDTH = A4.width - 2 * MARGIN;
-
-function toBlocks(rows: SummaryRow[], font: PDFFont, bold: PDFFont): Block[] {
-  const para = (t: string, f: PDFFont, scale = 1, lead = 0): Block => ({
-    lead, scale, font: f, lines: (s) => wrap(drawable(t, f), f, s * scale, CONTENT_WIDTH).map((text) => ({ text })),
-  });
-  const blocks = [para('Claim summary', bold, 1.6), para(BLANK_NOTE, font, 1, 0.4)];
-  let section = '';
-  for (const r of rows) {
-    if (r.section !== section) blocks.push(para((section = r.section), bold, 1.2, 1));
-    blocks.push({
-      lead: 0.3, scale: 1, font, row: true,
-      lines: (s) => {
-        const label = wrap(drawable(r.label, bold), bold, s, LABEL_WIDTH - 8);
-        const value = wrap(drawable(r.value, font), font, s, CONTENT_WIDTH - LABEL_WIDTH);
-        return Array.from({ length: Math.max(label.length, value.length) }, (_, i) => ({ label: label[i], text: value[i] }));
-      },
-    });
-  }
-  blocks.push(para(DECLARATION.text, font, 1, 2));
-  blocks.push(para(SIGN_LINES.map((l) => `${l}: ______________________________`).join('\n\n'), font, 1, 1.5));
-  return blocks;
-}
-
-function height(blocks: Block[], size: number): number {
-  return blocks.reduce((h, b) => h + size * b.lead + b.lines(size).length * lineHeight(size * b.scale), 0);
 }

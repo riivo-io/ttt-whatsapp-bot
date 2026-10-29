@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/flags.ts (commit ae6ec03). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/flags.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5263: staff-only risk flags on a claim (SPEC-04 "Cover check and risk flags"). A flag is a warning for the broker,
 // never a finding about the client: Tina never sees one, no message mentions one, and no flag changes the claim's status,

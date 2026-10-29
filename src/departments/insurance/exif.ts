@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/exif.ts (commit ae6ec03). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/exif.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5263 step 3: a photo's capture date, read in code from the original bytes before anything resizes or converts
 // them. It feeds one risk flag (Photo date before incident) and nothing else.

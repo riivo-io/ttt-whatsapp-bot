@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: ClaimPorts against Dataverse (the riivo_claim table from TTTFG-4885). The host passes in its own
 // Dataverse call (`Dv`, the same signature as the email agent's adapters/dataverse.ts `dv`) and its WhatsApp send, so
@@ -179,9 +179,10 @@ export function dataverseClaimPorts(o: ClaimsDataverseOptions): ClaimPorts {
       return { id: created.riivo_claimid, reference };
     },
 
-    async createAgentAction(row: AgentActionRow) {
+    // TTTFG-5263: a risk flag's Follow-up brings its own due date (today) and urgency reason.
+    async createAgentAction(row: AgentActionRow & { dueOn?: string; urgencyReason?: string }) {
       const followUp = row.kind === 'Follow-up';
-      const dueOn = followUp ? (row.urgent ? twoWorkingHours(row.at) : nextWorkingDay(row.at)) : undefined;
+      const dueOn = followUp ? (row.dueOn ?? (row.urgent ? twoWorkingHours(row.at) : nextWorkingDay(row.at))) : undefined;
       const created = await dv<{ riivo_agentactionid: string }>('POST', 'riivo_agentactions?$select=riivo_agentactionid', {
         riivo_name: row.detail.slice(0, 300),
         riivo_kind: KIND[row.kind],
@@ -193,7 +194,7 @@ export function dataverseClaimPorts(o: ClaimsDataverseOptions): ClaimPorts {
         riivo_duedate: dueOn ?? null,
         riivo_urgency: followUp ? (row.urgent ? URGENCY.Urgent : URGENCY.High) : URGENCY.Normal,
         riivo_urgencyreason: followUp
-          ? row.urgencyReason ?? (row.urgent ? 'Someone is hurt and the insurer has no assist number on file' : 'Promised to the client')
+          ? (row.urgencyReason ?? (row.urgent ? 'Someone is hurt and the insurer has no assist number on file' : 'Promised to the client'))
           : 'The agent created a record to check',
         riivo_actedon: followUp ? null : row.at,
         // Until TTTFG-4853's Regarding lookup: the claim or request this row is about.

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the fill half of the requestClaimSignature seam (TTTFG-5248 steps 6 to 8). TTTFG-5176 (WhatsApp) and
 // TTTFG-5188 (email) call it at the end of the conversation, once every item is in or passed over (TTTFG-5196). It
@@ -170,7 +170,12 @@ export type RefillSkip =
   | 'unchanged'
   | 'signed'
   /** No form filed yet: the client is still answering, and TTTFG-5176 calls the seam at the end. */
-  | 'not-filled-yet';
+  | 'not-filled-yet'
+  /**
+   * TTTFG-4830 (28 Oct 2026): the link is out and every form answer that changed was a "not yet". The broker adds it
+   * to the claim with the insurer (the follow-on's late-answer Follow-up says what came in); a correction fills again.
+   */
+  | 'late';
 
 /**
  * The answer keys (without group entry numbers) that change what's on the form: the field map's answers, the answers
@@ -202,12 +207,14 @@ export function formAnswerKeys(form: ClaimForm): Set<string> {
 
 /** True when an answer the form uses differs in value or status. The answer's time and message id don't count. */
 export function formAnswersChanged(form: ClaimForm, before: ClaimAnswers, after: ClaimAnswers): boolean {
+  return changedFormAnswers(form, before, after).length > 0;
+}
+
+/** The answer keys the form uses whose value or status changed. */
+function changedFormAnswers(form: ClaimForm, before: ClaimAnswers, after: ClaimAnswers): string[] {
   const keys = formAnswerKeys(form);
-  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    if (!keys.has(splitKey(k).base) && !keys.has(k)) continue;
-    if (before[k]?.value !== after[k]?.value || before[k]?.status !== after[k]?.status) return true;
-  }
-  return false;
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) =>
+    (keys.has(splitKey(k).base) || keys.has(k)) && (before[k]?.value !== after[k]?.value || before[k]?.status !== after[k]?.status));
 }
 
 /** TTTFG-5248 step 8 as a pure decision. Without the before and after answers, a change to riivo_answers counts. */
@@ -217,7 +224,13 @@ export function refillDecision(
   if (!change.columns.includes('riivo_answers')) return 'not-answers';
   if (signatureStatus === 'Signed') return 'signed';
   if (!filed) return 'not-filled-yet';
-  if (change.answersBefore && change.answersAfter && !formAnswersChanged(form, change.answersBefore, change.answersAfter)) return 'unchanged';
+  if (change.answersBefore && change.answersAfter) {
+    const before = change.answersBefore;
+    const changed = changedFormAnswers(form, before, change.answersAfter);
+    if (!changed.length) return 'unchanged';
+    // TTTFG-4830: the form went out with these still to come; a new link for each would refuse the one the client has.
+    if (signatureStatus === 'Link sent' && changed.every((k) => before[k]?.status === 'not-yet')) return 'late';
+  }
   return 'fill';
 }
 

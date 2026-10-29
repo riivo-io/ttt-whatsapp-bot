@@ -38,6 +38,7 @@ import { interactiveFor, messageMaxChars, outbox, withChoiceLines } from '../dom
 import {
     claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation, type DemoVoice,
 } from '../domain/claimsDemoHost';
+import { claimsContactNumber } from '../domain/claimsHost';
 import { transcribeVoiceNote } from '../services/transcribe.service';
 import {
     cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
@@ -210,6 +211,7 @@ const deps: ClaimsDemoDeps = {
     withdrawOpenClaims: (c) => withdrawOpenClaims(dv, c),
     say: (p, text) => channels.sendText(p, text),
     signUpLink: 'https://www.ttt-tax.co.za/client-onboarding',
+    contactNumber: claimsContactNumber(process.env.CLAIMS_CONTACT_NUMBER), // as on Tina
     // TTTFG-4830: the voice note's "media id" is the local file's path.
     transcribe: async (voice, hint) => {
         const r = await transcribeVoiceNote(fs.readFileSync(voice.id), voice.mimeType, hint);

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -20,8 +20,6 @@ export interface DeadlineVars {
   periodDays: number;
   /** The deadline as a calendar date in South Africa, YYYY-MM-DD. */
   deadline: string;
-  /** The claim owner's first name, or the team name. */
-  ownerName: string;
 }
 
 /** 7 or fewer days left (the claims.notificationWarningDays setting). */
@@ -34,14 +32,17 @@ export const DEADLINE_UPCOMING_TEMPLATE = {
     "We've logged your claim today.",
 } as const;
 
-/** The deadline is behind us. Says when it was and that the owner takes it from here; never what that means for cover. */
+/**
+ * The deadline is behind us. Says when it was and that the broker takes it from here; never what that means for cover.
+ * draft-2 (28 Oct 2026): "your broker", never their name.
+ */
 export const DEADLINE_PASSED_TEMPLATE = {
   name: 'Claim - notification deadline (Passed)',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
   render: (v: DeadlineVars) =>
     `${v.insurer} asks for claims to be reported within ${v.periodDays} days of the incident. ` +
-    `For this incident, that date was ${longDate(v.deadline)}. ${v.ownerName} will take it from here.`,
+    `For this incident, that date was ${longDate(v.deadline)}. Your broker will take it from here.`,
 } as const;
 
 /**

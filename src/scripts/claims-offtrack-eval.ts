@@ -3,9 +3,11 @@
  *
  * QC wrote "Can you help me this claim is fraud or hijacked because I never logged it" on the list of what Tina still
  * needed (DEV CLM-000313), and Tina passed it to the broker as a question and asked her finance questions again. Now
- * reply.ts reads `offTrack` ('not-theirs' or 'something-else') and resume.ts asks what the client would like to do,
- * offering a new claim. This runs the real reply prompt (reply.ts readReply) on that message and others like it, on the
- * same list, and on the replies to "What would you like to do?", and prints what Claude read and what Tina would do
+ * reply.ts reads `offTrack` ('not-theirs', 'something-else' or, from 28 Oct 2026, 'cancel') and resume.ts asks what
+ * the client would like to do, offering a new claim, or whether to cancel. "cancel" or "cancel this claim" is read
+ * without a model (walkthrough.ts CANCEL_WORDS), on the list and in the walkthrough (where it asks whether to stop).
+ * This runs the real reply prompt (reply.ts readReply) on that message and others like it, on the same list, and on
+ * the replies to "What would you like to do?", and prints what Claude read and what Tina would do
  * (resume.ts decide). Then the walkthrough messages from QC round 1 of TTTFG-5543 (understand.ts): a bare "yes" to one
  * question asked alone, "policy" for police, "can we not continue with this claim?" at the summary, "let me stop, we'll
  * continue later" at the policy. Nothing is written to the CRM or sent on WhatsApp.
@@ -34,7 +36,7 @@ const only = flag('--only')?.split(',').map((s) => s.trim());
 
 const NOW = new Date('2026-10-28T11:32:52Z');
 const CLAIM: OpenClaim = { id: 'c1', reference: 'CLM-000313', claimType: 'Motor accident', incidentAt: '2026-10-26T17:00:00Z', status: 'FNOL logged', lastClientMessageOn: '2026-10-28T10:57:55Z' };
-const LABEL = { reference: CLAIM.reference, claimType: CLAIM.claimType, incidentAt: CLAIM.incidentAt, ownerName: 'Medupi' };
+const LABEL = { reference: CLAIM.reference, claimType: CLAIM.claimType, incidentAt: CLAIM.incidentAt };
 
 /** The four finance questions left on the list, from the Discovery motor damage form (the QC claim's). */
 function financeItems(): QuestionItem[] {
@@ -65,7 +67,7 @@ interface Case {
     /** Where Tina is: on the list, or waiting on "What would you like to do?" after a dispute or when unsure. */
     on: 'list' | 'disputed' | 'unsure';
     /** What Claude should read; any of them passes. */
-    want: { offTrack?: Array<'not-theirs' | 'something-else' | null>; clarify?: Array<string | null> };
+    want: { offTrack?: Array<'not-theirs' | 'something-else' | 'cancel' | null>; clarify?: Array<string | null> };
 }
 
 const CASES: Case[] = [
@@ -73,7 +75,9 @@ const CASES: Case[] = [
     { id: 'not-mine', on: 'list', say: 'This is not my claim', want: { offTrack: ['not-theirs'] } },
     { id: 'someone-else', on: 'list', say: 'I never reported anything, someone is using my details', want: { offTrack: ['not-theirs'] } },
     { id: 'no-policy', on: 'list', say: 'I have no policy', want: { offTrack: ['not-theirs', 'something-else'] } },
-    { id: 'cancel', on: 'list', say: 'I want to cancel this claim', want: { offTrack: ['something-else'] } },
+    { id: 'cancel', on: 'list', say: 'I want to cancel this claim', want: { offTrack: ['cancel'] } },
+    { id: 'cancel-word', on: 'list', say: 'Cancel', want: { offTrack: ['cancel'] } },
+    { id: 'cancelled', on: 'list', say: 'My policy was cancelled last month, does that matter?', want: { offTrack: [null] } },
     { id: 'person', on: 'list', say: 'Can I please speak to a person', want: { offTrack: ['something-else'] } },
     { id: 'lost', on: 'list', say: "I don't know what this is about", want: { offTrack: ['something-else', 'not-theirs'] } },
     { id: 'answers', on: 'list', say: 'Wesbank, instalment sale, account 881234567, about R80 000', want: { offTrack: [null] } },
@@ -102,6 +106,7 @@ const WALK_CASES: { id: string; say: string; state: WalkthroughState; asked: str
     { id: 'w-only-me', say: 'only me', state: { ...WALK, lastAsked: ['thirdParties'] }, asked: 'Was anyone else involved, for example another driver? Please just answer yes or no.', want: ['facts', 'no'] },
     { id: 'w-not-continue', say: 'Can we not continue with this claim because it is a fraudulent claim/Hijacking claim?', state: { ...WALK, step: 'summary', facts: { ...WALK.facts, thirdParties: false, saps: true, injuries: false } }, asked: 'Is it all correct?', want: ['stop'] },
     { id: 'w-later', say: 'Let me stop the claim we will continue later', state: { ...WALK, step: 'policy', policyId: undefined, facts: {} }, asked: 'Which policy is this claim about?', want: ['pause'] },
+    { id: 'w-cancel', say: 'Please cancel my claim', state: { ...WALK, step: 'policy', policyId: undefined, facts: {} }, asked: 'Which policy is this claim about?', want: ['stop'] },
     { id: 'w-stop-yes', say: 'yes please stop', state: { ...WALK, step: 'summary', stopping: true }, asked: STOP_QUESTION, want: ['yes'] },
     { id: 'w-approved', say: 'Will the insurer pay for this?', state: { ...WALK, step: 'summary' }, asked: 'Is it all correct?', want: ['question'] },
 ];

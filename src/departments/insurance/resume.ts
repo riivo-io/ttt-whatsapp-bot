@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -28,7 +28,7 @@
 // the claim record. Without that cut-off, "hi" two days later is a miss on the old question, and two misses hand a
 // required question to the broker.
 import {
-  claimTurn, clientQuestionDetail, DEPARTMENT, sendText, toBrokerText, type AgentActionRow, type ClaimPorts, type Choice, type Conversation,
+  claimTurn, clientQuestionDetail, CLIENT_BROKER, DEPARTMENT, sendText, toBrokerText, type AgentActionRow, type ClaimPorts, type Choice, type Conversation,
 } from './claim';
 import {
   CLAIM_SETTINGS_DEFAULTS, followOnTurn, list, resumeMissing, type ClaimSettings, type ClaimStatus, type ClientReply, type FollowOnClaim,
@@ -64,6 +64,11 @@ export interface OpenClaim {
    * said since that it is (THEIRS). Tina asks nothing about it, and the morning reminder passes it over.
    */
   disputed?: true;
+  /**
+   * TTTFG-4830 (29 Oct 2026): the hold is the client's own CANCEL_REQUEST, not NOT_THEIRS. Carrying on with the claim
+   * then tells the broker they no longer want to cancel (CANCEL_WITHDRAWN) rather than that it is theirs.
+   */
+  cancelling?: true;
 }
 
 /** The port TTTFG-5188 shares. The client's riivo_claim rows whose status is one of OPEN_CLAIM_STATUSES. */
@@ -83,7 +88,10 @@ export interface ResumeMessage {
   understood: ClientReply;
   /** Claude: the message is about an incident other than the open claims (a different date, place or type). */
   differentIncident: boolean;
-  /** Claude, for "which claim?": the claim the client chose, by id or by its number in the question (1, 2, …). */
+  /**
+   * Claude, for "which claim?": the claim the client chose, by id or by its number in the question (1, 2, …). TTTFG-4830
+   * (29 Oct 2026): also the claim a cancel names, when several are open ("cancel my windscreen claim").
+   */
   chosenClaim?: string | number;
   /** Claude, for "is this a new claim?": the client's yes or no. */
   yesNo?: boolean;
@@ -101,19 +109,25 @@ export interface ResumeMessage {
    * isn't theirs (they never logged it, it's fraud or a mistake). 'something-else': Tina can't tell what they need (the
    * wrong claim, cancel it, a person, another matter). `said`: the message, for the broker.
    */
-  offTrack?: { kind: 'not-theirs' | 'something-else'; said: string };
+  offTrack?: { kind: 'not-theirs' | 'something-else' | 'cancel'; said: string };
   /** TTTFG-4830, Claude, for "What would you like to do?" (CLARIFY_CHOICES): what the client chose. */
   clarify?: ClarifyChoice;
 }
 
-/** TTTFG-4830: the answers to "What would you like to do?". 'nothing': "No, thanks". */
-export type ClarifyChoice = 'new-claim' | 'carry-on' | 'broker' | 'nothing';
-export const CLARIFY_CHOICE_KINDS = ['new-claim', 'carry-on', 'broker', 'nothing'] as const satisfies readonly ClarifyChoice[];
+/** TTTFG-4830: the answers to "What would you like to do?". 'nothing': "No, thanks". 'cancel' (28 Oct 2026): "Yes, cancel it". */
+export type ClarifyChoice = 'new-claim' | 'carry-on' | 'broker' | 'nothing' | 'cancel';
+export const CLARIFY_CHOICE_KINDS = ['new-claim', 'carry-on', 'broker', 'nothing', 'cancel'] as const satisfies readonly ClarifyChoice[];
+/** Why Tina asked: the client said it isn't theirs, she couldn't tell what they need, or (28 Oct 2026) they asked to cancel it. */
+export type ClarifyWhy = 'disputed' | 'unsure' | 'cancel';
 
 /** A question of this file, waiting for the client's answer. */
 export type Pending =
-  /** `claimIds` in the order the question named them. */
-  | { kind: 'which-claim'; claimIds: string[]; held: ResumeFile[] }
+  /**
+   * `claimIds` in the order the question named them. `facts` (TTTFG-4830, 28 Oct 2026): what the message that made Tina
+   * ask said about an incident, so "New claim" starts from it rather than asking what happened again. `cancel` (29 Oct
+   * 2026): the client asked to cancel (their words), so the claim they pick gets "Do you want to cancel …?".
+   */
+  | { kind: 'which-claim'; claimIds: string[]; held: ResumeFile[]; facts?: Facts; cancel?: string }
   /**
    * `facts`: the new incident as Claude read it. `back`: the follow-on conversation the question interrupted, so a no
    * goes straight back to it.
@@ -122,9 +136,9 @@ export type Pending =
   /**
    * TTTFG-4830: "What would you like to do?" about claim `claimId`. `why` 'disputed': the client said it isn't theirs
    * (now or before); 'unsure': Tina couldn't tell what they need. `said`: their message, for the broker. `back`: as for
-   * 'new-claim'.
+   * 'new-claim'. `facts` (29 Oct 2026): as for 'which-claim', for "Open a new claim".
    */
-  | { kind: 'clarify'; claimId: string; why: 'disputed' | 'unsure'; said?: string; held: ResumeFile[]; back?: FollowOnState };
+  | { kind: 'clarify'; claimId: string; why: ClarifyWhy; said?: string; held: ResumeFile[]; back?: FollowOnState; facts?: Facts };
 
 /** Kept on the Tina conversation between messages. Never what the claim holds. */
 export interface ResumeState {
@@ -149,7 +163,7 @@ export type Decision =
   /** A no to "new claim?" in the middle of a conversation: straight back to it, without the welcome-back list. */
   | { kind: 'back'; claimId: string; files: ResumeFile[]; followOn: FollowOnState; confirmed?: true }
   /** `ask` false: a file arrived while the question was out; it's held and nothing is said. */
-  | { kind: 'ask-which'; claims: OpenClaim[]; held: ResumeFile[]; ask: 'first' | 'again' | false }
+  | { kind: 'ask-which'; claims: OpenClaim[]; held: ResumeFile[]; ask: 'first' | 'again' | false; facts?: Facts; cancel?: string }
   | { kind: 'ask-new'; held: ResumeFile[]; facts?: Facts; back?: FollowOnState; ask: 'first' | 'again' | false }
   /**
    * A yes to "new claim?": the 5168 walkthrough starts with what the client already said about the incident. Held
@@ -162,11 +176,14 @@ export type Decision =
    * broker gets NOT_THEIRS first. `question`: the client asked something meanwhile, answered or passed on first.
    */
   | {
-    kind: 'clarify'; claimId: string; why: 'disputed' | 'unsure'; said?: string; held: ResumeFile[]; back?: FollowOnState;
-    ask: 'first' | 'again' | false; dispute?: true; question?: { question: string; help?: string };
+    kind: 'clarify'; claimId: string; why: ClarifyWhy; said?: string; held: ResumeFile[]; back?: FollowOnState;
+    ask: 'first' | 'again' | false; dispute?: true; question?: { question: string; help?: string }; facts?: Facts;
   }
-  /** TTTFG-4830: the answer to "What would you like to do?" was their broker or nothing for now. Held files go to the claim. */
-  | { kind: 'clarified'; claimId: string; why: 'disputed' | 'unsure'; choice: 'broker' | 'nothing'; said?: string; held: ResumeFile[] };
+  /**
+   * TTTFG-4830: the answer to "What would you like to do?" was their broker or nothing for now, or (28 Oct 2026) yes to
+   * "Do you want to cancel …?". Held files go to the claim.
+   */
+  | { kind: 'clarified'; claimId: string; why: ClarifyWhy; choice: 'broker' | 'nothing' | 'cancel'; said?: string; held: ResumeFile[] };
 
 export interface DecideInput {
   open: readonly OpenClaim[];
@@ -187,12 +204,18 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
   const claims = [...open].sort(byIncident);
   // TTTFG-4830: a claim the client said isn't theirs is never resumed or offered in "which claim?". With only such
   // claims open, Tina asks what they'd like to do instead.
-  const onHold = (c: OpenClaim, more: ResumeFile[]): Decision =>
-    ({ kind: 'clarify', claimId: c.id, why: 'disputed', held: more, ask: 'first' });
-  const resumeOrAsk = (more: ResumeFile[], lead: 'Welcome back.' | 'Thanks.'): Decision => {
+  // TTTFG-4830 (29 Oct 2026): `facts` as resumeOrAsk got them, so "Open a new claim" starts from them (B5).
+  const onHold = (c: OpenClaim, more: ResumeFile[], facts?: Facts): Decision =>
+    ({ kind: 'clarify', claimId: c.id, why: 'disputed', held: more, ask: 'first', ...(facts ? { facts } : {}) });
+  // TTTFG-4830 (29 Oct 2026): "Do you want to cancel …?" about claim `c`. A held claim is with the broker already.
+  const askCancel = (c: OpenClaim, more: ResumeFile[], said?: string, back?: FollowOnState, facts?: Facts): Decision =>
+    (c.disputed ? onHold(c, more, facts) : { kind: 'clarify', claimId: c.id, why: 'cancel', said, held: more, back, ask: 'first' });
+  /** `cancel` (29 Oct 2026): the client asked to cancel (their words), so the claim it is about gets the cancel question. */
+  const resumeOrAsk = (more: ResumeFile[], lead: 'Welcome back.' | 'Thanks.', facts?: Facts, cancel?: string): Decision => {
     const live = claims.filter((c) => !c.disputed);
-    if (live.length === 0) return onHold(claims[0], more);
-    return live.length === 1 ? { kind: 'resume', claimId: live[0].id, files: more, lead } : { kind: 'ask-which', claims: live, held: more, ask: 'first' };
+    if (live.length === 0) return onHold(claims[0], more, facts);
+    if (live.length > 1) return { kind: 'ask-which', claims: live, held: more, ask: 'first', ...(facts ? { facts } : {}), ...(cancel !== undefined ? { cancel } : {}) };
+    return cancel !== undefined ? askCancel(live[0], more, cancel) : { kind: 'resume', claimId: live[0].id, files: more, lead };
   };
   const p = state.pending;
 
@@ -200,15 +223,24 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
     const more = [...p.held, ...files];
     const claim = claims.find((c) => c.id === p.claimId);
     // The claim closed while the question was out (the broker withdrew it, say): as for any message.
-    if (!claim) return resumeOrAsk(more, 'Welcome back.');
-    const choice = message.clarify ?? (message.newClaim || message.differentIncident ? 'new-claim' : undefined);
-    if (choice === 'new-claim') return { kind: 'start-new', held: more, facts: message.differentIncident ? message.facts : undefined };
-    if (choice === 'carry-on') {
+    if (!claim) return resumeOrAsk(more, 'Welcome back.', p.facts);
+    // TTTFG-4830 (29 Oct 2026): the cancel words answer any of these questions. At "Do you want to cancel …?" they are
+    // the yes; readReply never takes Claude's reading for that yes, only the tap, the cancel words or a plain yes.
+    const choice = message.clarify
+      ?? (message.offTrack?.kind === 'cancel' ? 'cancel' : undefined)
+      ?? (message.newClaim || message.differentIncident ? 'new-claim' : undefined);
+    if (choice === 'new-claim') {
+      return { kind: 'start-new', held: more, facts: message.differentIncident && message.facts ? { ...p.facts, ...message.facts } : p.facts };
+    }
+    // "No, thanks" to "Do you want to cancel …?" is a no to cancelling: back to the claim.
+    if (choice === 'carry-on' || (choice === 'nothing' && p.why === 'cancel')) {
       const confirmed = p.why === 'disputed' ? { confirmed: true as const } : {};
       return p.back
         ? { kind: 'back', claimId: claim.id, files: more, followOn: p.back, ...confirmed }
         : { kind: 'resume', claimId: claim.id, files: more, lead: 'Thanks.', ...confirmed };
     }
+    // "Yes, cancel it" only answers "Do you want to cancel …?".
+    if (choice === 'cancel' && p.why !== 'cancel') return askCancel(claim, more, message.offTrack?.said ?? p.said, p.back, p.facts);
     if (choice) return { kind: 'clarified', claimId: claim.id, why: p.why, choice, said: p.said, held: more };
     // Not theirs, said now about a claim Tina was only unsure about: the broker is told, and the question says so.
     if (message.offTrack?.kind === 'not-theirs' && p.why !== 'disputed' && !claim.disputed) {
@@ -217,13 +249,18 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
     const question = u.kind === 'question' ? { question: u.question, ...(u.help ? { help: u.help } : {}) } : undefined;
     return {
       kind: 'clarify', claimId: claim.id, why: p.why, said: p.said, held: more, back: p.back,
-      ask: question ? 'first' : files.length ? false : 'again', ...(question ? { question } : {}),
+      ask: question ? 'first' : files.length ? false : 'again', ...(question ? { question } : {}), ...(p.facts ? { facts: p.facts } : {}),
     };
   }
 
   if (p?.kind === 'new-claim') {
     const held = [...p.held, ...files];
     if (message.yesNo === true || message.newClaim) return { kind: 'start-new', held, facts: p.facts };
+    // TTTFG-4830 (29 Oct 2026): "cancel" here is about the claim Tina was on, else the client's open claim.
+    if (message.offTrack?.kind === 'cancel') {
+      const on = p.back && claims.find((c) => c.id === p.back!.claimId);
+      return on ? askCancel(on, held, message.offTrack.said, p.back) : resumeOrAsk(held, 'Thanks.', undefined, message.offTrack.said);
+    }
     if (message.yesNo === false) {
       const back = p.back && claims.find((c) => c.id === p.back!.claimId);
       return back ? { kind: 'back', claimId: back.id, files: held, followOn: p.back! } : resumeOrAsk(held, 'Thanks.');
@@ -238,13 +275,22 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
       typeof message.chosenClaim === 'number' ? asked[message.chosenClaim - 1]
       : typeof message.chosenClaim === 'string' ? asked.find((c) => c.id === message.chosenClaim)
       : undefined;
-    if (chosen) return { kind: 'resume', claimId: chosen.id, files: held, lead: 'Welcome back.' };
-    if (message.newClaim) return { kind: 'start-new', held, facts: message.facts };
-    if (message.differentIncident) return { kind: 'ask-new', held, facts: message.facts, ask: 'first' };
+    // TTTFG-4830 (29 Oct 2026): a cancel, before "which claim?" or with the answer, is about the claim picked.
+    const cancel = p.cancel ?? (message.offTrack?.kind === 'cancel' ? message.offTrack.said : undefined);
+    const pick = (c: OpenClaim): Decision =>
+      (cancel !== undefined ? askCancel(c, held, cancel) : { kind: 'resume', claimId: c.id, files: held, lead: 'Welcome back.' });
+    if (chosen) return pick(chosen);
+    // TTTFG-4830 (28 Oct 2026): "New claim" starts from what the first message said (a break-in at home), so Tina
+    // doesn't ask what kind of claim it is.
+    const facts = p.facts || message.facts ? { ...p.facts, ...message.facts } : undefined;
+    if (message.newClaim) return { kind: 'start-new', held, facts };
+    if (message.differentIncident) return { kind: 'ask-new', held, facts, ask: 'first' };
     // A claim closed while the question was out: the one left, or ask again about the claims open now.
-    if (asked.length === 1) return { kind: 'resume', claimId: asked[0].id, files: held, lead: 'Welcome back.' };
-    if (asked.length === 0) return resumeOrAsk(held, 'Welcome back.');
-    return { kind: 'ask-which', claims: asked, held, ask: files.length ? false : 'again' };
+    if (asked.length === 1) return pick(asked[0]);
+    if (asked.length === 0) return resumeOrAsk(held, 'Welcome back.', p.facts, cancel);
+    return {
+      kind: 'ask-which', claims: asked, held, ask: files.length ? false : 'again', ...(p.facts ? { facts: p.facts } : {}), ...(cancel !== undefined ? { cancel } : {}),
+    };
   }
 
   const f = state.followOn;
@@ -266,6 +312,14 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
     return { kind: 'clarify', claimId: about.id, why: 'disputed', said: off.said, held: files, back, ask: 'first', ...(about.disputed ? {} : { dispute: true }) };
   }
 
+  // TTTFG-4830 (28 Oct 2026, TTT's feedback): "cancel my claim". Tina asks to be sure, then tells the broker. 29 Oct: the
+  // claim the client named ("cancel my windscreen claim"), else as above; with several open and none named, "which
+  // claim?" first, and the claim picked gets the question.
+  if (off?.kind === 'cancel') {
+    const c = claims.find((x) => x.id === message.chosenClaim) ?? about;
+    return c ? askCancel(c, files, off.said, c === current ? back : undefined) : resumeOrAsk(files, 'Welcome back.', undefined, off.said);
+  }
+
   // TTTFG-4830: the client already said it's a new claim, so it isn't asked.
   if (message.newClaim) return { kind: 'start-new', held: files, facts: message.facts };
   if (message.differentIncident) return { kind: 'ask-new', held: files, facts: message.facts, back, ask: 'first' };
@@ -277,14 +331,14 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
     return { kind: 'clarify', claimId: about.id, why: about.disputed ? 'disputed' : 'unsure', said: off.said, held: files, back, ask: 'first' };
   }
 
-  if (current?.disputed) return onHold(current, files);
+  if (current?.disputed) return onHold(current, files, message.facts);
   if (current) {
     // A late answer to Tina's last question can only be about that claim. A "hi" or a file after a gap starts afresh.
     if (fresh || (u.kind !== 'unparsed' && u.kind !== 'file')) return { kind: 'continue', claimId: current.id };
-    const d = resumeOrAsk(files, 'Welcome back.');
+    const d = resumeOrAsk(files, 'Welcome back.', message.facts);
     return d.kind === 'resume' && d.claimId === current.id && f.introSent ? { ...d, introSent: true } : d;
   }
-  return resumeOrAsk(files, 'Welcome back.');
+  return resumeOrAsk(files, 'Welcome back.', message.facts);
 }
 
 // ------------------------------------------------------------------------------------------------------- the texts
@@ -293,7 +347,8 @@ export function decide({ open, state, message, now, resumeAfterHours = RESUME_SE
 export const shortDate = (iso: string) =>
   new Date(iso).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: '2-digit', month: '2-digit', year: 'numeric' });
 
-const claimWords = (t: ClaimType) => t.toLowerCase();
+/** TTTFG-4830 (28 Oct 2026): TTT calls a phone or laptop claim "All risk". The morning reminder names it the same way. */
+export const claimWords = (t: ClaimType) => (t === 'Portable possessions' ? 'all risk' : t.toLowerCase());
 
 /** TTTFG-5262 step 6. Fixed text. */
 export const NEW_CLAIM_QUESTION = 'Is this a new claim?';
@@ -302,7 +357,7 @@ export const NEW_CLAIM_AGAIN = 'Sorry, I didn\'t quite get that. Is this a new c
 export const heldFilesKept = (n: number) =>
   n === 1 ? "I'll add the file you sent to the new claim once it's open." : `I'll add the ${n} files you sent to the new claim once it's open.`;
 /** A no to "Is this a new claim?" in the middle of a conversation: the words in front of the question Tina was on. */
-export const backTo = (claimType: ClaimType) => `No problem, back to your ${claimType.toLowerCase()} claim.`;
+export const backTo = (claimType: ClaimType) => `No problem, back to your ${claimWords(claimType)} claim.`;
 
 /**
  * TTTFG-4830 (28 Oct 2026): the broker's Follow-up when the client says a claim isn't theirs. Urgent: it may be fraud
@@ -323,6 +378,33 @@ export const THEIRS = {
   version: 'draft-1',
   render: (v: { reference: string }) => `Claim ${v.reference}: the client said on WhatsApp it is theirs after all, and carried on with it.`,
 } as const;
+/**
+ * TTTFG-4830 (28 Oct 2026, TTT's feedback): the broker's Follow-up when the client confirms they want to cancel a claim.
+ * Urgent, and it holds the claim like NOT_THEIRS (resume-dataverse.ts): no questions, no reminders, until the broker
+ * closes it or the client carries on (CANCEL_WITHDRAWN).
+ */
+export const CANCEL_REQUEST = {
+  name: 'Claim - client asks to cancel',
+  version: 'draft-1',
+  urgencyReason: 'The client asks to cancel the claim',
+  render: (v: { reference: string; said: string }) => `Claim ${v.reference}: the client asked on WhatsApp to cancel it`
+    + `${v.said ? `: "${v.said}"` : ''}. Tina has stopped asking them about it, and the morning reminders are held. Please confirm `
+    + 'with them, then withdraw the claim, or close this follow-up to carry on with it.',
+} as const;
+/**
+ * TTTFG-4830 (29 Oct 2026): the client carried on with a claim they had asked to cancel. The CANCEL_REQUEST can't be
+ * closed from here, so the broker gets a Follow-up, urgent like the request it answers (they may be about to withdraw
+ * the claim). It lifts the hold like THEIRS.
+ */
+export const CANCEL_WITHDRAWN = {
+  name: 'Claim - client no longer cancelling',
+  version: 'draft-1',
+  urgencyReason: 'The client no longer wants to cancel the claim',
+  render: (v: { reference: string }) => `Claim ${v.reference}: the client said on WhatsApp they no longer want to cancel it, and `
+    + 'carried on with it. Tina is asking them about it again, and the morning reminders are back on. Please don\'t withdraw '
+    + 'the claim, and close their cancel follow-up.',
+} as const;
+
 /** TTTFG-4830: the Follow-up when the client chose "Talk to my broker". */
 export const talkToBrokerDetail = (reference: string, said?: string) =>
   `The client asked on WhatsApp to talk to you about claim ${reference}.${said ? ` They wrote: "${said}".` : ''} Please contact them.`;
@@ -333,13 +415,15 @@ export const CLARIFY_CHOICES: Record<ClarifyChoice, Choice> = {
   'carry-on': { title: 'Carry on with claim' },
   broker: { title: 'Talk to my broker' },
   nothing: { title: 'No, thanks' },
+  cancel: { title: 'Yes, cancel it' },
 };
-/** A claim the client says isn't theirs: a new claim first. Otherwise the claim first. Never more than three. */
-export const clarifyChoices = (why: 'disputed' | 'unsure'): Choice[] =>
-  (why === 'disputed' ? (['new-claim', 'nothing', 'carry-on'] as const) : (['carry-on', 'new-claim', 'broker'] as const)).map((k) => CLARIFY_CHOICES[k]);
+/** A claim the client says isn't theirs: a new claim first. Cancel: yes or carry on. Otherwise the claim first. Never more than three. */
+export const clarifyChoices = (why: ClarifyWhy): Choice[] =>
+  (why === 'disputed' ? (['new-claim', 'nothing', 'carry-on'] as const) : why === 'cancel' ? (['cancel', 'carry-on'] as const)
+    : (['carry-on', 'new-claim', 'broker'] as const)).map((k) => CLARIFY_CHOICES[k]);
 
-/** What the texts below say about the claim. */
-export interface ClaimLabel { reference: string; claimType: ClaimType; incidentAt: string; ownerName: string }
+/** What the texts below say about the claim. They never name the broker (TTT's feedback, 28 Oct 2026). */
+export interface ClaimLabel { reference: string; claimType: ClaimType; incidentAt: string }
 const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 /** "claim *CLM-000313* (motor accident, 26/10/2026)": enough for the client to know which one. */
 const claimRef = (c: ClaimLabel) => `claim *${c.reference}* (${claimWords(c.claimType)}, ${shortDate(c.incidentAt)})`;
@@ -349,22 +433,29 @@ const claimRef = (c: ClaimLabel) => `claim *${c.reference}* (${claimWords(c.clai
  * was just told); 'first' when Tina raises it; 'again' after a reply she couldn't read; 'after-question' after she
  * answered or passed on a question.
  */
-export function clarifyText(why: 'disputed' | 'unsure', claim: ClaimLabel, how: 'dispute' | 'first' | 'again' | 'after-question'): string {
+export function clarifyText(why: ClarifyWhy, claim: ClaimLabel, how: 'dispute' | 'first' | 'again' | 'after-question'): string {
+  if (why === 'cancel') {
+    const ask = `Do you want to cancel your ${claimWords(claim.claimType)} claim *${claim.reference}*?`;
+    return how === 'again' ? `Sorry, I didn't quite get that. ${ask}` : ask;
+  }
   const ask = why === 'disputed' ? 'Would you like to open a new claim?' : 'What would you like to do?';
   if (how === 'again') return `Sorry, I didn't quite get that. ${ask}`;
   if (how === 'after-question') return ask;
   if (why === 'unsure') return `Sorry, I'm not sure what you need. I was asking about your ${claimWords(claim.claimType)} claim *${claim.reference}*.\n\n${ask}`;
   if (how === 'dispute') {
-    return `I'm sorry about that. I've asked ${claim.ownerName} to look into ${claimRef(claim)} and contact you. I won't ask you anything `
+    return `I'm sorry about that. I've asked ${CLIENT_BROKER} to look into ${claimRef(claim)} and contact you. I won't ask you anything `
       + 'more about it for now.\n\nWould you like to open a new claim instead?';
   }
-  return `${sentence(claim.ownerName)} is looking into ${claimRef(claim)}, so I won't ask you anything more about it for now.\n\n${ask}`;
+  return `${sentence(CLIENT_BROKER)} is looking into ${claimRef(claim)}, so I won't ask you anything more about it for now.\n\n${ask}`;
 }
 
 /** TTTFG-4830: the answer to "What would you like to do?" was their broker, or nothing for now. */
-export function clarifiedText(why: 'disputed' | 'unsure', choice: 'broker' | 'nothing', claim: ClaimLabel): string {
-  if (why === 'disputed') return `No problem. ${sentence(claim.ownerName)} will contact you about claim *${claim.reference}*.`;
-  if (choice === 'broker') return `I've asked ${claim.ownerName} to contact you about your ${claimWords(claim.claimType)} claim *${claim.reference}*.`;
+export function clarifiedText(why: ClarifyWhy, choice: 'broker' | 'nothing' | 'cancel', claim: ClaimLabel): string {
+  if (choice === 'cancel') {
+    return `No problem. I've asked ${CLIENT_BROKER} to cancel claim *${claim.reference}*. They'll confirm it with you, and I won't ask you anything more about it.`;
+  }
+  if (why === 'disputed') return `No problem. ${sentence(CLIENT_BROKER)} will contact you about claim *${claim.reference}*.`;
+  if (choice === 'broker') return `I've asked ${CLIENT_BROKER} to contact you about your ${claimWords(claim.claimType)} claim *${claim.reference}*.`;
   return 'No problem. Message me here whenever you need me.';
 }
 
@@ -402,12 +493,12 @@ export function missingNames(items: readonly QuestionItem[]): string[] {
  */
 export function welcomeBackText(
   claimType: ClaimType, missing: readonly QuestionItem[], lead: 'Welcome back.' | 'Thanks.' = 'Welcome back.',
-  claim?: { status: ClaimStatus; ownerName: string },
+  claim?: { status: ClaimStatus },
 ): string {
   const names = missingNames(missing);
   if (names.length) return `${lead} For your ${claimWords(claimType)} claim we still need: ${list(names)}.`;
   if (!claim) return lead;
-  const owner = claim.ownerName.charAt(0).toUpperCase() + claim.ownerName.slice(1);
+  const owner = sentence(CLIENT_BROKER);
   if (claim.status === 'Additional info requested') {
     return `${lead} The insurer has asked for more information on your ${claimWords(claimType)} claim. ${owner} will tell you what they need, or you can send it here if you already know.`;
   }
@@ -456,16 +547,20 @@ export async function resumeTurn(
     }
 
     case 'resume': {
-      if (d.confirmed) await theirsAfterAll(ports, d.claimId, at);
+      if (d.confirmed) await theirsAfterAll(ports, open.find((c) => c.id === d.claimId)!, at);
       if (!d.files.length) await welcomeBack(ports, conv, d.claimId, d.lead, now, settings);
       const r = await followOnTurn(ports, conv, null, { kind: 'resume', claimId: d.claimId, wamid: message.understood.wamid, files: d.files, introSent: d.introSent }, now, settings);
       return { route: 'claim', state: { followOn: r.state, pending: null } };
     }
 
-    case 'ask-which':
+    case 'ask-which': {
       await touchAll();
       if (d.ask) await sendText(ports, conv, whichClaimText(d.claims, d.ask === 'again'), null, at);
-      return { route: 'claim', state: { followOn: null, pending: { kind: 'which-claim', claimIds: d.claims.map((c) => c.id), held: d.held } } };
+      const pending: Pending = {
+        kind: 'which-claim', claimIds: d.claims.map((c) => c.id), held: d.held, ...(d.facts ? { facts: d.facts } : {}), ...(d.cancel !== undefined ? { cancel: d.cancel } : {}),
+      };
+      return { route: 'claim', state: { followOn: null, pending } };
+    }
 
     case 'ask-new':
       await touchAll();
@@ -474,7 +569,7 @@ export async function resumeTurn(
 
     case 'back': {
       const claim = open.find((c) => c.id === d.claimId)!;
-      if (d.confirmed) await theirsAfterAll(ports, d.claimId, at);
+      if (d.confirmed) await theirsAfterAll(ports, claim, at);
       const r = await followOnTurn(ports, conv, null, {
         kind: 'resume', claimId: d.claimId, wamid: message.understood.wamid, files: d.files, introSent: true,
         lead: backTo(claim.claimType), skipped: d.followOn.skipped,
@@ -500,7 +595,7 @@ export async function resumeTurn(
           kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
           detail: clientQuestionDetail(d.question.question), at,
         });
-        await sendText(ports, conv, toBrokerText(claim.owner.name), to, at, claim.contactId);
+        await sendText(ports, conv, toBrokerText(), to, at, claim.contactId);
       }
       if (d.ask) {
         const how = d.dispute ? 'dispute' : d.question ? 'after-question' : d.ask === 'again' ? 'again' : 'first';
@@ -508,6 +603,7 @@ export async function resumeTurn(
       }
       const pending: Pending = {
         kind: 'clarify', claimId: d.claimId, why: d.why, held: d.held, ...(d.said ? { said: d.said } : {}), ...(d.back ? { back: d.back } : {}),
+        ...(d.facts ? { facts: d.facts } : {}),
       };
       return { route: 'claim', state: { followOn: null, pending } };
     }
@@ -520,7 +616,15 @@ export async function resumeTurn(
         if (h.file.media === 'video') await ports.storeVideo(h.file, { claimId: claim.id, itemKey: h.forItem });
         else await ports.fileToPipeline(h.file, { claimId: claim.id, itemKey: h.forItem });
       }
-      if (d.why === 'unsure' && d.choice === 'broker') {
+      if (d.choice === 'cancel') {
+        await ports.createAgentAction({
+          kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
+          detail: CANCEL_REQUEST.render({ reference: claim.reference, said: d.said ?? '' }), urgent: true, urgencyReason: CANCEL_REQUEST.urgencyReason,
+          template: { name: CANCEL_REQUEST.name, version: CANCEL_REQUEST.version }, at,
+        });
+      }
+      // TTTFG-4830 (29 Oct 2026): at "Do you want to cancel …?" too. A held claim's broker already has a Follow-up.
+      if (d.why !== 'disputed' && d.choice === 'broker') {
         await ports.createAgentAction({
           kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
           detail: talkToBrokerDetail(claim.reference, d.said), at,
@@ -532,7 +636,7 @@ export async function resumeTurn(
   }
 }
 
-const labelOf = (c: FollowOnClaim): ClaimLabel => ({ reference: c.reference, claimType: c.claimType, incidentAt: c.facts.incidentAt, ownerName: c.owner.name });
+const labelOf = (c: FollowOnClaim): ClaimLabel => ({ reference: c.reference, claimType: c.claimType, incidentAt: c.facts.incidentAt });
 
 /** TTTFG-4830: the broker's urgent Follow-up for a claim the client says isn't theirs. */
 const notTheirsRow = (claim: FollowOnClaim, said: string, at: string): AgentActionRow => ({
@@ -541,13 +645,21 @@ const notTheirsRow = (claim: FollowOnClaim, said: string, at: string): AgentActi
   template: { name: NOT_THEIRS.name, version: NOT_THEIRS.version }, at,
 });
 
-/** TTTFG-4830: written when the client carries on with a claim they had said wasn't theirs; it lifts the hold. */
-async function theirsAfterAll(ports: ResumePorts, claimId: string, at: string) {
-  const claim = await ports.loadClaim(claimId);
-  await ports.createAgentAction({
-    kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
-    detail: THEIRS.render({ reference: claim.reference }), template: { name: THEIRS.name, version: THEIRS.version }, at,
-  });
+/**
+ * TTTFG-4830: written when the client carries on with a claim they had said wasn't theirs; it lifts the hold. 29 Oct
+ * 2026: a claim they had asked to cancel gets CANCEL_WITHDRAWN instead, a Follow-up for the broker.
+ */
+async function theirsAfterAll(ports: ResumePorts, held: OpenClaim, at: string) {
+  const claim = await ports.loadClaim(held.id);
+  const row: Pick<AgentActionRow, 'department' | 'owner' | 'regarding' | 'contactId' | 'at'> = {
+    department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
+  };
+  await ports.createAgentAction(held.cancelling
+    ? {
+      ...row, kind: 'Follow-up', detail: CANCEL_WITHDRAWN.render({ reference: claim.reference }), urgent: true,
+      urgencyReason: CANCEL_WITHDRAWN.urgencyReason, template: { name: CANCEL_WITHDRAWN.name, version: CANCEL_WITHDRAWN.version },
+    }
+    : { ...row, kind: 'Created', detail: THEIRS.render({ reference: claim.reference }), template: { name: THEIRS.name, version: THEIRS.version } });
 }
 
 /** The welcome-back line, from the claim record: what's missing is worked out now, not remembered. */
@@ -557,6 +669,6 @@ async function welcomeBack(ports: ResumePorts, conv: Conversation, claimId: stri
     ? await ports.claimForm(claim.claimFormId)
     : (await ports.activeClaimForm(claim.providerId, claim.claimType)) ?? (await ports.genericClaimForm());
   const missing = resumeMissing({ claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays });
-  const text = welcomeBackText(claim.claimType, missing, lead, { status: claim.status, ownerName: claim.owner.name });
+  const text = welcomeBackText(claim.claimType, missing, lead, { status: claim.status });
   await sendText(ports, conv, text, { id: claim.id, owner: claim.owner }, now.toISOString());
 }

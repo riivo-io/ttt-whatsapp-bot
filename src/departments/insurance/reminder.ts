@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212 (first cut, built for the TTTFG-4830 WhatsApp demo): every morning, a client whose claim still needs
 // something is sent the list again ("Things we still need from you"), so the claim doesn't stall on the client's side.
@@ -35,7 +35,7 @@
 import { DEPARTMENT, type Conversation } from './claim';
 import { CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedState, type ClaimSettings, type StoredClaimForm } from './followon';
 import { chased } from './progress';
-import { missingNames, isOpenClaim, type ResumePorts, type ResumeState } from './resume';
+import { claimWords, missingNames, isOpenClaim, type ResumePorts, type ResumeState } from './resume';
 import { REMINDER_TEMPLATE } from './templates';
 
 export interface ReminderSettings extends ClaimSettings {
@@ -182,7 +182,8 @@ export async function remindTurn(
     const last = await ports.lastReminderOn(o.id);
     if (last && sastDate(last) === sastDate(at)) { outcomes.push({ reference: o.reference, skipped: 'reminded-today', ...broker }); continue; }
 
-    const label = `${claim.claimType.toLowerCase()} claim (${claim.reference})`;
+    // TTTFG-4830 (29 Oct 2026): named as Tina names it back on the claim ("your all risk claim", A6).
+    const label = `${claimWords(claim.claimType)} claim (${claim.reference})`;
     const text = REMINDER_TEMPLATE.render({ firstName, claim: label, lines, questionsLeft: missing.some((i) => !chased(i)) });
     await ports.send(conv.phone, {
       kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text,

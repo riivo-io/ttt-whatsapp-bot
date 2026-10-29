@@ -6,9 +6,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ABANDONED_AFTER_MS, claimFromClient, claimFromUnknownNumber, type ClaimsHostDeps, type StoredWalkthrough } from '../../src/domain/claimsHost';
-import { SAFETY_TEXT, type AgentActionRow, type ClaimPorts, type ClaimRow, type Outbound } from '../../src/departments/insurance/claim';
-import type { Policy } from '../../src/departments/insurance/walkthrough';
+import {
+    ABANDONED_AFTER_MS, claimFromClient, claimFromUnknownNumber, claimsContactNumber, claimsConversation, type ClaimsHostDeps, type StoredWalkthrough,
+} from '../../src/domain/claimsHost';
+import { question, SAFETY_TEXT, type AgentActionRow, type ClaimPorts, type ClaimRow, type Outbound } from '../../src/departments/insurance/claim';
+import { missingFor, type Policy } from '../../src/departments/insurance/walkthrough';
 
 const PHONE = '+27821234567';
 const JANE = { id: 'c-jane', firstName: 'Jane' };
@@ -19,7 +21,9 @@ const blank = { kind: 'unclear', policyNumber: null, claimType: null, descriptio
     thirdParties: null, thirdPartyDetails: null, saps: null, injuries: null, injuryDetails: null, wrongFields: [] as string[] };
 
 /** A fake Claude: the intent model says yes to claim words; the understand model answers from a queue. */
-function world(o: { policies?: Policy[]; enabled?: boolean; answers?: Record<string, unknown>[]; requestFails?: boolean; isClaim?: boolean } = {}) {
+function world(o: {
+    policies?: Policy[]; enabled?: boolean; answers?: Record<string, unknown>[]; requestFails?: boolean; isClaim?: boolean; contactNumber?: string;
+} = {}) {
     const sent: Outbound[] = [];
     const claims: ClaimRow[] = [];
     const actions: AgentActionRow[] = [];
@@ -28,6 +32,8 @@ function world(o: { policies?: Policy[]; enabled?: boolean; answers?: Record<str
     const store = new Map<string, StoredWalkthrough>();
     const answers = [...(o.answers ?? [])];
     let intentCalls = 0;
+    /** Each understand-model call: how many messages Tina had sent by then, and what it was given to read. */
+    const reads: { sentBefore: number; user: string }[] = [];
     const ports = (contact: { id: string; firstName: string } | null): ClaimPorts => ({
         contactByWhatsApp: async () => contact,
         activePolicies: async () => o.policies ?? [DISCOVERY],
@@ -40,16 +46,17 @@ function world(o: { policies?: Policy[]; enabled?: boolean; answers?: Record<str
     const deps: ClaimsHostDeps = {
         enabled: o.enabled ?? true,
         signUpLink: 'https://ttt.example/signup',
+        ...(o.contactNumber !== undefined ? { contactNumber: o.contactNumber } : {}),
         load: async (p) => store.get(p) ?? null,
         save: async (p, w) => void store.set(p, { ...w, updatedAt: NOW.toISOString() }),
         remove: async (p) => void store.delete(p),
         intentModel: async () => { intentCalls++; return { reportingClaim: o.isClaim ?? true }; },
-        understandModel: async () => ({ ...blank, ...(answers.shift() ?? {}) }),
+        understandModel: async (req) => (reads.push({ sentBefore: sent.length, user: req.user }), { ...blank, ...(answers.shift() ?? {}) }),
         openRequest: async (_c, _p, text) => { if (o.requestFails) return null; requests.push(text); return 'req-1'; },
         logIncoming: async (_r, text) => void incoming.push(text),
         ports: (_r, contact) => ports(contact),
     };
-    return { deps, sent, claims, actions, requests, incoming, store, texts: () => sent.map((m) => m.text), intentCalls: () => intentCalls };
+    return { deps, sent, claims, actions, requests, incoming, store, reads, texts: () => sent.map((m) => m.text), intentCalls: () => intentCalls };
 }
 
 test('TTTFG-5168 check 1: "I need to claim, my car was hit" opens an Insurance request and starts the walkthrough', async () => {
@@ -161,15 +168,78 @@ test('TTTFG-5168: switched off, or no request could be opened: Tina answers as b
 });
 
 test('TTTFG-4830: a short opening ("Hi, my phone was stolen") is kept as a hint, so the questions are for a stolen phone', async () => {
-    const { withOpeningFacts } = await import('../../src/domain/claimsHost');
-    const { question } = await import('../../src/departments/insurance/claim');
-    const { missingFor } = await import('../../src/departments/insurance/walkthrough');
-    const model = async () => ({ ...blank, kind: 'facts', claimType: 'Portable possessions', description: 'my phone was stolen' });
-    const start = { contactId: 'c', firstName: 'Jane', policies: [DISCOVERY], policyId: 'p1', step: 'incident' as const, facts: {} };
-    const s = await withOpeningFacts(model as never, start, 'Hi, my phone was stolen', NOW);
+    const w = world({ answers: [{ kind: 'facts', claimType: 'Portable possessions', description: 'my phone was stolen' }] });
+    assert.deepEqual(await claimFromClient(w.deps, PHONE, JANE, 'Hi, my phone was stolen', NOW), { handled: true, kind: 'started' });
+    const s = w.store.get(PHONE)!.state;
+    assert.equal(s.step, 'policy'); // the policy is still the first question
+    assert.equal(s.facts.claimType, 'Portable possessions');
     assert.equal(s.facts.description, undefined); // still asked for the whole story
     assert.equal(s.opening, 'my phone was stolen');
-    const q = question('incident', missingFor('incident', s.facts), s);
+    const q = question('incident', missingFor('incident', s.facts, s.opening), { ...s, policyId: 'p1', step: 'incident' });
     assert.match(q, /what was taken/);
     assert.doesNotMatch(q, /lost/);
+});
+
+test('TTTFG-4830 (28 Oct 2026): the opening is read before the walkthrough starts, so the policy question offers only the policies that fit', async () => {
+    const CAR: Policy = { ...DISCOVERY, id: 'p-car', product: 'Motor', policyNumber: 'DI-CAR' };
+    const HOME: Policy = { ...DISCOVERY, id: 'p-home', product: 'Household', policyNumber: 'DI-HOME' };
+    const opening = 'Someone broke into my house last night and took the TV and my laptop';
+    const w = world({ policies: [CAR, HOME], answers: [{ kind: 'facts', claimType: 'Property loss or damage', description: opening }] });
+    await claimFromClient(w.deps, PHONE, JANE, opening, NOW);
+    // One read, of the opening, before anything was sent.
+    assert.equal(w.reads.length, 1);
+    assert.equal(w.reads[0].sentBefore, 0);
+    assert.match(w.reads[0].user, /Someone broke into my house last night/);
+    assert.deepEqual(w.texts(), ['Is this claim about your Discovery Insure Household policy (DI-HOME)?']);
+    const s = w.store.get(PHONE)!.state;
+    assert.deepEqual(s.policies.map((p) => p.id), ['p-home']);
+    assert.deepEqual(s.allPolicies?.map((p) => p.id), ['p-car', 'p-home'], 'the motor policy is kept, in case the client says no');
+    assert.equal(s.facts.description, opening);
+});
+
+test('TTTFG-4830 (28 Oct 2026): an opening that says nothing about the claim offers every policy, and nothing is kept', async () => {
+    const CAR: Policy = { ...DISCOVERY, id: 'p-car', product: 'Motor', policyNumber: 'DI-CAR' };
+    const HOME: Policy = { ...DISCOVERY, id: 'p-home', product: 'Household', policyNumber: 'DI-HOME' };
+    const w = world({ policies: [CAR, HOME], answers: [{}] }); // the model reads it as unclear
+    await claimFromClient(w.deps, PHONE, JANE, 'I need to make a claim', NOW);
+    const s = w.store.get(PHONE)!.state;
+    assert.deepEqual(s.policies.map((p) => p.id), ['p-car', 'p-home']);
+    assert.equal(s.allPolicies, undefined);
+    assert.deepEqual(s.facts, {});
+    assert.equal(s.opening, undefined);
+});
+
+test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser list after the insurer\'s assist line; unset or blank, it is left out', async () => {
+    const HOME: Policy = { id: 'p-home', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Household', policyNumber: 'OM-1', assistNumber: '0860 111 222' };
+    const GEYSER = 'My geyser burst this morning and water came through the bedroom ceiling';
+    const geyserList = async (raw: string | undefined, assistNumber = HOME.assistNumber) => {
+        const w = world({
+            policies: [{ ...HOME, assistNumber }], contactNumber: claimsContactNumber(raw),
+            answers: [{ kind: 'facts', claimType: 'Property loss or damage', description: GEYSER }, { kind: 'yes' }],
+        });
+        await claimFromClient(w.deps, PHONE, JANE, GEYSER, NOW);
+        await claimFromClient(w.deps, PHONE, JANE, 'yes', NOW);
+        const list = w.texts().find((t) => t.startsWith("If you're at the property")) ?? '';
+        assert.match(list, /Turn off the water/);
+        return list;
+    };
+    assert.match(await geyserList(' 021 555 0100 '),
+        /\n\nNeed a plumber urgently\? Call Old Mutual Insure's assist line on 0860 111 222\. You can also call TTT on 021 555 0100\.\n\n/);
+    assert.match(await geyserList('021 555 0100', ''), /\n\nYou can also call TTT on 021 555 0100\.\n\n/);
+    for (const raw of [undefined, '', '   ']) {
+        const list = await geyserList(raw);
+        assert.match(list, /Call Old Mutual Insure's assist line on 0860 111 222\./);
+        assert.doesNotMatch(list, /call TTT/i);
+    }
+    assert.doesNotMatch(await geyserList(undefined, ''), /plumber urgently|call TTT/i);
+});
+
+test('TTTFG-4830: CLAIMS_CONTACT_NUMBER is trimmed; unset or blank is no number (TTT chooses which number, so there is no default)', () => {
+    assert.equal(claimsContactNumber(undefined), undefined);
+    assert.equal(claimsContactNumber(''), undefined);
+    assert.equal(claimsContactNumber('   '), undefined);
+    assert.equal(claimsContactNumber(' 021 555 0100 '), '021 555 0100');
+    assert.deepEqual(claimsConversation(PHONE, 'req-1', 'https://ttt.example/signup'), { phone: PHONE, requestId: 'req-1', signUpLink: 'https://ttt.example/signup' });
+    assert.deepEqual(claimsConversation(PHONE, 'req-1', 'https://ttt.example/signup', '021 555 0100'),
+        { phone: PHONE, requestId: 'req-1', signUpLink: 'https://ttt.example/signup', contactNumber: '021 555 0100' });
 });

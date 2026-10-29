@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
@@ -7,7 +7,7 @@
 import { dataverseClaimPorts } from './dataverse';
 import { CLAIM_STATUSES, CLAIM_TYPE_VALUES, dataverseFollowOnPorts, type FollowOnDataverseOptions } from './followon-dataverse';
 import { BROKER_STEPS, type ReminderPorts } from './reminder';
-import { NOT_THEIRS, OPEN_CLAIM_STATUSES, THEIRS, type OpenClaim, type OpenClaimsPort, type ResumePorts } from './resume';
+import { CANCEL_REQUEST, CANCEL_WITHDRAWN, NOT_THEIRS, OPEN_CLAIM_STATUSES, THEIRS, type OpenClaim, type OpenClaimsPort, type ResumePorts } from './resume';
 import { REMINDER_TEMPLATE } from './templates';
 
 const OPT = 463630000;
@@ -42,6 +42,7 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
         status: CLAIM_STATUSES[c.riivo_claimstatus - OPT],
         lastClientMessageOn: c.riivo_lastclientmessageon ?? undefined,
         ...(disputed.has(c.riivo_claimid) ? { disputed: true as const } : {}),
+        ...(disputed.get(c.riivo_claimid) === 'cancel' ? { cancelling: true as const } : {}),
       }));
     },
   };
@@ -51,23 +52,26 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
 const ACTION_CLOSED = [463630004, 463630006];
 
 /**
- * TTTFG-4830: the claims the client said aren't theirs, and that are still held: the latest of their NOT_THEIRS and
- * THEIRS agent actions is NOT_THEIRS, and the broker hasn't closed it (Done or Discarded). One read for all of them.
+ * TTTFG-4830: the claims the client said aren't theirs (or, 28 Oct 2026, asked to cancel), and that are still held: the
+ * latest of their NOT_THEIRS, CANCEL_REQUEST, THEIRS and (29 Oct 2026) CANCEL_WITHDRAWN agent actions is one of the
+ * first two, and the broker hasn't closed it (Done or Discarded). One read for all of them. Each held claim comes back
+ * with what holds it: 'cancel' for a CANCEL_REQUEST.
  */
-async function disputedClaims(dv: FollowOnDataverseOptions['dv'], claimIds: readonly string[]): Promise<Set<string>> {
+async function disputedClaims(dv: FollowOnDataverseOptions['dv'], claimIds: readonly string[]): Promise<Map<string, 'not-theirs' | 'cancel'>> {
   const ids = claimIds.filter((id) => GUID.test(id));
-  if (!ids.length) return new Set();
-  const names = [NOT_THEIRS.name, THEIRS.name].map((n) => `startswith(riivo_subject,'${encodeURIComponent(n)}')`).join(' or ');
+  if (!ids.length) return new Map();
+  const names = [NOT_THEIRS.name, CANCEL_REQUEST.name, THEIRS.name, CANCEL_WITHDRAWN.name].map((n) => `startswith(riivo_subject,'${encodeURIComponent(n)}')`).join(' or ');
   const about = ids.map((id) => `riivo_sourcemessageid eq 'riivo_claim:${id}'`).join(' or ');
   const r = await dv<{ value: { createdon: string; riivo_subject: string | null; riivo_status: number | null; riivo_sourcemessageid: string | null }[] }>('GET',
     `riivo_agentactions?$select=createdon,riivo_subject,riivo_status,riivo_sourcemessageid&$orderby=createdon desc&$filter=(${names}) and (${about})`);
-  const out = new Set<string>();
+  const out = new Map<string, 'not-theirs' | 'cancel'>();
   const seen = new Set<string>();
   for (const a of r.value ?? []) {
     const id = a.riivo_sourcemessageid?.replace(/^riivo_claim:/, '');
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    if (a.riivo_subject?.startsWith(NOT_THEIRS.name) && !ACTION_CLOSED.includes(a.riivo_status ?? -1)) out.add(id);
+    const holds = a.riivo_subject?.startsWith(NOT_THEIRS.name) ? 'not-theirs' : a.riivo_subject?.startsWith(CANCEL_REQUEST.name) ? 'cancel' : undefined;
+    if (holds && !ACTION_CLOSED.includes(a.riivo_status ?? -1)) out.set(id, holds);
   }
   return out;
 }

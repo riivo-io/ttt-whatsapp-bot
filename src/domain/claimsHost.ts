@@ -14,14 +14,25 @@
  */
 import { claimTurn, type ClaimPorts, type Conversation } from '../departments/insurance/claim';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
-import { understand, type UnderstandModel } from '../departments/insurance/understand';
-import { advance, type WalkthroughState } from '../departments/insurance/walkthrough';
-
-/** A description shorter than this in the opening message isn't kept (Tina asks "what happened?"). */
-const MIN_OPENING_DESCRIPTION_WORDS = 8;
+import { openingFacts, understand, type UnderstandModel } from '../departments/insurance/understand';
+import type { WalkthroughState } from '../departments/insurance/walkthrough';
 
 /** A walkthrough untouched this long is abandoned: the next message starts afresh. */
 export const ABANDONED_AFTER_MS = 72 * 3_600_000;
+
+/**
+ * TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER, a TTT number the client can call about the claim. The package says it
+ * where the client may need a person quickly (the burst-geyser list: "You can also call TTT on ..."). Unset or blank:
+ * not said. Which number TTT gives out is TTT's choice, so there is no default.
+ */
+export function claimsContactNumber(raw: string | undefined): string | undefined {
+    const n = raw?.trim();
+    return n ? n : undefined;
+}
+
+/** The package's Conversation for one message: the contact number only when one is set. */
+export const claimsConversation = (phone: string, requestId: string, signUpLink: string, contactNumber?: string): Conversation =>
+    ({ phone, requestId, signUpLink, ...(contactNumber ? { contactNumber } : {}) });
 
 export interface StoredWalkthrough {
     contactId: string;
@@ -34,6 +45,8 @@ export interface StoredWalkthrough {
 export interface ClaimsHostDeps {
     enabled: boolean;
     signUpLink: string;
+    /** TTTFG-4830: CLAIMS_CONTACT_NUMBER (claimsContactNumber). Absent: the client isn't given a TTT number. */
+    contactNumber?: string;
     load(phone: string): Promise<StoredWalkthrough | null>;
     save(phone: string, w: Omit<StoredWalkthrough, 'updatedAt'>): Promise<void>;
     remove(phone: string): Promise<void>;
@@ -56,7 +69,7 @@ const NOT_MINE: ClaimsOutcome = { handled: false };
 /** An inbound from a number that matches no contact. Handled only when it reports a claim. */
 export async function claimFromUnknownNumber(deps: ClaimsHostDeps, phone: string, text: string): Promise<ClaimsOutcome> {
     if (!deps.enabled || !(await claimRoute(deps.intentModel, text))) return NOT_MINE;
-    const conv: Conversation = { phone, requestId: '', signUpLink: deps.signUpLink };
+    const conv = claimsConversation(phone, '', deps.signUpLink, deps.contactNumber);
     // The package's own start with no contact: the unknown-number reply through the gate, and nothing else.
     await claimTurn(deps.ports('', null), conv, null, { kind: 'start' }, new Date());
     return { handled: true, kind: 'unknown-number' };
@@ -75,7 +88,7 @@ export async function claimFromClient(
 
     if (stored) {
         await deps.logIncoming(stored.requestId, text);
-        const conv: Conversation = { phone, requestId: stored.requestId, signUpLink: deps.signUpLink };
+        const conv = claimsConversation(phone, stored.requestId, deps.signUpLink, deps.contactNumber);
         const answer = await understand(deps.understandModel, stored.state, stored.lastSent ?? '', text, now);
         const r = await claimTurn(deps.ports(stored.requestId, contact), conv, stored.state, answer, now);
         return persist(deps, phone, contact.id, stored.requestId, r.state, r.lastSent ?? stored.lastSent, r.claim?.reference, 'continued');
@@ -88,31 +101,14 @@ export async function claimFromClient(
     if (!requestId) return NOT_MINE;
     await deps.logIncoming(requestId, text);
 
-    const conv: Conversation = { phone, requestId, signUpLink: deps.signUpLink };
-    const r = await claimTurn(deps.ports(requestId, contact), conv, null, { kind: 'start' }, now);
-    const state = r.state && (await withOpeningFacts(deps.understandModel, r.state, text, now));
-    return persist(deps, phone, contact.id, requestId, state, r.lastSent ?? null, r.claim?.reference, 'started');
-}
-
-/**
- * Whatever the client already said about the incident in the message that started the claim ("my car was hit at the
- * Claremont robot") is kept, so Tina doesn't ask for it again later. The steps keep their order: the next question is
- * still the policy. An opening line like "my car was hit" is not the client's account of what happened: Tina still
- * asks for it.
- */
-export async function withOpeningFacts(model: UnderstandModel, state: WalkthroughState, text: string, now: Date): Promise<WalkthroughState> {
-    const firstRead = await understand(model, { ...state, step: 'claim-type' }, 'What happened?', text, now);
-    if (firstRead.kind !== 'facts') return state;
-    const facts = { ...firstRead.facts };
-    // TTTFG-4830: a short opening isn't the description, but it still says what kind of claim it is ("my phone was
-    // stolen"): kept as the walkthrough's hint, so Tina asks for the whole story in the right words.
-    let opening: string | undefined;
-    if (facts.description && facts.description.split(/\s+/).length < MIN_OPENING_DESCRIPTION_WORDS) {
-        opening = facts.description;
-        delete facts.description;
-    }
-    const hinted: WalkthroughState = opening ? { ...state, opening } : state;
-    return { ...hinted, facts: advance({ ...hinted, step: 'claim-type' }, { kind: 'facts', facts }).state?.facts ?? state.facts };
+    const conv = claimsConversation(phone, requestId, deps.signUpLink, deps.contactNumber);
+    // What the client already said in the message that started the claim ("my car was hit at the Claremont robot") is
+    // read first and goes into the start, so Tina doesn't ask for it again, and (TTTFG-4830, 28 Oct 2026) the policy
+    // question offers only the policies that fit the claim. A short opening ("my phone was stolen") is kept as a hint,
+    // not as the description (understand.ts openingFacts).
+    const opening = await openingFacts(deps.understandModel, text, now);
+    const r = await claimTurn(deps.ports(requestId, contact), conv, null, { kind: 'start', ...opening }, now);
+    return persist(deps, phone, contact.id, requestId, r.state, r.lastSent ?? null, r.claim?.reference, 'started');
 }
 
 async function persist(
