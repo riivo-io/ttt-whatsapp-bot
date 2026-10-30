@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -14,8 +14,9 @@
 //   owner a Follow-up and answers 'notAvailable', and the conversation ends without a link.
 // - onClaimFormSigned(): the page's callback (step 9). The signed copy goes to the claim folder as its own
 //   riivo_clientdocument ("Claim form (signed)"), and riivo_claim gets Signed, signed on and the audit JSON. The
-//   unsigned form and its row stay as they are. Signed is written last: the page calls back until it gets an answer,
-//   and a callback that failed half way (the CRM timed out) runs again in full rather than being taken as done.
+//   unsigned form and its row stay as they are. The broker gets a ready-to-register Follow-up saying the form is
+//   signed (TTTFG-4830, C3). Signed is written last: the page calls back until it gets an answer, and a callback that
+//   failed half way (the CRM timed out) runs again in full rather than being taken as done.
 //
 // A re-fill (signature-fill.ts onClaimChanged) calls the signing step again: the page supersedes the earlier request,
 // so its link stops working, and the client gets the new one. Once signed, nothing is filled or sent again.
@@ -25,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { PDFDocument, type PDFPage, type PDFRef } from 'pdf-lib';
 import { DEPARTMENT, type AgentActionRow, type Owner } from './claim';
 import type { ClaimForm, SignatureResult } from './contracts';
+import { READY_TO_REGISTER, readyToRegister } from './followon';
 import type { ClaimForFill, SigningStep, UnsignedDocument } from './signature-fill';
 import { claimFormFileName } from './signature-fill';
 import { SIGN_FORM_TEMPLATE } from './templates';
@@ -244,15 +246,24 @@ export interface SignedClaim extends ClaimForFill {
   unsignedHash: string | null;
 }
 
+export interface SignedDocumentRow { claimId: string; contactId: string; fileName: string; fileRef: string; fileHash: string }
+
 export interface ClaimSignedPorts {
   signedClaim(claimId: string): Promise<SignedClaim>;
   /** Saves to the claim folder, replacing a file of the same name (a callback that runs again). */
   saveToClaimFolder(claim: SignedClaim, fileName: string, bytes: Uint8Array): Promise<{ fileRef: string }>;
   /** The claim's "Claim form (signed)" row, if a callback that failed half way already made it. */
   findSignedDocument(claimId: string): Promise<{ id: string } | null>;
-  createSignedDocument(row: { claimId: string; contactId: string; fileName: string; fileRef: string; fileHash: string }): Promise<{ id: string }>;
+  createSignedDocument(row: SignedDocumentRow): Promise<{ id: string }>;
+  /** TTTFG-5200: the claim's row again for a new signature: its file, name and hash, so the pack takes the newest. */
+  updateSignedDocument?(id: string, row: SignedDocumentRow): Promise<void>;
   markSigned(claimId: string, signedOn: string, audit: string): Promise<void>;
   createAgentAction(row: AgentActionRow): Promise<unknown>;
+  /**
+   * TTTFG-5200: the claim pack (claimpack.ts updateClaimPack), once the claim is Signed. It makes one pack per signature,
+   * so the callback run again only finishes a pack the first run didn't. Absent: no pack, as before.
+   */
+  claimPack?(claimId: string): Promise<unknown>;
 }
 
 export type SignedOutcome =
@@ -269,7 +280,11 @@ export type SignedOutcome =
 export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallback): Promise<SignedOutcome> {
   if (cb.caller !== 'claim') return { skipped: 'not-a-claim' };
   const claim = await ports.signedClaim(cb.callerRecordId);
-  if (claim.signatureStatus === 'Signed') return { skipped: 'already-signed' };
+  if (claim.signatureStatus === 'Signed') {
+    // A run that failed after Signed, before its pack: the page retries until it's answered, and this finishes it.
+    await packAfterSigned(ports, claim, cb.audit.signedAt);
+    return { skipped: 'already-signed' };
+  }
   const actionBase: Omit<AgentActionRow, 'kind' | 'detail'> = {
     department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at: cb.audit.signedAt,
   };
@@ -292,12 +307,37 @@ export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallb
   }
   const fileName = claimFormFileName(claim.insurer, claim.claimType, 'signed');
   const { fileRef } = await ports.saveToClaimFolder(claim, fileName, cb.signedPdf);
-  const { id } = (await ports.findSignedDocument(claim.id))
-    ?? await ports.createSignedDocument({ claimId: claim.id, contactId: claim.contactId, fileName, fileRef, fileHash: sha256(cb.signedPdf) });
+  const row: SignedDocumentRow = { claimId: claim.id, contactId: claim.contactId, fileName, fileRef, fileHash: sha256(cb.signedPdf) };
+  const found = await ports.findSignedDocument(claim.id);
+  if (found) await ports.updateSignedDocument?.(found.id, row);
+  const { id } = found ?? await ports.createSignedDocument(row);
   await ports.createAgentAction({
     ...actionBase, kind: 'Created',
     detail: `The client signed the claim form for ${claim.reference} on the signing page (link sent on ${CHANNEL_NAME[cb.audit.channel]} to ${cb.audit.sentTo}).`,
   });
+  // TTTFG-4830 (C3, 29 Oct 2026): the broker hears again once the form is signed ("Form signed: yes"), the claim's cue to
+  // register it. Before Signed, like the rest; the callback that comes again after Signed doesn't send it twice.
+  await ports.createAgentAction({
+    ...actionBase, kind: 'Follow-up', detail: readyToRegister(claim, [], 'Signed'), template: { name: READY_TO_REGISTER.name, version: READY_TO_REGISTER.version },
+  });
   await ports.markSigned(claim.id, cb.audit.signedAt, JSON.stringify(cb.audit));
+  await packAfterSigned(ports, claim, cb.audit.signedAt);
   return { filed: { fileRef, documentId: id } };
+}
+
+/**
+ * TTTFG-5200: the claim pack once the claim is Signed. The signature is filed by then, so the pack never fails the
+ * callback: the page would retry it for days and every retry would fail the same way. The claim owner is told instead.
+ */
+async function packAfterSigned(ports: ClaimSignedPorts, claim: SignedClaim, at: string) {
+  if (!ports.claimPack) return;
+  try {
+    await ports.claimPack(claim.id);
+  } catch (err) {
+    const msg = String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').slice(0, 300);
+    await ports.createAgentAction({
+      kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
+      detail: `The client signed claim ${claim.reference}, but the agent could not check whether its claim pack is due: ${msg}. Please check the claim, and put the pack together by hand if every required item is in.`,
+    });
+  }
 }

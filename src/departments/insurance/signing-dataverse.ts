@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing-dataverse.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing-dataverse.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the signing step's and the callback's ports (signing.ts) against Dataverse, in the style of
 // fill-dataverse.ts. The host passes its Dataverse call (`Dv`) and where claim files go; it adds the signing page
@@ -50,20 +50,18 @@ export interface SigningDataverseOptions {
   dv: Dv;
   /** The client's SharePoint claim folder (the same store the unsigned form went to). */
   files: ClaimFormFiles;
+  /** TTTFG-5200: claimpack.ts updateClaimPack on the host's pack ports. Absent: no pack. */
+  claimPack?: ClaimSignedPorts['claimPack'];
 }
 
-export type DataverseSigningPorts = Pick<ClaimSigningPorts, 'signingClaim' | 'setLinkSent' | 'createAgentAction'> & ClaimSignedPorts;
-
-export function dataverseSigningPorts(o: SigningDataverseOptions): DataverseSigningPorts {
-  const { dv } = o;
-  const claimPorts = dataverseClaimPorts({ dv, send: async () => { throw new Error('the signing ports send nothing through the claim ports'); } });
+/** The active riivo_documenttype row's id by its name, each name read once (a failed read is tried again). */
+export function documentTypes(dv: Dv): (name: string) => Promise<string> {
   const typeIds = new Map<string, Promise<string>>();
-  /** The active riivo_documenttype row of this name. */
-  const documentTypeId = (name: string) => {
+  return (name) => {
     let id = typeIds.get(name);
     if (!id) {
       id = dv<{ value: { riivo_documenttypeid: string }[] }>('GET',
-        `riivo_documenttypes?$select=riivo_documenttypeid&$filter=riivo_documenttype eq '${name}' and statecode eq 0`)
+        `riivo_documenttypes?$select=riivo_documenttypeid&$filter=riivo_documenttype eq '${encodeURIComponent(name.replace(/'/g, "''"))}' and statecode eq 0`)
         .then((r) => {
           if (!r.value[0]) throw new Error(`No active document type "${name}" in this environment`);
           return r.value[0].riivo_documenttypeid;
@@ -73,6 +71,14 @@ export function dataverseSigningPorts(o: SigningDataverseOptions): DataverseSign
     }
     return id;
   };
+}
+
+export type DataverseSigningPorts = Pick<ClaimSigningPorts, 'signingClaim' | 'setLinkSent' | 'createAgentAction'> & ClaimSignedPorts;
+
+export function dataverseSigningPorts(o: SigningDataverseOptions): DataverseSigningPorts {
+  const { dv } = o;
+  const claimPorts = dataverseClaimPorts({ dv, send: async () => { throw new Error('the signing ports send nothing through the claim ports'); } });
+  const documentTypeId = documentTypes(dv);
   const claimRow = (claimId: string) => dv<ClaimRow>('GET', `riivo_claims(${guid(claimId)})`
     + '?$select=riivo_name,riivo_claimtype,riivo_channel,riivo_signaturestatus,riivo_signatureaudit,_riivo_contact_value'
     + '&$expand=riivo_Provider($select=riivo_providername),riivo_Contact($select=firstname,fullname,mobilephone,emailaddress1),'
@@ -140,10 +146,16 @@ export function dataverseSigningPorts(o: SigningDataverseOptions): DataverseSign
       return { id: created.riivo_clientdocumentid };
     },
 
+    // TTTFG-5200: a new signature on a claim that has a signed copy already (the form filled again, its file name with it).
+    updateSignedDocument: async (id, row) => void (await dv('PATCH', `riivo_clientdocuments(${guid(id)})`, {
+      riivo_originalfilename: row.fileName.slice(0, 400), riivo_sharepointlink: row.fileRef || null, riivo_filehash: row.fileHash,
+    })),
+
     markSigned: async (claimId, signedOn, audit) => void (await dv('PATCH', `riivo_claims(${guid(claimId)})`, {
       riivo_signaturestatus: OPT + SIGNATURE_STATUSES.indexOf('Signed'), riivo_signedon: signedOn, riivo_signatureaudit: audit.slice(0, 10000),
     })),
 
     createAgentAction: (row) => claimPorts.createAgentAction(row),
+    claimPack: o.claimPack,
   };
 }

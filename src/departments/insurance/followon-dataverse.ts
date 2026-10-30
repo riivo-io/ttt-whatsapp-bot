@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the follow-on's ports (followon.ts FollowOnPorts) against Dataverse, in the style of TTTFG-5168's
 // dataverse.ts: the host passes its Dataverse call (`Dv`), its WhatsApp send and where files go, so this file runs
@@ -20,7 +20,9 @@ import type { AgentActionRow, Outbound, Owner } from './claim';
 import { fromColumns } from './claimform';
 import { ClaimFormSchema, type ClaimAnswers, type RequestClaimSignature } from './contracts';
 import { dataverseClaimPorts, type Dv } from './dataverse';
-import type { ClaimStatus, ClientFile, FollowOnClaim, FollowOnPorts, SignatureStatus, StoredClaimForm } from './followon';
+import { raiseClaimFlags } from './flags';
+import { dataverseFlagPorts } from './flags-dataverse';
+import { READY_TO_REGISTER, type ClaimStatus, type ClientFile, type FollowOnClaim, type FollowOnPorts, type SignatureStatus, type StoredClaimForm } from './followon';
 import { requestClaimSignature as signatureStub } from './signature';
 import { DISCLOSURE_TEMPLATE } from './templates';
 import { CLAIM_TYPES, type ClaimType } from './walkthrough';
@@ -46,9 +48,12 @@ const guid = (id: string) => {
   return id;
 };
 
-/** Where a client file goes: the client's SharePoint folder, under the claim. Returns the file's link. */
+/**
+ * Where a client file goes: the client's SharePoint folder, under the claim. Returns the file's link, or the link and
+ * the photo's capture date (TTTFG-5263: exif.ts captureDate on the bytes as they arrived; a photo's riivo_issuedate).
+ */
 export interface ClaimFileStore {
-  put(file: ClientFile, to: { contactId: string; contactName: string; claimReference: string }): Promise<string>;
+  put(file: ClientFile, to: { contactId: string; contactName: string; claimReference: string }): Promise<string | { link: string; capturedOn?: string }>;
 }
 
 export interface FollowOnDataverseOptions {
@@ -62,6 +67,8 @@ export interface FollowOnDataverseOptions {
   phrase?: FollowOnPorts['phrase'];
   /** The riivo_InsuranceAdviceTeamId value; read from Dataverse when not given (only TTTFG-5168's ports use it). */
   insuranceTeamId?: string;
+  /** TTTFG-5200: claimpack.ts updateClaimPack on the host's pack ports. Absent: no score. */
+  claimEvidence?: FollowOnPorts['claimEvidence'];
 }
 
 interface ClaimRow {
@@ -158,10 +165,13 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
     const c = await dv<Pick<ClaimRow, 'riivo_name' | '_riivo_contact_value' | 'riivo_Contact'>>('GET',
       `riivo_claims(${guid(to.claimId)})?$select=riivo_name,_riivo_contact_value&$expand=riivo_Contact($select=fullname)`);
     if (!c._riivo_contact_value) throw new Error(`Claim ${c.riivo_name} has no client`);
-    const link = await o.files.put(file, { contactId: c._riivo_contact_value, contactName: c.riivo_Contact?.fullname ?? 'Client', claimReference: c.riivo_name });
+    const stored = await o.files.put(file, { contactId: c._riivo_contact_value, contactName: c.riivo_Contact?.fullname ?? 'Client', claimReference: c.riivo_name });
+    const { link, capturedOn } = typeof stored === 'string' ? { link: stored, capturedOn: undefined } : stored;
     const row = await dv<{ riivo_clientdocumentid: string }>('POST', 'riivo_clientdocuments?$select=riivo_clientdocumentid', {
       riivo_originalfilename: file.fileName.slice(0, 400),
       riivo_sharepointlink: link || null,
+      // TTTFG-5263: the date the photo was taken, for the Photo date before incident flag (flags-dataverse.ts).
+      ...(capturedOn ? { riivo_issuedate: capturedOn } : {}),
       riivo_channel: DOCUMENT_CHANNEL_WHATSAPP,
       riivo_receivedon: new Date().toISOString(),
       // The WhatsApp media id, so the file can be traced to the client's message.
@@ -178,11 +188,16 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
       const r = await dv<ClaimRow>('GET', `riivo_claims(${guid(claimId)})?$select=${CLAIM_SELECT}`
         + '&$expand=riivo_Provider($select=riivo_providerid,riivo_providername),riivo_Contact($select=fullname,address1_composite),'
         + 'owninguser($select=systemuserid,firstname,fullname),owningteam($select=teamid,name)');
+      // Active rows only (TTTFG-5200): a document a person deactivated (a wrong upload) isn't received, for Tina's list
+      // of what's missing and for the claim pack's score alike.
       const docs = await dv<{ value: { riivo_claimitem: string | null }[] }>('GET',
-        `riivo_clientdocuments?$select=riivo_claimitem&$filter=_riivo_claim_value eq ${guid(claimId)} and riivo_claimitem ne null`);
-      // TTTFG-5184: the duty of disclosure's Created agent action (named by the claim until TTTFG-4853's Regarding).
-      const disclosure = await dv<{ value: unknown[] }>('GET', `riivo_agentactions?$select=riivo_agentactionid&$top=1&$filter=`
-        + `riivo_sourcemessageid eq 'riivo_claim:${guid(claimId)}' and startswith(riivo_subject,'${encodeURIComponent(DISCLOSURE_TEMPLATE.name)}')`);
+        `riivo_clientdocuments?$select=riivo_claimitem&$filter=_riivo_claim_value eq ${guid(claimId)} and riivo_claimitem ne null and statecode eq 0`);
+      // TTTFG-5184: the duty of disclosure's Created agent action (named by the claim until TTTFG-4853's Regarding), and
+      // TTTFG-4830 (29 Oct 2026): the ready-to-register Follow-up, so a later conversation knows the end ran.
+      const named = (name: string) => `startswith(riivo_subject,'${encodeURIComponent(name)}')`;
+      const marks = await dv<{ value: { riivo_subject: string | null }[] }>('GET', `riivo_agentactions?$select=riivo_subject&$filter=`
+        + `riivo_sourcemessageid eq 'riivo_claim:${guid(claimId)}' and (${named(DISCLOSURE_TEMPLATE.name)} or ${named(READY_TO_REGISTER.name)})`);
+      const sent = (name: string) => marks.value.some((a) => a.riivo_subject?.startsWith(name));
       const claimType = r.riivo_claimtype == null ? 'Other' : CLAIM_TYPE_VALUES[r.riivo_claimtype] ?? 'Other';
       if (!r.riivo_Provider) throw new Error(`Claim ${r.riivo_name} has no insurer`);
       if (!r.riivo_incidentdate) throw new Error(`Claim ${r.riivo_name} has no incident date`);
@@ -202,7 +217,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
         sapsCaseNumber: r.riivo_sapscasenumber ?? undefined,
         sapsStation: r.riivo_sapsstation ?? undefined,
         sapsRequired: r.riivo_sapsrequired ?? undefined,
-        introSent: disclosure.value.length > 0,
+        introSent: sent(DISCLOSURE_TEMPLATE.name),
         status: CLAIM_STATUSES[(r.riivo_claimstatus ?? OPT) - OPT] ?? 'FNOL logged',
         signatureStatus: SIGNATURE_STATUSES[(r.riivo_signaturestatus ?? OPT) - OPT] ?? 'Not sent',
         claimFormId: r._riivo_claimform_value ?? undefined,
@@ -211,6 +226,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
         owner: ownerOf(r),
         contactAddress: r.riivo_Contact?.address1_composite?.trim() || null,
         evidenceComplete: r.riivo_evidencecomplete === true,
+        readySent: sent(READY_TO_REGISTER.name),
       };
       return claim;
     },
@@ -251,9 +267,12 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
     storeVideo: (file, to) => register(file, to),
 
     requestClaimSignature: o.requestClaimSignature ?? signatureStub,
+    // TTTFG-5263: the risk flags, written with the same agent action writer.
+    claimFlags: (input) => raiseClaimFlags(dataverseFlagPorts({ dv, createAgentAction: (row) => claimPorts.createAgentAction(row) }), input),
     createAgentAction: (row: AgentActionRow) => claimPorts.createAgentAction(row),
     send: o.send,
     phrase: o.phrase,
+    claimEvidence: o.claimEvidence,
   };
 }
 

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -55,12 +55,17 @@ export function sapsStepApplies(claimType: ClaimType | string, form: ClaimForm, 
   );
 }
 
-/** The form's list, with the SAPS items first when the step applies (the form's own wording if it lists them). */
+/**
+ * The form's list as Tina works through it, with the SAPS items first when the step applies (the form's own wording if
+ * it lists them). TTTFG-4830: an item a client is unlikely to have on hand (`onHand: false`) is left out: never asked,
+ * never missing, never chased.
+ */
 export function itemsFor(form: ClaimForm, sapsRequired = false): QuestionItem[] {
-  if (!sapsRequired) return form.questionList;
+  const list = form.questionList.filter((q) => q.onHand !== false);
+  if (!sapsRequired) return list;
   const isSaps = (q: QuestionItem) => q.key === SAPS_CASE_KEY || q.key === SAPS_STATION_KEY;
-  const saps = SAPS_ITEMS.map((s) => form.questionList.find((q) => q.key === s.key) ?? s);
-  return [...saps, ...form.questionList.filter((q) => !isSaps(q))];
+  const saps = SAPS_ITEMS.map((s) => list.find((q) => q.key === s.key) ?? s);
+  return [...saps, ...list.filter((q) => !isSaps(q))];
 }
 
 type Value = string | number | boolean | null | undefined;
@@ -97,9 +102,9 @@ export function holds(c: Condition, answers: ClaimAnswers, facts?: ClaimFacts): 
   return !!k && !k.brokerToConfirm && (c.oneOf ?? [c.equals!]).some((v) => same(k.value, v));
 }
 
-/** `onlyIf`: ask only when the condition holds. */
+/** `onlyIf` (and TTTFG-4830's `andIf`): ask only when the conditions hold. */
 export function applies(item: QuestionItem, answers: ClaimAnswers, facts?: ClaimFacts): boolean {
-  return !item.onlyIf || holds(item.onlyIf, answers, facts);
+  return (!item.onlyIf || holds(item.onlyIf, answers, facts)) && (!item.andIf || holds(item.andIf, answers, facts));
 }
 
 /**
@@ -136,7 +141,7 @@ export function formItems(form: ClaimForm, answers: ClaimAnswers, facts?: ClaimF
     for (let n = 1; n <= g.max; n++) {
       for (const q of members) {
         const onlyIf = q.onlyIf && own.has(q.onlyIf.key) ? { ...q.onlyIf, key: `${q.onlyIf.key}.${n}` } : q.onlyIf;
-        out.push({ ...q, key: `${q.key}.${n}`, onlyIf });
+        out.push({ ...worded(q, answers, facts), key: `${q.key}.${n}`, onlyIf });
       }
       if (n === g.max) break;
       const more = moreKey(g.key, n);
@@ -152,28 +157,49 @@ export function formItems(form: ClaimForm, answers: ClaimAnswers, facts?: ClaimF
   return out;
 }
 
-/**
- * TTTFG-4830: how many files make an evidence item: its `count`, else from the prompt. "The front and back" is 2, "Two
- * quotes" is 2; a plural ("Photos of the damage", "Any photos", "Anything that shows", "Quotes for") is any number; a
- * single thing ("A photo of the driver's ID", "The settlement letter", "If damaged: a report") is 1.
- */
-export function fileCount(item: QuestionItem): number | 'any' {
-  if (item.count !== undefined) return item.count;
-  const p = item.prompt.replace(/^if [^:]*:\s*/i, '');
-  if (/\bfront and back\b/i.test(p)) return 2;
-  const n = /^(two|three|2|3)\s+\w+s\b/i.exec(p);
-  if (n) return /^(two|2)$/i.test(n[1]) ? 2 : 3;
-  if (/^(any|anything|photos|pictures|quotes|receipts|invoices|copies|documents)\b/i.test(p)) return 'any';
-  return 1;
-}
-
 /** TTTFG-4830: the files received for an evidence item. */
 export const filesFor = (item: QuestionItem, evidence: ReceivedEvidence) => evidence.filter((e) => e.key === item.key).length;
 
-/** TTTFG-4830: an evidence item is in once it has its number of files (one for "any number": Tina confirms the rest). */
+/**
+ * TTTFG-4830: an evidence item is in once a file came for it. 28 Oct 2026 (TTT's feedback): what the client sends is
+ * what they have; Tina no longer waits for "the other side" or asks whether there are more (fileCount is no longer used
+ * for that), and the broker follows up on anything missing.
+ */
 export function evidenceIn(item: QuestionItem, evidence: ReceivedEvidence): boolean {
-  const need = fileCount(item);
-  return filesFor(item, evidence) >= (need === 'any' ? 1 : need);
+  return filesFor(item, evidence) >= 1;
+}
+
+/**
+ * TTTFG-4830 (28 Oct 2026): the totals the client's answers already give (`sumOf`), for questions the client hasn't
+ * answered: once the group is done (the client said there's no other one, or the form has no more rows) and every
+ * entry has its amount. A missing amount gives no total, so Tina asks for it as before.
+ *
+ * A total worked out before (source `computed`) is worked out again, so a corrected amount or an item taken back
+ * changes it; it is listed only when it changed. When the amounts no longer give one, it is listed with value null: the
+ * caller drops it, and Tina asks the total. A total the client gave stays as it is.
+ */
+export function computedTotals(form: ClaimForm, answers: ClaimAnswers, facts?: ClaimFacts, sapsRequired = false): Array<{ key: string; value: number | null }> {
+  const out: Array<{ key: string; value: number | null }> = [];
+  for (const item of itemsFor(form, sapsRequired)) {
+    const computed = answers[item.key]?.source === 'computed' ? answers[item.key] : undefined;
+    if (!item.sumOf || (!computed && known(item.key, answers, facts)) || !applies(item, answers, facts)) continue;
+    const of = form.questionList.find((q) => q.key === item.sumOf);
+    const g = of?.group ? (form.questionGroups ?? []).find((x) => x.key === of.group) : undefined;
+    if (!g) continue;
+    let sum = 0;
+    let done = false;
+    for (let n = 1; n <= g.max; n++) {
+      const a = answers[`${item.sumOf}.${n}`];
+      if (!a || a.status !== 'answered' || typeof a.value !== 'number') break;
+      sum += a.value;
+      const more = answers[moreKey(g.key, n)];
+      if (n === g.max || (more?.status === 'answered' && more.value === false)) { done = true; break; }
+      if (!more || more.status !== 'answered' || more.value !== true) break;
+    }
+    if (done && computed?.value !== sum) out.push({ key: item.key, value: sum });
+    else if (!done && computed) out.push({ key: item.key, value: null });
+  }
+  return out;
 }
 
 function done(item: QuestionItem, answers: ClaimAnswers, evidence: ReceivedEvidence, facts?: ClaimFacts): boolean {
@@ -217,8 +243,9 @@ const yesNoCondition = (c: Condition | undefined): c is Condition & { equals: bo
  * nextItem(). When it is a question with a `section`, the open questions after it in the same section join it, in the
  * list's order, up to BATCH_MAX:
  * - a question that applies only after a yes or a no to a question in the batch ("If no to 4: whose name is the car
- *   registered in?") goes straight after that question. A question brings these only when all of them fit, or, when
- *   they could never fit in one message, as many as fit. The rest are asked once the answer is in;
+ *   registered in?"), and whose `andIf` (if any) already holds, goes straight after that question. A question brings
+ *   these only when all of them fit, or, when they could never fit in one message, as many as fit. The rest are asked
+ *   once the answer is in;
  * - a question that hangs on a choice ("If it was a vehicle: …") waits for the answer, so a client is never shown a
  *   branch that may not be theirs;
  * - the batch ends at an open question of another section or at an evidence item. A question the client said "not yet"
@@ -238,6 +265,8 @@ export function nextBatch(form: ClaimForm, answers: ClaimAnswers, evidence: Rece
     const out: QuestionItem[] = [];
     for (const i of list.slice(list.indexOf(parent) + 1)) {
       if (i.section !== first.section || !isOpen(i) || !yesNoCondition(i.onlyIf) || !keys.has(i.onlyIf.key)) continue;
+      // Its other condition (`andIf`) must hold already: on a theft the burglar's name is never "If yes to 1".
+      if (i.andIf && !holds(i.andIf, answers, o.facts)) continue;
       out.push(i);
       keys.add(i.key);
     }

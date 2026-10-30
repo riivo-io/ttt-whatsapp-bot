@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/gate.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/gate.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168 AC 9: the claim-outcome rule of the policy gate (SPEC-04 "Policy gate", SPEC-05 "What Tina may and may
 // not do"). Tina never says a claim is accepted, approved, paid or settled: that is the insurer's decision and the

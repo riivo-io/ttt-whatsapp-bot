@@ -26,7 +26,7 @@ import path from 'path';
 import readline from 'readline';
 import { sendText, type Owner } from '../departments/insurance/claim';
 import { dataverseClaimPorts, type Dv } from '../departments/insurance/dataverse';
-import { claimFromClient, claimFromUnknownNumber, type ClaimsHostDeps, type StoredWalkthrough } from '../domain/claimsHost';
+import { claimFromClient, claimFromUnknownNumber, claimsContactNumber, type ClaimsHostDeps, type StoredWalkthrough } from '../domain/claimsHost';
 
 const DEV = 'https://tttdevelopment.crm4.dynamics.com';
 const INSURANCE_APP = '9eb7f4ec-38b3-f011-bbd2-7ced8d7556e1';
@@ -109,6 +109,7 @@ function deps(): ClaimsHostDeps {
     return {
         enabled: true,
         signUpLink: 'https://www.ttt-tax.co.za/client-onboarding',
+        contactNumber: claimsContactNumber(process.env.CLAIMS_CONTACT_NUMBER), // as on Tina
         load: async (p) => (fs.existsSync(file(p)) ? (JSON.parse(fs.readFileSync(file(p), 'utf8')) as StoredWalkthrough) : null),
         save: async (p, w) => { fs.mkdirSync(STORE, { recursive: true }); fs.writeFileSync(file(p), JSON.stringify({ ...w, updatedAt: new Date().toISOString() }, null, 1)); },
         remove: async (p) => { fs.rmSync(file(p), { force: true }); },

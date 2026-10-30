@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -67,8 +67,16 @@ export const QuestionItemSchema = z.object({
   /** Ask only when an earlier answer, or a CRM value, matches. */
   onlyIf: ConditionSchema.optional(),
   /**
+   * TTTFG-4830 (28 Oct 2026): a second condition that must hold as well as `onlyIf` (Hybrid: the name of the person who
+   * caused the loss only when they did AND something was damaged; a burglar's name is never asked). Not for a question
+   * in a group, and never the yes or no that puts a question in a batch ("If yes to 2"): that is `onlyIf`.
+   */
+  andIf: ConditionSchema.optional(),
+  /**
    * TTTFG-4830: the first variant whose `when` holds replaces `prompt` (and `name`) (progress.ts formItems). The prompt
-   * itself is the wording while it isn't known yet. Not for a question in a group.
+   * itself is the wording while it isn't known yet. A question in a group may have them too (28 Oct 2026: "replace"
+   * for a stolen item, "repair or replace" for a damaged one). A `when` never tests a question in a group, its own or
+   * another (it would read no entry): an earlier ungrouped question or a CRM value.
    */
   variants: z.array(ItemVariantSchema).optional(),
   /** The repeating group this question belongs to (see QuestionGroup). */
@@ -80,8 +88,8 @@ export const QuestionItemSchema = z.object({
    */
   section: z.string().min(1).optional(),
   /**
-   * TTTFG-4830: an evidence item's number of files: 2 for the front and back of a licence, 'any' for photos of the
-   * scene (Tina asks whether that's all of them). Absent: worked out from the prompt (progress.ts fileCount).
+   * TTTFG-4830: an evidence item's number of files (2 for the front and back of a licence, 'any' for photos of the
+   * scene). Kept so rows written with it still parse; since 28 Oct 2026 any file counts (progress.ts evidenceIn).
    */
   count: z.union([z.number().int().min(1).max(10), z.literal('any')]).optional(),
   /**
@@ -92,6 +100,19 @@ export const QuestionItemSchema = z.object({
    * shows it. A required question without `chase` (who did it, how fast the car was going) goes to the broker as before.
    */
   chase: z.boolean().optional(),
+  /**
+   * TTTFG-4830 (28 Oct 2026, TTT's feedback): false when a client is unlikely to have it on hand at claim time (a quote,
+   * an invoice, a repairer's report, the registration papers, a settlement letter, the VIN or an account number). Tina
+   * never asks it and never chases it, so the claim form goes out sooner; the broker gets it later. The field map keeps
+   * the answer's box, so a value that arrives another way still fills it. Absent: asked as usual.
+   */
+  onHand: z.boolean().optional(),
+  /**
+   * TTTFG-4830 (28 Oct 2026): the total of a grouped number question (its key): "about how much for everything?" after
+   * the client gave each item's amount. Worked out once the group is done (followon.ts) and never asked then, and
+   * worked out again when an amount or the items change; asked as usual when an amount is missing.
+   */
+  sumOf: z.string().min(1).optional(),
 });
 export type QuestionItem = z.infer<typeof QuestionItemSchema>;
 
@@ -208,9 +229,10 @@ export interface AnswerRecord {
   /**
    * TTTFG-4830: where the value came from when it wasn't the reply to this question: `report`, what the client said
    * while reporting the claim (before the form's questions); `same-message`, a reply to another question that answered
-   * this one too; `correction`, the client changed their earlier answer. Absent: the client's reply to this question.
+   * this one too; `correction`, the client changed their earlier answer; `computed` (28 Oct 2026), worked out from
+   * other answers (`sumOf`). Absent: the client's reply to this question.
    */
-  source?: 'report' | 'same-message' | 'correction';
+  source?: 'report' | 'same-message' | 'correction' | 'computed';
   /**
    * TTTFG-4830: the value doesn't look right (formats.ts: a phone number with too many digits, an email without "@",
    * an ID number that fails its check digit). Tina pointed it out and the client sent it again still that way, so it's

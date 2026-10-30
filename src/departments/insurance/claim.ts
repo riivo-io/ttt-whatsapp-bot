@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -9,7 +9,8 @@
 // into Tina (epic TTTFG-4830).
 import { claimGate } from './gate';
 import {
-  advance, askedKey, complete, isTheft, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION, STOPPED_TEXT, VOICE_OR_TEXT,
+  advance, askedKey, atNight, complete, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
+  STOPPED_TEXT, VOICE_OR_TEXT,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
 } from './walkthrough';
 
@@ -18,8 +19,14 @@ export const DEPARTMENT = 'Insurance and Advice';
 /** The riivo_policy owner as Dataverse has it. */
 export type PolicyOwner = { kind: 'user'; id: string; firstName: string; enabled: boolean } | { kind: 'team'; id: string; name: string };
 
-/** Who owns the claim and its follow-ups. `name` is what the client reads: a first name or the team name. */
+/**
+ * Who owns the claim and its follow-ups. `name` is for the CRM and the broker's own texts: TTT asked (28 Oct 2026) that
+ * Tina never names the person to the client (CLIENT_BROKER).
+ */
 export interface Owner { kind: 'user' | 'team'; id: string; name: string }
+
+/** TTTFG-4830 (28 Oct 2026, TTT's feedback): who Tina says looks after the claim. Never the broker's own name. */
+export const CLIENT_BROKER = 'your broker';
 
 /** TTTFG-5168 step 10: the policy's broker. A team, a disabled user or no owner gives the Insurance and Advice team. */
 export function claimOwner(policyOwner: PolicyOwner | null, team: { id: string; name: string }): Owner {
@@ -107,6 +114,11 @@ export interface Conversation {
   requestId: string;
   /** The Insurance and Advice online sign-up link, for the unknown-number reply. */
   signUpLink: string;
+  /**
+   * TTTFG-4830 (28 Oct 2026): a TTT number the client can call about the claim (the host's setting), said where the
+   * client may need a person quickly (a burst geyser). Absent: not said.
+   */
+  contactNumber?: string;
 }
 
 /**
@@ -118,11 +130,13 @@ export interface Conversation {
 export const FNOL_TEMPLATE = {
   name: 'Claim - FNOL logged',
   // draft-2 (TTTFG-4830, 28 Oct 2026): shorter, with the reference in bold. The next question follows in the same message.
-  version: 'draft-2',
+  // draft-3 (28 Oct 2026, TTT's feedback): no broker's name, and the AI disclosure in the words TTT asked for. TTT is the
+  // broker, not the insurer, so it never "makes every decision" about the claim.
+  version: 'draft-3',
   approved: false,
-  render: (v: { firstName: string; reference: string; ownerName: string }) =>
-    `Thanks ${v.firstName}, your claim is logged. Your claim reference is *${v.reference}*, and ${v.ownerName} will check it.\n\n` +
-    'TTT uses AI-assisted tools to help handle claims. A person at TTT makes every decision about your claim.',
+  render: (v: { firstName: string; reference: string }) =>
+    `Thanks ${v.firstName}, your claim is logged. Your claim reference is *${v.reference}*.\n\n` +
+    'TTT uses AI tools to enhance your experience. Your claim will be reviewed by a broker at TTT.',
 } as const;
 
 /** SPEC-05 "Unknown numbers": the one reply an unknown number gets. */
@@ -142,10 +156,13 @@ const FACT_QUESTIONS: Record<Fact, string> = {
   saps: 'Were the police (SAPS) involved?',
   injuries: 'Was anyone injured?',
   injuryDetails: 'I am sorry to hear that. Who was hurt, and what happened to them?',
+  // TTTFG-4830 (28 Oct 2026, TTT's feedback): asked first on a burst geyser, with taps.
+  contractor: "Would you like your insurer to send a plumber, or would you rather use your own? It's usually best to let the insurer send one.",
+  timeUnknown: 'At roughly what time did it happen?',
 };
 
-/** TTTFG-4830: the kinds of claim Tina words her questions for. */
-export type ClaimKind = 'motor' | 'windscreen' | 'motor-theft' | 'hijacking' | 'home' | 'home-theft' | 'lost-item' | 'stolen-item' | 'other';
+/** TTTFG-4830: the kinds of claim Tina words her questions for. 'geyser' (28 Oct 2026): a burst geyser or pipe. */
+export type ClaimKind = 'motor' | 'windscreen' | 'motor-theft' | 'hijacking' | 'home' | 'geyser' | 'home-theft' | 'lost-item' | 'stolen-item' | 'other';
 
 export function claimKind(f: Facts, opening?: string): ClaimKind {
   switch (f.claimType) {
@@ -153,13 +170,14 @@ export function claimKind(f: Facts, opening?: string): ClaimKind {
     case 'Windscreen': return 'windscreen';
     case 'Motor theft': return 'motor-theft';
     case 'Hijacking': return 'hijacking';
-    case 'Property loss or damage': return isTheft(f, opening) ? 'home-theft' : 'home';
+    case 'Property loss or damage': return isTheft(f, opening) ? 'home-theft' : isGeyser(f, opening) ? 'geyser' : 'home';
     case 'Portable possessions': return isTheft(f, opening) ? 'stolen-item' : 'lost-item';
     default: return isTheft(f, opening) ? 'home-theft' : 'other';
   }
 }
 
 const THEFT_DETAILS = 'What do you know about who did it? For example a name, what they looked like, or anyone who saw it. Say "nothing" if you don\'t know.';
+const SOMEONE_ELSE_AT_HOME = 'Was anyone else involved, or did someone else cause it? For example a contractor or a neighbour.';
 const REPORTED = 'Have you reported it to the police (SAPS)?';
 const WHEN_THEFT = 'On what date and at roughly what time did it happen? If you only noticed later, when did you notice?';
 
@@ -197,7 +215,12 @@ const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
   home: {
     description: 'Please tell me in your own words what happened and what was damaged.',
     place: 'What is the address of the property?',
-    thirdParties: 'Was anyone else involved, or did someone else cause it? For example a contractor or a neighbour.',
+    thirdParties: SOMEONE_ELSE_AT_HOME,
+  },
+  geyser: {
+    description: 'Please tell me in your own words what happened and what was damaged, for example "the geyser burst and flooded the bathroom".',
+    place: 'What is the address of the property?',
+    thirdParties: SOMEONE_ELSE_AT_HOME,
   },
   'home-theft': {
     description: 'Please tell me in your own words what happened: how they got in and what was taken.',
@@ -235,7 +258,11 @@ export const SAFETY_TEXT = '*If anyone is hurt or in danger, call 10111 now*, an
  * DRAFT WORDING (decision D11): the Insurance and Advice department approves it before go-live.
  */
 const EASIER = 'They make your claim easier:';
-export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLine?: true }> = {
+/**
+ * `note` (TTTFG-4830, 28 Oct 2026): a line after the list. `assistLine`: the insurer's assist number, when it's on file,
+ * for a plumber the client needs now (a burst geyser).
+ */
+export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLine?: true; note?: string; assistLine?: true }> = {
   motor: {
     lead: `While you're still at the scene, try to get these. ${EASIER}`, towLine: true,
     items: [
@@ -253,6 +280,8 @@ export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLin
       'If a truck threw something up: its *registration* or company name',
       '*Where* it happened: the road, and the nearest exit or landmark',
     ],
+    // TTT's feedback (28 Oct 2026): the insurer appoints the glass repairer, so the client needs no quote.
+    note: "You don't need to get a quote: your insurer will arrange the repair.",
   },
   'motor-theft': {
     lead: `As soon as you can, try to do these. ${EASIER}`,
@@ -278,10 +307,17 @@ export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLin
   home: {
     lead: `If you're at the property, try to do these. ${EASIER}`,
     items: [
-      "*Stop more damage* if it's safe, for example turn off the water or the geyser",
+      "*Stop more damage* if it's safe, for example turn off the water or the electricity",
       'Take *photos* of the damage before you clean up or fix anything',
       '*Keep the damaged items*: the assessor may want to see them',
-      "The contractor's *name and number*, and their report or quote",
+    ],
+  },
+  geyser: {
+    lead: `If you're at the property, try to do these. ${EASIER}`, assistLine: true,
+    items: [
+      "*Turn off the water* at the mains, and *switch off the geyser* at the electrical box, if it's safe",
+      'Take *photos* of the damage before you clean up',
+      '*Keep the damaged items*: the assessor may want to see them',
     ],
   },
   'home-theft': {
@@ -330,12 +366,27 @@ export const READY_TEXT = "Next, I'll ask about what happened. Your insurer need
  * TTTFG-4830: the on-scene checklist for this claim, then READY_TEXT. A car that may need a tow gets the insurer's
  * assist line for it, when it's on file.
  */
-export function onSceneText(state: WalkthroughState): string {
+export function onSceneText(state: WalkthroughState, contactNumber?: string): string {
   const c = ON_SCENE[claimKind(state.facts, state.opening)];
   const policy = state.policies.find((p) => p.id === state.policyId);
   const number = policy?.assistNumber?.trim();
   const tow = c.towLine && number ? `Need a tow? Call ${policy!.insurer} on ${number}. Don't use a tow truck you didn't call.` : undefined;
-  return [c.lead, c.items.map((item, i) => `${i + 1}. ${item}`).join('\n'), ...(tow ? [tow] : []), READY_TEXT].join('\n\n');
+  const assist = c.assistLine ? assistLine(state, contactNumber) : undefined;
+  return [c.lead, c.items.map((item, i) => `${i + 1}. ${item}`).join('\n'), ...(tow ? [tow] : []), ...(assist ? [assist] : []), ...(c.note ? [c.note] : []), READY_TEXT]
+    .join('\n\n');
+}
+
+/**
+ * TTTFG-4830 (28 Oct 2026, TTT's feedback): a burst geyser may need a plumber before the claim is through: the insurer's
+ * assist line and TTT's number, when they're on file. In the on-scene list, or with the plumber question when the geyser
+ * came out only after it (Say 'ask' `assist`).
+ */
+function assistLine(state: WalkthroughState, contactNumber?: string): string | undefined {
+  const policy = state.policies.find((p) => p.id === state.policyId);
+  const number = policy?.assistNumber?.trim();
+  if (!number && !contactNumber) return undefined;
+  return [number ? `Need a plumber urgently? Call ${policy!.insurer}'s assist line on ${number}.` : '', contactNumber ? `You can also call TTT on ${contactNumber}.` : '']
+    .filter(Boolean).join(' ');
 }
 
 const EXAMPLE_TIME = 'Your best estimate is fine, for example "about 11pm" or "around 6 in the morning".';
@@ -388,6 +439,12 @@ function askedAgain(fact: Fact, f: Facts, n: number, opening?: string): string {
       'What do you know about them? A few words is fine, or "nothing".',
     ],
     injuryDetails: ['Who was hurt, and how? A short description is fine.', 'Who was hurt? For example "my passenger, a cut on the arm".', 'In a few words, who was hurt and how badly?'],
+    contractor: [
+      'Should your insurer send a plumber, or will you use your own? Please tap one.',
+      'Would you like your insurer to send a plumber? Please tap one.',
+      'Insurer\'s plumber, or your own? Please tap one.',
+    ],
+    timeUnknown: [base, base, base],
   };
   return ways[fact][(n - 1) % 3];
 }
@@ -399,9 +456,25 @@ const thirdPartyDetailsIfYes = (state: WalkthroughState) => {
   return lowerFirst(q);
 };
 
+/** "Monday 27 October", for a YYYY-MM-DD date. */
+const dayWords = (date: string) =>
+  new Date(`${date}T12:00:00+02:00`).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', weekday: 'long', day: 'numeric', month: 'long' });
+
 /** One question, in words for this claim; asked before (`n` > 0): in other words. */
 function factQuestion(fact: Fact, f: Facts, n = 0, opening?: string): string {
-  return n > 0 ? askedAgain(fact, f, n, opening) : BY_KIND[claimKind(f, opening)][fact] ?? FACT_QUESTIONS[fact];
+  if (n > 0) return askedAgain(fact, f, n, opening);
+  // TTTFG-4830 (28 Oct 2026, TTT's feedback: "no date asked"): a date Tina worked out from "this afternoon" is said, so
+  // the client can see it and put it right (clients often report it a day later). "Last night" is the night of that
+  // date, so "around 2am" is read as the early hours after it (understand.ts).
+  if (fact === 'incidentTime' && f.incidentDate) {
+    return `At roughly what time did it happen on ${atNight(`${f.description ?? ''} ${opening ?? ''}`) ? 'the night of ' : ''}${dayWords(f.incidentDate)}?`;
+  }
+  return BY_KIND[claimKind(f, opening)][fact] ?? FACT_QUESTIONS[fact];
+}
+
+/** TTTFG-4830 (28 Oct 2026): how the summary and Tina's lines name a claim type. TTT calls a phone claim "All risk". */
+export function claimLabel(t: ClaimType | undefined): string {
+  return t === 'Portable possessions' ? 'All risk (an item you carry)' : t ?? '';
 }
 
 const yesNo = (b: boolean | undefined) => (b ? 'Yes' : 'No');
@@ -475,15 +548,21 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
 export function summary(state: WalkthroughState): string {
   const f = state.facts;
   const p = state.policies.find((x) => x.id === state.policyId)!;
+  // TTTFG-4830 (28 Oct 2026): what Tina didn't ask (it never fits this kind of claim) isn't read back either, unless the
+  // client said otherwise themselves (the glass cut them).
+  const skipped = partiesNotAsked(f, state.opening);
+  const theft = isTheft(f, state.opening);
+  const plumber = { insurer: 'your insurer to send one', own: 'your own', 'not-known': 'not decided yet' } as const;
   const lines = [
     `*Policy:* ${p.insurer} ${p.product}`,
-    `*Claim:* ${f.claimType}`,
-    `*When:* ${f.incidentAt ? when(f.incidentAt) : ''}`,
+    `*Claim:* ${claimLabel(f.claimType)}`,
+    `*When:* ${f.incidentAt ? `${f.timeUnknown ? when(f.incidentAt).replace(/,? (at )?\d{2}:\d{2}$/, '') : when(f.incidentAt)}${f.timeUnknown ? ' (time not known)' : ''}` : ''}`,
     `*Where:* ${f.place}`,
     `*What happened:* ${f.description}`,
-    isTheft(f, state.opening) ? `*Who did it or saw it:* ${f.thirdPartyDetails ?? 'not known'}` : `*Anyone else involved:* ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
-    isTheft(f, state.opening) ? `*Reported to the police (SAPS):* ${yesNo(f.saps)}` : `*Police (SAPS) involved:* ${yesNo(f.saps)}`,
-    `*Anyone injured:* ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`,
+    ...(f.contractor ? [`*Plumber:* ${plumber[f.contractor]}`] : []),
+    theft ? `*Who did it or saw it:* ${f.thirdPartyDetails ?? 'not known'}` : `*Anyone else involved:* ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
+    ...(skipped.saps === false && !f.saps ? [] : [theft ? `*Reported to the police (SAPS):* ${yesNo(f.saps)}` : `*Police (SAPS) involved:* ${yesNo(f.saps)}`]),
+    ...(skipped.injuries === false && !f.injuries ? [] : [`*Anyone injured:* ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`]),
   ];
   return ["Here's what I have:", lines.join('\n'), `Is it all correct? ${SUMMARY_ASK}`].join('\n\n');
 }
@@ -494,11 +573,18 @@ export function summary(state: WalkthroughState): string {
  */
 const SUMMARY_ASK = "Tap *Yes, that's correct*, or type what needs to change.";
 
+/** TTTFG-4830: the client started on another incident in the middle of this one. */
+export const ONE_AT_A_TIME_TEXT = "Let's finish this claim first. When we're done, send me the details of the other one and I'll start a new claim for it.";
+/** TTTFG-4830: a question asked twice without an answer. */
+export const NOT_KNOWN_TEXT = 'No problem, your broker will check that with you.';
+
 /** TTTFG-4830 (28 Oct 2026): the taps for each closed question of the walkthrough. */
 export const YES_NO: Choice[] = [{ title: 'Yes' }, { title: 'No' }];
 export const READY: Choice[] = [{ title: 'Ready' }];
 /** TTTFG-4830 (QC): "Would you like me to stop?" (understand.ts reads these taps without a model). */
 export const STOP_CHOICES: Choice[] = [{ title: 'Stop here' }, { title: 'Carry on' }];
+/** TTTFG-4830 (28 Oct 2026): the taps for a burst geyser's plumber question. */
+export const CONTRACTOR_CHOICES: Choice[] = [{ title: "Insurer's plumber" }, { title: 'My own plumber' }];
 const SUMMARY_CHOICES: Choice[] = [{ title: "Yes, that's correct" }];
 /** The kinds of claim in the client's words; Claude reads the tap as one of CLAIM_TYPES. */
 export const CLAIM_TYPE_CHOICES: Choice[] = [
@@ -533,6 +619,7 @@ export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] |
     case 'summary':
       return SUMMARY_CHOICES;
     default:
+      if (say.missing.length === 1 && say.missing[0] === 'contractor') return CONTRACTOR_CHOICES;
       return say.missing.length === 1 && ['thirdParties', 'saps', 'injuries'].includes(say.missing[0]) ? YES_NO : undefined;
   }
 }
@@ -545,8 +632,8 @@ const FOLLOW_UP_DETAIL: Record<Exclude<FollowUpReason, 'client-question'>, strin
 /** TTTFG-4830: the Follow-up for a client's question Tina leaves to a person. */
 export const clientQuestionDetail = (question: string) =>
   `The client asked on WhatsApp: "${question}". Tina didn't answer it (it's about cover, payment or advice, or she couldn't). Please answer them.`;
-/** TTTFG-4830: what Tina says when she leaves the client's question to a person. `who`: the broker's name, when known. */
-export const toBrokerText = (who = 'your broker') => `That's a good question for ${who}. I've passed it on, and they'll get back to you.`;
+/** TTTFG-4830: what Tina says when she leaves the client's question to a person. */
+export const toBrokerText = () => `That's a good question for ${CLIENT_BROKER}. I've passed it on, and they'll get back to you.`;
 
 export interface TurnResult {
   state: WalkthroughState | null;
@@ -557,7 +644,7 @@ export interface TurnResult {
 
 /** One message from the client: { kind: 'start' } when Anchor first routes a claim here, else what Claude understood. */
 export async function claimTurn(
-  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null, input: { kind: 'start'; facts?: Facts } | Answer, now: Date,
+  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null, input: { kind: 'start'; facts?: Facts; opening?: string } | Answer, now: Date,
 ): Promise<TurnResult> {
   const at = now.toISOString();
   let turn;
@@ -565,7 +652,7 @@ export async function claimTurn(
   if (input.kind === 'start' || !state) {
     const contact = await ports.contactByWhatsApp(conv.phone);
     contactId = contact?.id;
-    turn = start(contact, contact ? await ports.activePolicies(contact.id) : [], input.kind === 'start' ? input.facts : undefined);
+    turn = start(contact, contact ? await ports.activePolicies(contact.id) : [], input.kind === 'start' ? input.facts : undefined, input.kind === 'start' ? input.opening : undefined);
   } else {
     turn = advance(state, input as Answer);
   }
@@ -619,14 +706,26 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
     case 'to-broker':
       return toBrokerText();
     case 'on-scene':
-      return onSceneText(state!);
+      return onSceneText(state!, conv.contactNumber);
+    case 'one-at-a-time':
+      return ONE_AT_A_TIME_TEXT;
+    case 'not-known':
+      return NOT_KNOWN_TEXT;
+    case 'policy-mismatch': {
+      const p = state?.allPolicies?.find((x) => x.id === say.policyId) ?? state?.policies.find((x) => x.id === say.policyId);
+      const what = ['Property loss or damage', 'Portable possessions'].includes(state?.facts.claimType ?? '') ? 'your home or your belongings' : 'your car';
+      return `You picked your ${p ? `${p.insurer} ${p.product} policy` : 'policy'}, but this sounds like a claim about ${what}.`;
+    }
     case 'passed-on': {
       const why = say.reason === 'no-active-policy' ? "I can't see an active policy for you on our system" : "I can only open a claim on a policy we have on file";
       const by = passedOn?.dueOn ? ` by ${new Date(passedOn.dueOn).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', weekday: 'long', day: 'numeric', month: 'long' })}` : '';
-      return `${why}, so I've passed this to ${passedOn?.owner.name ?? 'our insurance team'}, who will contact you${by}.`;
+      return `${why}, so I've passed this to our insurance team, who will contact you${by}.`;
     }
-    case 'ask':
-      return question(say.step, say.missing, state!, say.correcting, say.tries);
+    case 'ask': {
+      const q = question(say.step, say.missing, state!, say.correcting, say.tries);
+      const assist = say.assist ? assistLine(state!, conv.contactNumber) : undefined;
+      return assist ? `${assist}\n\n${q}` : q;
+    }
   }
 }
 
@@ -654,9 +753,13 @@ async function openClaim(ports: ClaimPorts, conv: Conversation, state: Walkthrou
   const policy = state.policies.find((p) => p.id === state.policyId)!;
   const owner = await ownerFor(ports, policy.id);
   const f = state.facts as Required<Pick<Facts, 'claimType' | 'incidentAt' | 'place' | 'description' | 'thirdParties' | 'saps' | 'injuries'>> & Facts;
+  // TTTFG-4830 (28 Oct 2026): what the claim's columns can't hold goes on the description, for the broker.
+  const notes = [f.timeUnknown ? 'Time not known.' : '', f.contractor === 'insurer' ? 'The client would like the insurer to send a plumber.' : '',
+    f.contractor === 'own' ? 'The client will use their own plumber.' : '',
+    f.contractor === 'not-known' ? "The client didn't say whether the insurer should send a plumber." : ''].filter(Boolean).join(' ');
   const { id, reference } = await ports.createClaim({
     contactId: state.contactId, policyId: policy.id, providerId: policy.providerId,
-    claimType: f.claimType, reportedOn: at, incidentAt: f.incidentAt, place: f.place, description: f.description,
+    claimType: f.claimType, reportedOn: at, incidentAt: f.incidentAt, place: f.place, description: notes ? `${f.description} (${notes})` : f.description,
     thirdParties: f.thirdParties, thirdPartyDetails: f.thirdPartyDetails, saps: f.saps, injuries: f.injuries, injuryDetails: f.injuryDetails,
     channel: 'WhatsApp', status: 'FNOL logged', lastClientMessageOn: at, owner,
   });
@@ -664,8 +767,15 @@ async function openClaim(ports: ClaimPorts, conv: Conversation, state: Walkthrou
     kind: 'Created', department: DEPARTMENT, owner, regarding: { table: 'riivo_claim', id }, contactId: state.contactId, at,
     detail: `Claim ${reference} opened on WhatsApp (FNOL logged).`,
   });
+  // TTTFG-4830 (28 Oct 2026, TTT's feedback): a plumber the insurer should send is arranged now, not after the form.
+  if (f.contractor === 'insurer') {
+    await ports.createAgentAction({
+      kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_claim', id }, contactId: state.contactId, at, urgent: true,
+      urgencyReason: 'The client needs a plumber', detail: `Claim ${reference}: the client asked on WhatsApp for ${policy.insurer} to send a plumber. Please arrange it with the insurer.`,
+    });
+  }
 
-  const text = FNOL_TEMPLATE.render({ firstName: state.firstName, reference, ownerName: owner.name });
+  const text = FNOL_TEMPLATE.render({ firstName: state.firstName, reference });
   await ports.send(conv.phone, { kind: 'template', name: FNOL_TEMPLATE.name, version: FNOL_TEMPLATE.version, text });
   await ports.createAgentAction({
     kind: 'Created', department: DEPARTMENT, owner, regarding: { table: 'riivo_claim', id }, contactId: state.contactId, at,

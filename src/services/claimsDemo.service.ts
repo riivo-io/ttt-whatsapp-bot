@@ -31,6 +31,9 @@
  *   CLAIMS_MESSAGE_MAX_CHARS       TTTFG-4830: what one client message makes Tina say goes out as one WhatsApp message,
  *                                  split only past this many characters (default 700; 0: each part on its own). See
  *                                  src/domain/claimsOutbox.ts, which also sends the taps (reply buttons and lists)
+ *   CLAIMS_CONTACT_NUMBER          TTTFG-4830 (28 Oct 2026): a TTT number the client can call about the claim, said on
+ *                                  the burst-geyser list ("You can also call TTT on ..."). Unset or blank: not said. No
+ *                                  default: which number TTT gives out is TTT's decision. Also read by claims.service.ts
  * Supabase: claim_conversations (migration 20261023120000_claim_conversations.sql); signing_requests (20261027120000).
  * TTTFG-4830: every message in and out also goes where Tina keeps her own: Supabase's message log (sessions and
  * messages) and the demo CRM's timeline (riivo_whatsappcommunications), under the claim, else the request, else the
@@ -49,6 +52,7 @@ import { lastReminderPort } from '../departments/insurance/resume-dataverse';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
+import { claimsContactNumber } from '../domain/claimsHost';
 import { interactiveFor, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, type OutPart } from '../domain/claimsOutbox';
 import {
     cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
@@ -282,6 +286,7 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
         withdrawOpenClaims: (contactId) => withdrawOpenClaims(ch.dv, contactId),
         say: (phone, text) => ch.sendText(phone, text),
         signUpLink: SIGN_UP_LINK,
+        contactNumber: claimsContactNumber(process.env.CLAIMS_CONTACT_NUMBER),
         lastReminderOn: (claimId) => lastReminderPort(ch.dv).lastReminderOn(claimId),
         lastBrokerStepOn: (claimId, step) => lastReminderPort(ch.dv).lastBrokerStepOn(claimId, step),
         ...((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off'

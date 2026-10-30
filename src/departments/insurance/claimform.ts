@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit b56d936). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 6d6afd1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5172: claim form configs and their validator (TTTFG-5251 steps 5 and 9).
 //
@@ -247,6 +247,11 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
     }
   };
 
+  // TTTFG-4830: an item Tina never asks (onHand: false) has no answer, so nothing she asks may hang on it.
+  const offHand = (where: string, key: string) => {
+    if (questions.get(key)?.onHand === false) err(`${where}: depends on "${key}", which Tina never asks (onHand: false)`);
+  };
+
   // A group's condition may test a CRM value or a question asked before the group's first question.
   const groupChecked = new Set<string>();
   for (const g of row.questionGroups) {
@@ -258,7 +263,10 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
     const g = q.group !== undefined ? groups.get(q.group) : undefined;
     if (g && !groupChecked.has(g.key)) {
       groupChecked.add(g.key);
-      if (g.onlyIf) checkCondition(`group "${g.key}"`, g.onlyIf, questions, undefined);
+      if (g.onlyIf) {
+        checkCondition(`group "${g.key}"`, g.onlyIf, questions, undefined);
+        offHand(`group "${g.key}"`, g.onlyIf.key);
+      }
     }
     if (questions.has(q.key)) err(`${where}: the key is used twice`);
     if (groups.has(q.key)) err(`${where}: the key is also a group key`);
@@ -275,6 +283,22 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
     }
     // A grouped question may depend on an earlier question in its own group (same entry) or an ungrouped one.
     if (q.onlyIf) checkCondition(where, q.onlyIf, questions, q.group);
+    if (q.andIf) {
+      if (q.group !== undefined) err(`${where}: andIf on a question in a group`);
+      checkCondition(`${where} (andIf)`, q.andIf, questions, undefined);
+    }
+    for (const v of q.variants ?? []) checkCondition(`${where} (variant)`, v.when, questions, undefined);
+    if (q.sumOf !== undefined) {
+      const of = questions.get(q.sumOf);
+      if (q.answerType !== 'number' || q.group !== undefined) err(`${where}: sumOf on a question that isn't an ungrouped number`);
+      if (!of || of.group === undefined || of.answerType !== 'number') err(`${where}: sumOf "${q.sumOf}" is not an earlier grouped number question`);
+    }
+    // An item that is never asked itself may hang on one (neither is asked).
+    if (q.onHand !== false) {
+      const reads: [string, string | undefined][] = [['onlyIf', q.onlyIf?.key], ['andIf', q.andIf?.key], ['sumOf', q.sumOf]];
+      for (const v of q.variants ?? []) reads.push(['variant', v.when.key]);
+      for (const [what, key] of reads) if (key) offHand(`${where} (${what})`, key);
+    }
     questions.set(q.key, q);
   }
   for (const g of row.questionGroups) if (!usedGroups.has(g.key)) err(`group "${g.key}" has no questions`);
