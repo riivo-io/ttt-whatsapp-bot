@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 6debe61). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit e041603). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -16,6 +16,7 @@ import {
 } from './followon';
 import { emailProblem, formatProblem, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
+import { FORM_CONTROLS, formPrompt, FORM_STEPPERS, type FormControl } from './formcontrols';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
   applies, chased, computedTotals, deferred, filesFor, formItems, holds, moreKey, phoneFromItems,
@@ -34,12 +35,15 @@ export interface GuidedField {
   /** The question key, `<key>.<n>` for the n-th entry of a repeating group. */
   key: string;
   prompt: string;
-  /** How it's answered: options to tap, or typing (and a voice recording) for free text. */
+  /** The question's answer type on the insurer's form: what the saved value must be. */
   type: 'text' | 'number' | 'date' | 'yes/no' | 'choice';
-  choices?: readonly string[];
+  /** How it's answered on the form (formcontrols.ts). Tapping first; a box only where there's no way round one. */
+  control: GuidedControl;
   required: boolean;
   /** Input hints for the phone's keyboard. */
   keyboard?: 'tel' | 'email';
+  /** Answered by the group's stepper, so it isn't asked itself: "is there another?" under a count of people. */
+  hidden?: boolean;
   when: readonly GuidedCondition[];
   /** Other words for the prompt, the first that holds (contracts.ts variants). */
   variants?: ReadonlyArray<{ when: GuidedCondition; prompt: string }>;
@@ -50,6 +54,9 @@ export interface GuidedField {
 }
 
 export interface GuidedScreen { id: string; title: string; help?: string; fields: GuidedField[] }
+
+/** A yes/no, a form's own choices, or one of formcontrols.ts. */
+export type GuidedControl = FormControl | { kind: 'yes-no'; label?: string; bare?: boolean } | { kind: 'number'; label?: string };
 
 /** One row of what TTT already holds. */
 export interface GuidedDetail { key: string; label: string; value: string; editable: boolean }
@@ -157,10 +164,27 @@ function conditionsFor(item: QuestionItem, form: ClaimForm, facts: ClaimFacts): 
 const fieldType = (item: QuestionItem): GuidedField['type'] =>
   item.answerType === 'number' || item.answerType === 'date' || item.answerType === 'yes/no' || item.answerType === 'choice' ? item.answerType : 'text';
 
+/** How a question is answered: the form's own choices or yes/no as they are, anything else as formcontrols.ts says. */
+function controlFor(item: QuestionItem, baseKey: string): GuidedControl {
+  if (item.answerType === 'yes/no') return { kind: 'yes-no' };
+  if (item.answerType === 'choice') return { kind: 'pills', options: item.choices ?? [] };
+  const c = FORM_CONTROLS[baseKey];
+  if (c) return c;
+  return item.answerType === 'date' ? { kind: 'date' } : item.answerType === 'number' ? { kind: 'number' } : { kind: 'short' };
+}
+/** The control formPrompt words the question for; a yes/no or a plain number keeps its words. */
+const wordedFor = (c: GuidedControl): FormControl | undefined => (c.kind === 'yes-no' || c.kind === 'number' ? undefined : c);
+
+const ORDINAL = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+/** "Was another car or person involved, other than the one mentioned already?" */
+const anotherPrompt = (more: string, n: number) =>
+  `${more.replace(/[?.\s]+$/, '')}, other than the ${ORDINAL[n - 1] ?? n} mentioned already?`;
+
 /** "witnesses" -> "Witness 2". */
 function entryHeading(group: string, n: number): string {
   const w = group.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
-  const one = /ies$/.test(w) ? w.replace(/ies$/, 'y') : /[^s]s$/.test(w) ? w.slice(0, -1) : w;
+  const one = w === 'injured' ? 'person hurt'
+    : /ies$/.test(w) ? w.replace(/ies$/, 'y') : /(?:ss|sh|ch|x)es$/.test(w) ? w.replace(/es$/, '') : /[^s]s$/.test(w) ? w.slice(0, -1) : w;
   return `${one.charAt(0).toUpperCase()}${one.slice(1)} ${n}`;
 }
 
@@ -182,7 +206,7 @@ function earlierValue(item: QuestionItem, master: MasterForm, earlier: readonly 
   return undefined;
 }
 
-const POLICE_HELP = "The insurer needs the SAPS case number. If you haven't reported it yet, please do, and tap \"I don't know yet\". Tina will ask for it on WhatsApp.";
+const POLICE_HELP = "The insurer needs the SAPS case number. If you haven't reported it yet, please do, and leave this blank. Tina will ask for it on WhatsApp.";
 
 /** One topic's screen per topic of the form, in the order the form's list reaches them (AC 2). */
 function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly ClaimAnswers[], sapsRequired: boolean): GuidedScreen[] {
@@ -210,7 +234,7 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     const topic = place?.topic ?? (groupPlace ? masterPlace(master, groupPlace.key)?.topic : undefined);
     const id = topic?.id ?? `section:${item.section ?? 'more'}`;
     const title = topic?.title ?? (item.section ? `${item.section.charAt(0).toUpperCase()}${item.section.slice(1)}` : 'A few more questions');
-    const screen: GuidedScreen = screens.get(id) ?? { id, title, ...(id === 'police' && sapsRequired ? { help: POLICE_HELP } : {}), fields: [] };
+    const screen: GuidedScreen = screens.get(id) ?? { id, title, ...(id === 'police' && sapsRequired && !claim.sapsCaseNumber ? { help: POLICE_HELP } : {}), fields: [] };
     screens.set(id, screen);
     const n = item.group && !isMore ? Number(/\.(\d+)$/.exec(item.key)?.[1] ?? 0) : 0;
     const original = form.questionList.find((q) => q.key === baseKey);
@@ -218,16 +242,21 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     const held = variants?.find((v) => v.cond === true);
     const known = answers[item.key]?.status === 'answered';
     const pre = !known && !item.group ? earlierValue(item, master, earlier) : undefined;
+    const stepper = FORM_STEPPERS[baseKey];
+    const hasGroup = !!stepper && form.questionList.some((q) => q.group === stepper.group);
+    const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey);
+    const hidden = isMore && Object.values(FORM_STEPPERS).some((x) => x.group === item.group);
     screen.fields[added(item) ? 'unshift' : 'push']({
       key: item.key,
-      prompt: isMore ? (original?.prompt ?? item.prompt) : held?.prompt ?? item.prompt,
+      prompt: formPrompt(held?.prompt ?? item.prompt, wordedFor(control)),
       type: fieldType(item),
-      ...(item.choices?.length ? { choices: item.choices } : {}),
+      control,
+      ...(hidden ? { hidden: true } : {}),
       required: item.required,
       ...(keyboardFor(baseKey) ? { keyboard: keyboardFor(baseKey) } : {}),
       when,
       ...(variants?.some((v) => typeof v.cond === 'object') ? {
-        variants: variants.filter((v): v is { cond: GuidedCondition; prompt: string } => typeof v.cond === 'object').map((v) => ({ when: v.cond, prompt: v.prompt })),
+        variants: variants.filter((v): v is { cond: GuidedCondition; prompt: string } => typeof v.cond === 'object').map((v) => ({ when: v.cond, prompt: formPrompt(v.prompt, wordedFor(control)) })),
       } : {}),
       ...(item.group && n ? { entry: entryHeading(item.group, n) } : {}),
       ...(pre !== undefined ? { prefill: pre } : {}),
@@ -242,7 +271,7 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
       const m = /^(.+)\.more\.(\d+)$/.exec(f.key);
       if (!m) continue;
       const g = (form.questionGroups ?? []).find((x) => x.key === m[1]);
-      if (g) f.prompt = g.more;
+      if (g) f.prompt = anotherPrompt(g.more, Number(m[2]));
     }
   }
   return [...screens.values()];
@@ -479,7 +508,11 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
   const { answers, saps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
   if (saps.caseNumber || saps.station) await ports.saveSaps(claimId, saps);
   if (JSON.stringify(answers) !== JSON.stringify(claim.answers)) await ports.saveAnswers(claimId, answers);
-  const after: FollowOnClaim = { ...claim, answers, sapsCaseNumber: saps.caseNumber ?? claim.sapsCaseNumber, sapsStation: saps.station ?? claim.sapsStation };
+  // saveSaps sets riivo_sapsinvolved with a case number, so the questions that hang on the police being involved are open now.
+  const after: FollowOnClaim = {
+    ...claim, answers, sapsCaseNumber: saps.caseNumber ?? claim.sapsCaseNumber, sapsStation: saps.station ?? claim.sapsStation,
+    ...(saps.caseNumber ? { facts: { ...claim.facts, saps: true } } : {}),
+  };
   return { problems, ...knownValues(form, after), open: guidedOpen(form, after, sapsRequired) };
 }
 

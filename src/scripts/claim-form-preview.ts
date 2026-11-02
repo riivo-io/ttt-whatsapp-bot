@@ -100,8 +100,12 @@ async function main() {
     const app = express();
     app.use('/claim-form', claimFormRouter(() => ({ ...d, session, whatsApp: '27000000000' })));
     app.get('/__claim/:name', (req, res) => res.json({ claim: claims.get(req.params.name), submitted: done.includes(req.params.name) }));
+    const links: Record<string, string> = {};
+    // A list of every form, so the preview opens on something to click.
+    app.get('/', (_req, res) => res.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Guided form preview</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;margin:0 auto;max-width:520px;padding:20px 16px;color:#0B0F14}h1{font-size:20px;margin:0 0 4px}p{color:#6B7684;margin:0 0 16px}a{display:block;padding:12px 14px;margin:0 0 8px;border:1px solid #CDD2D8;border-radius:10px;color:#015A8E;text-decoration:none}</style>
+<h1>Guided claim form preview</h1><p>Made-up claims in memory. Nothing here touches the CRM or WhatsApp.</p>${Object.entries(links).map(([name, url]) => `<a href="${url}">${name.replace('--', ' · ').replace(/-/g, ' ')}</a>`).join('')}`));
     app.listen(PORT, async () => {
-        const links: Record<string, string> = {};
         for (const [i, row] of rows.entries()) {
             claims.set(row.name, claimFor(row, i));
             links[row.name] = (await createGuidedLink(d, { claimId: row.name, phone: '27000000000', contactId: 'preview' })).url;

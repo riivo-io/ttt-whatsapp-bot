@@ -26,6 +26,9 @@ import {
     claimSigningStep, onClaimFormSigned, type SignedCallback, type SigningRequestCreated, type SigningRequestInput,
 } from '../departments/insurance/signing';
 import { dataverseSigningPorts } from '../departments/insurance/signing-dataverse';
+import type { GuidedLinkRow } from '../claimform/links';
+import { earlierClaimAnswers, fileGuided, finishGuided, loadGuided, saveGuided, type GuidedCrm } from '../departments/insurance/guided';
+import type { ClaimFormSession } from '../routes/claimForm.route';
 import { voiceNoteNote, whatsappCommunicationRow, type WhatsAppParty, type WhatsAppRegarding } from '../domain/whatsappLog';
 
 const OPT = 463630000;
@@ -369,6 +372,48 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
             const r = await onClaimChanged(fill, claimId, { columns: ['riivo_answers'], answersBefore: before, answersAfter: answers });
             if ('refilled' in r) ch.note?.(`Claim form filled again after an answer changed (${claimId})`);
         },
+    };
+}
+
+/**
+ * TTTFG-5562: one guided form link's claim, through the same ports as a WhatsApp message, so the page's answers and files
+ * land where chat's do. A file from the page has no WhatsApp media id: its bytes go to the store under an id of their own.
+ * `hear` and `carryOn` are the host's: Tina's transcription and queue, or the rehearsal's.
+ */
+export function demoClaimFormSession(
+    base: DemoChannels, link: GuidedLinkRow,
+    o: { hear(bytes: Buffer, mimeType: string, asked: string | null): Promise<{ text: string } | { problem: string }>; carryOn(): Promise<void> },
+): ClaimFormSession {
+    const uploads = new Map<string, Buffer>();
+    const ch: DemoChannels = { ...base, mediaBytes: async (id) => uploads.get(id) ?? base.mediaBytes(id) };
+    // `dv` may be a getter (the rehearsal swaps its per-message cache), so it isn't copied by the spread above.
+    Object.defineProperty(ch, 'dv', { get: () => base.dv });
+    const ports = demoPorts(ch, link.phone, link.contact_id, () => undefined);
+    const fill = dataverseFillPorts({ dv: ch.dv, files: claimFolders(ch).forms, blankForm: (url) => blankForm(ch, url), signingStep: async () => 'notAvailable' });
+    return {
+        view: () => loadGuided(ports, link.claim_id,
+            async (claim) => {
+                const values = await fill.crmValues(await fill.claim(claim.id));
+                return { contact: values.contact ?? {}, riivo_policy: values.riivo_policy ?? {} } as GuidedCrm;
+            },
+            (claim) => (claim.contactId ? earlierClaimAnswers(ch.dv, guid(claim.contactId), guid(claim.id)) : Promise.resolve([])),
+            async () => (await ports.contactByWhatsApp(link.phone))?.firstName ?? ''),
+        save: (input) => saveGuided(ports, link.claim_id, input, new Date()),
+        async file(file, bytes, itemKey) {
+            const id = `upload:${link.id}:${uploads.size}`;
+            uploads.set(id, bytes);
+            return fileGuided(ports, link.claim_id, { ...file, id }, itemKey, new Date());
+        },
+        async hear(bytes, mimeType, questionKey) {
+            if ((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off') return { problem: 'unavailable' };
+            const claim = await ports.loadClaim(link.claim_id);
+            const form = claim.claimFormId ? await ports.claimForm(claim.claimFormId) : null;
+            const asked = form?.questionList.find((q) => q.key === questionKey?.replace(/\.\d+$/, ''))?.prompt ?? null;
+            const r = await o.hear(bytes, mimeType, asked);
+            return 'problem' in r ? { problem: r.problem } : { text: r.text };
+        },
+        finish: () => finishGuided(ports, link.claim_id, new Date()),
+        carryOn: o.carryOn,
     };
 }
 

@@ -46,9 +46,7 @@ import {
     type DemoConversation, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
-import { dataverseFillPorts } from '../departments/insurance/fill-dataverse';
 import type { ClientFile, ResumeFile } from '../departments/insurance/followon';
-import { earlierClaimAnswers, fileGuided, finishGuided, loadGuided, saveGuided, type GuidedCrm } from '../departments/insurance/guided';
 import type { IntentModel } from '../departments/insurance/intent';
 import type { ReplyModel, ReportedModel } from '../departments/insurance/reply';
 import { NO_RESUME_STATE, type ResumeState } from '../departments/insurance/resume';
@@ -59,7 +57,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { claimsContactNumber } from '../domain/claimsHost';
 import { interactiveFor, LINK_LOGGED, linkInteractive, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, withLinkLine, type OutPart } from '../domain/claimsOutbox';
 import {
-    blankForm, cachedDv, claimFolders, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
+    cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
     type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
 } from './claimsDemoWiring';
 import type { SignedCallback } from '../departments/insurance/signing';
@@ -340,47 +338,18 @@ export async function handleClaimsFormDone(phone: string, claimId: string): Prom
 
 /** TTTFG-5562: the web host's half of the guided form: one link's claim, through the same ports as a WhatsApp message. */
 function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
-    const stats = newCrmStats();
-    const log = newDemoLog();
-    const base = channels(stats, log);
-    // A file from the page has no WhatsApp media id: its bytes are handed to the store under an id of their own.
-    const uploads = new Map<string, Buffer>();
-    const ch: typeof base = { ...base, mediaBytes: async (id) => uploads.get(id) ?? base.mediaBytes(id) };
-    const ports = demoPorts(ch, link.phone, link.contact_id, () => undefined);
-    const fill = dataverseFillPorts({ dv: ch.dv, files: claimFolders(ch).forms, blankForm: (url) => blankForm(ch, url), signingStep: async () => 'notAvailable' });
-    return {
-        view: () => loadGuided(ports, link.claim_id,
-            async (claim) => {
-                const values = await fill.crmValues(await fill.claim(claim.id));
-                return { contact: values.contact ?? {}, riivo_policy: values.riivo_policy ?? {} } as GuidedCrm;
-            },
-            (claim) => (claim.contactId ? earlierClaimAnswers(ch.dv, claim.contactId, claim.id) : Promise.resolve([])),
-            async () => (await ports.contactByWhatsApp(link.phone))?.firstName ?? ''),
-        save: (input) => saveGuided(ports, link.claim_id, input, new Date()),
-        async file(file, bytes, itemKey) {
-            const id = `upload:${link.id}:${uploads.size}`;
-            uploads.set(id, bytes);
-            return fileGuided(ports, link.claim_id, { ...file, id }, itemKey, new Date());
-        },
-        async hear(bytes, mimeType, questionKey) {
-            if ((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off') return { problem: 'unavailable' };
-            const claim = await ports.loadClaim(link.claim_id);
-            const form = claim.claimFormId ? await ports.claimForm(claim.claimFormId) : null;
-            const asked = form?.questionList.find((q) => q.key === questionKey?.replace(/\.\d+$/, ''))?.prompt ?? null;
-            const r = await transcribeVoiceNote(bytes, mimeType, voiceHint(asked));
-            return 'problem' in r ? { problem: r.problem } : { text: r.text };
-        },
-        finish: () => finishGuided(ports, link.claim_id, new Date()),
+    return demoClaimFormSession(channels(newCrmStats(), newDemoLog()), link, {
+        hear: (bytes, mimeType, hint) => transcribeVoiceNote(bytes, mimeType, voiceHint(hint)),
         async carryOn() {
             try {
                 await enqueueClaimsFormDone(link.phone, link.claim_id, link.phone_number_id);
             } catch (e) {
-                // No queue (the preview, or the bus is down): run it here rather than leave the client waiting.
+                // No queue (the bus is down): run it here rather than leave the client waiting.
                 console.warn('[ClaimForm] Queueing the end of the form failed; running it now:', (e as Error).message);
                 await handleClaimsFormDone(link.phone, link.claim_id);
             }
         },
-    };
+    });
 }
 
 /** TTTFG-5562: the guided form's route, when the page is set up. */
