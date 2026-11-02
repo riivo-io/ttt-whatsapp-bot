@@ -89,6 +89,17 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         }
         return opened.row;
     };
+    /** The link is checked before the body is read: without one, nothing is buffered. */
+    const linkFirst = async (req: Request, res: Response, next: () => void) => {
+        const d = getDeps();
+        if (!d) return void off(res);
+        try {
+            const link = await linked(d, req, res);
+            if (!link) return;
+            res.locals.link = link;
+            next();
+        } catch (e) { failed('link', res, e); }
+    };
     const failed = (what: string, res: Response, e: unknown) => {
         console.error(`[ClaimForm] ${what} failed:`, (e as Error).message);
         if (!res.headersSent) res.status(500).json({ ok: false, message: 'Something went wrong. Please try again.' });
@@ -118,21 +129,20 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         } catch (e) { failed('state', res, e); }
     });
 
-    router.post('/:token/answers', express.json({ limit: '1mb' }), async (req: Request, res: Response) => {
+    router.post('/:token/answers', linkFirst, express.json({ limit: '1mb' }), async (req: Request, res: Response) => {
         const d = getDeps();
         if (!d) return void off(res);
         try {
-            const link = await linked(d, req, res);
-            if (link) res.json(await inTurn(link.id, () => d.session(link).save(saveInput(req.body))));
+            const link = res.locals.link as GuidedLinkRow;
+            res.json(await inTurn(link.id, () => d.session(link).save(saveInput(req.body))));
         } catch (e) { failed('save', res, e); }
     });
 
-    router.post('/:token/voice', express.raw({ type: () => true, limit: VOICE_MAX }), async (req: Request, res: Response) => {
+    router.post('/:token/voice', linkFirst, express.raw({ type: () => true, limit: VOICE_MAX }), async (req: Request, res: Response) => {
         const d = getDeps();
         if (!d) return void off(res);
         try {
-            const link = await linked(d, req, res);
-            if (!link) return;
+            const link = res.locals.link as GuidedLinkRow;
             const bytes = req.body as Buffer;
             const mimeType = String(req.header('content-type') ?? '').split(';')[0].trim().toLowerCase();
             if (!Buffer.isBuffer(bytes) || !bytes.length || !/^(audio|video)\//.test(mimeType)) return void res.status(400).json({ ok: false, message: VOICE_PROBLEM.unsupported });
@@ -141,12 +151,11 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         } catch (e) { failed('voice', res, e); }
     });
 
-    router.post('/:token/file', express.raw({ type: () => true, limit: FILE_MAX }), async (req: Request, res: Response) => {
+    router.post('/:token/file', linkFirst, express.raw({ type: () => true, limit: FILE_MAX }), async (req: Request, res: Response) => {
         const d = getDeps();
         if (!d) return void off(res);
         try {
-            const link = await linked(d, req, res);
-            if (!link) return;
+            const link = res.locals.link as GuidedLinkRow;
             const bytes = req.body as Buffer;
             const mimeType = String(req.header('content-type') ?? '').split(';')[0].trim().toLowerCase();
             const type = FILE_TYPES[mimeType];

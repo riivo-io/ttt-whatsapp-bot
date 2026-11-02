@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 35c5250). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit d9e4ce7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
@@ -11,8 +11,11 @@ export type FormControl =
   | { kind: 'pills'; options: readonly string[]; other?: boolean; label?: string; bare?: boolean; detail?: { placeholder: string; joiner: string } }
   /** Any of the options, saved as "a, b". */
   | { kind: 'multi'; options: readonly string[]; other?: boolean; label?: string; bare?: boolean }
-  /** Yes or no; the box shows only on yes. `no`: what "no" saves. `long`: the client's own words, so they can record it too. */
-  | { kind: 'yes-text'; label: string; then: string; no?: string; long?: boolean; bare?: boolean }
+  /**
+   * Yes or no; the box shows only on yes. `no`: what "no" saves. `long`: the client's own words, so they can record it too.
+   * `needsText`: the form's box wants the thing itself (a number, a name), so yes with nothing typed is a blank, not "Yes".
+   */
+  | { kind: 'yes-text'; label: string; then: string; no?: string; long?: boolean; bare?: boolean; needsText?: boolean }
   | { kind: 'slider'; min: number; max: number; step: number; unit: string; label?: string; bare?: boolean }
   /** `recent`: Today and Yesterday to tap first. `month`: a month and a year are enough. */
   | { kind: 'date'; recent?: boolean; month?: boolean; label?: string }
@@ -152,9 +155,9 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   otherDriverAddress: NAME,
   otherFirstName: card('First name', true),
   otherSurname: card('Surname', true),
-  otherIdNumber: yesText('Do you have their ID or passport number?', 'ID or passport number'),
+  otherIdNumber: yesText('Do you have their ID or passport number?', 'ID or passport number', { needsText: true }),
   otherPhone: card('Phone number'),
-  otherAddress: yesText('Was their property (not a car) damaged?', 'What is the address?'),
+  otherAddress: yesText('Was their property (not a car) damaged?', 'What is the address?', { needsText: true }),
   otherInterestDetails: pills(['A bank', 'Spouse or partner', 'Landlord', 'Employer'], { other: true, label: 'Who is it?' }),
   otherInterestName: pills(['A bank', 'Spouse or partner', 'Landlord', 'Employer'], { other: true, label: 'Who is it?' }),
 
@@ -202,8 +205,8 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   sapsStation: NAME,
   sapsDateReported: RECENT,
   sapsReportedBy: NAME,
-  investigatingOfficer: yesText('Do you know the name of the police officer handling the case?', "The officer's name"),
-  sapsPhone: yesText("Do you have the police station's phone number?", 'Phone number'),
+  investigatingOfficer: yesText('Do you know the name of the police officer handling the case?', "The officer's name", { needsText: true }),
+  sapsPhone: yesText("Do you have the police station's phone number?", 'Phone number', { needsText: true }),
 
   // ---- where the vehicle is
   vehicleLocation: pills(['At home', 'At a repairer', 'At a tow yard'], { other: true, label: 'Where is the car now?', detail: { placeholder: 'Name and address, if it is not at home', joiner: ': ' } }),
@@ -254,7 +257,7 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   enteredOtherDetails: NAME,
   suspectFirstName: FIRST,
   suspectSurname: SURNAME,
-  suspectPhone: yesText('Do you have their phone number?', 'Phone number'),
+  suspectPhone: yesText('Do you have their phone number?', 'Phone number', { needsText: true }),
   suspectRelationship: pills(['Stranger', ...KNOWS], { other: true }),
   thirdPartyName: NAME,
   thirdPartyPhone: PHONE,

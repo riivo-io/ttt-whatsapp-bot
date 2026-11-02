@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 35c5250). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit d9e4ce7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -1989,7 +1989,7 @@ export async function followOnTurn(
   // TTTFG-5196: a message from the client ends the quiet spell on an optional item; the turn sets a new one if it ends
   // on one again.
   const from = state?.waitingFor === 'optional' && input.kind !== 'nudge' ? { ...state, waiting: undefined } : state;
-  const step =
+  let step =
     input.kind === 'start' ? startFollowOn(ctx, input.describedAsTheft, input.files, input.reported)
     : input.kind === 'resume' ? resumeStep(ctx, input.files, input.introSent, input.lead, input.skipped)
     : advanceFollowOn(ctx, from!, input);
@@ -2009,7 +2009,6 @@ export async function followOnTurn(
       kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, detail, at, template,
     });
   const say = (text: string, choices?: Choice[]) => sendClaimText(ports, conv, text, claim, at, choices);
-  let noForm = false;
   const setStatus = async (to: ClaimStatus) => {
     if (status === to) return;
     await ports.setStatus(claimId, to);
@@ -2017,7 +2016,9 @@ export async function followOnTurn(
     status = to;
   };
 
-  for (const [i, o] of step.out.entries()) {
+  // By index: a link that can't be made adds the chat's own messages to the end of this list.
+  for (let i = 0; i < step.out.length; i++) {
+    const o = step.out[i];
     switch (o.kind) {
       case 'saps-instruction':
         await say(SAPS_INSTRUCTION);
@@ -2031,7 +2032,11 @@ export async function followOnTurn(
         } catch (e) {
           // A link that can't be made never stops a claim: the questions go on WhatsApp instead (below).
           console.error(`TTTFG-5562: no guided form link for claim ${claim.reference}: ${e}`);
-          noForm = true;
+          if (step.state) {
+            const fresh = await ports.loadClaim(claimId);
+            const chat = formChat({ ...ctx, claim: fresh, guided: false }, step.state, FORM_UNAVAILABLE);
+            step = { state: chat.state, out: [...step.out, ...chat.out] };
+          }
         }
         break;
       case 'ask': {
@@ -2132,17 +2137,6 @@ export async function followOnTurn(
     } catch (e) {
       console.error(`TTTFG-5263: risk flags for claim ${claim.reference} failed: ${e}`);
     }
-  }
-  if (noForm && step.state) {
-    const fresh = await ports.loadClaim(claimId);
-    const chat = formChat({ ...ctx, claim: fresh, guided: false }, step.state, FORM_UNAVAILABLE);
-    for (const o of chat.out) {
-      if (o.kind === 'text') await say(o.text);
-      else if (o.kind === 'saps-instruction') await say(SAPS_INSTRUCTION);
-      else if (o.kind === 'ask') await say(askText(o.item, o.simpler, o.again), itemChoices(o.item, o.again));
-      else if (o.kind === 'ask-batch') await say(batchText(o.items, o));
-    }
-    return { state: chat.state };
   }
   return { state: step.state };
 }

@@ -396,8 +396,7 @@ export function demoClaimFormSession(
                 const values = await fill.crmValues(await fill.claim(claim.id));
                 return { contact: values.contact ?? {}, riivo_policy: values.riivo_policy ?? {} } as GuidedCrm;
             },
-            (claim) => (claim.contactId ? earlierClaimAnswers(ch.dv, guid(claim.contactId), guid(claim.id)) : Promise.resolve([])),
-            async () => (await ports.contactByWhatsApp(link.phone))?.firstName ?? ''),
+            (claim) => (claim.contactId ? earlierClaimAnswers(ch.dv, guid(claim.contactId), guid(claim.id)) : Promise.resolve([]))),
         save: (input) => saveGuided(ports, link.claim_id, input, new Date()),
         async file(file, bytes, itemKey) {
             const id = `upload:${link.id}:${uploads.size}`;

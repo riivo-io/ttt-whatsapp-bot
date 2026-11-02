@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 35c5250). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit d9e4ce7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -19,7 +19,7 @@ import type { Dv } from './dataverse';
 import { FORM_CONTROLS, formHint, formPrompt, FORM_STEPPERS, type FormControl } from './formcontrols';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
-  applies, chased, computedTotals, deferred, filesFor, formItems, holds, moreKey, phoneFromItems,
+  applies, chased, computedTotals, entryWord, deferred, filesFor, formItems, holds, moreKey, phoneFromItems,
   PHONE_OR_TABLET_KEY, SAPS_CASE_KEY, SAPS_STATION_KEY, type ClaimFacts,
 } from './progress';
 
@@ -76,7 +76,6 @@ export interface GuidedView {
   reference: string;
   title: string;
   insurer: string;
-  firstName: string;
   /** What TTT holds, for the client to confirm or change (AC 3). */
   details: GuidedDetail[];
   detailsConfirmed: boolean;
@@ -88,8 +87,6 @@ export interface GuidedView {
   notKnown: string[];
   /** The screen to open on (AC 5): the first with an unanswered question, `screens.length` for the photos. */
   startAt: number;
-  /** About how long is left, in minutes. */
-  minutes: number;
 }
 
 /** What the page needs from the CRM to show what TTT holds (fill-dataverse.ts crmValues). */
@@ -184,9 +181,7 @@ const anotherPrompt = (more: string, n: number) =>
 
 /** "witnesses" -> "Witness 2". */
 function entryHeading(group: string, n: number): string {
-  const w = group.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
-  const one = w === 'injured' ? 'person hurt'
-    : /ies$/.test(w) ? w.replace(/ies$/, 'y') : /(?:ss|sh|ch|x)es$/.test(w) ? w.replace(/es$/, '') : /[^s]s$/.test(w) ? w.slice(0, -1) : w;
+  const one = group === 'injured' ? 'person hurt' : entryWord(group);
   return `${one.charAt(0).toUpperCase()}${one.slice(1)} ${n}`;
 }
 
@@ -324,7 +319,7 @@ function knownValues(form: ClaimForm, claim: FollowOnClaim) {
 const evidenceKind = (item: QuestionItem): GuidedEvidence['kind'] => (item.answerType === 'video' ? 'video' : item.answerType === 'document' ? 'document' : 'photo');
 
 /** The form as the page shows it. `earlier`: the riivo_answers of the client's earlier claims, latest first. */
-export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm, earlier: readonly ClaimAnswers[] = [], firstName = ''): GuidedView {
+export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm, earlier: readonly ClaimAnswers[] = []): GuidedView {
   const form = asGuided(list);
   const master = masterFormFor(form);
   const facts = factsOf(claim);
@@ -338,12 +333,10 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
   const open = guidedOpen(form, claim, sapsRequired);
   const startAt = screens.findIndex((s) => s.fields.some((f) => open.includes(f.key)));
   const detailsConfirmed = claim.answers[DETAILS_CONFIRMED_KEY]?.status === 'answered';
-  const questions = openCount(form, claim, sapsRequired);
   return {
     reference: claim.reference,
     title: master.title,
     insurer: claim.insurer,
-    firstName,
     details: detailsFor(form, claim, crm),
     detailsConfirmed,
     screens,
@@ -351,12 +344,8 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     answers,
     notKnown,
     startAt: startAt < 0 ? screens.length : startAt,
-    minutes: Math.max(2, Math.min(15, Math.ceil(questions / 8))),
   };
 }
-
-const openCount = (form: ClaimForm, claim: FollowOnClaim, sapsRequired: boolean) =>
-  formItems(form, claim.answers, factsOf(claim), sapsRequired).filter((i) => i.kind === 'question' && applies(i, claim.answers, factsOf(claim))).length;
 
 /** The questions that still apply and have no answer, in the list's order. An evidence item is never one: Tina asks for those. */
 export function guidedOpen(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers' | 'facts' | 'claimType' | 'sapsCaseNumber' | 'sapsStation'>, sapsRequired: boolean): string[] {
@@ -425,12 +414,16 @@ export function applyGuidedSave(
   const checked = new Set(input.checked ?? []);
   for (const key of input.cleared ?? []) if (answers[key]?.status === 'answered' || deferred(key, answers)) delete answers[key];
   const given = new Map((input.answers ?? []).map((a) => [a.key, a.value] as const));
+  const blanks: string[] = [];
 
   // What TTT holds: a changed value on the form. The CRM stays as it is; the broker gets a Follow-up (followon.ts formDone).
   for (const [key, v] of [...given]) {
-    if (!isDetailKey(key) && key !== ADDRESS_KEY) continue;
+    // Only what the page offers: not the ID number, the broker or anything else a crafted request names.
+    if (!DETAILS.some((d) => d.source === key) && key !== ADDRESS_KEY) continue;
     given.delete(key);
     const value = typeof v === 'string' ? v.trim() : '';
+    // A number or email the client took off stays off the form. An address can only be changed.
+    if (!value && key !== ADDRESS_KEY) { answers[key] = { value: '', status: 'answered', at, source: 'form' }; continue; }
     if (!value) continue;
     const problem = checked.has(key) ? null : /mobilephone|telephone/.test(key) ? phoneProblem(value) : /emailaddress/.test(key) ? emailProblem(value) : null;
     if (problem) { problems.push({ key, text: problem }); continue; }
@@ -451,6 +444,9 @@ export function applyGuidedSave(
       if (!item || item.kind !== 'question' || !applies(item, answers, facts)) continue;
       given.delete(key);
       more = true;
+      // "Yes" with nothing typed, where the box wants the thing itself: a blank, so "Yes" never prints as an ID number.
+      const c = FORM_CONTROLS[key.replace(/\.\d+$/, '')];
+      if (c?.kind === 'yes-text' && c.needsText && typeof v === 'string' && /^\s*yes\s*$/i.test(v)) { blanks.push(key); continue; }
       const value = accept(item, v);
       if (value === undefined) { problems.push({ key, text: NOT_READ }); continue; }
       const problem = formatProblem(item, value);
@@ -465,7 +461,7 @@ export function applyGuidedSave(
     }
   }
 
-  for (const key of input.notKnown ?? []) {
+  for (const key of [...(input.notKnown ?? []), ...blanks]) {
     const item = list().find((i) => i.key === key);
     if (!item || item.kind !== 'question') continue;
     if (answers[key]?.status === 'answered') delete answers[key];
@@ -493,10 +489,10 @@ async function loaded(ports: GuidedPorts, claimId: string) {
   return { claim, form, sapsRequired: !!claim.sapsRequired };
 }
 
-export async function loadGuided(ports: GuidedPorts, claimId: string, crm: (claim: FollowOnClaim) => Promise<GuidedCrm>, earlier: (claim: FollowOnClaim) => Promise<ClaimAnswers[]>, firstName: (claim: FollowOnClaim) => Promise<string>): Promise<GuidedView> {
+export async function loadGuided(ports: GuidedPorts, claimId: string, crm: (claim: FollowOnClaim) => Promise<GuidedCrm>, earlier: (claim: FollowOnClaim) => Promise<ClaimAnswers[]>): Promise<GuidedView> {
   const { claim, form } = await loaded(ports, claimId);
-  const [c, e, f] = await Promise.all([crm(claim), earlier(claim).catch(() => []), firstName(claim).catch(() => '')]);
-  return guidedView(form, claim, c, e, f);
+  const [c, e] = await Promise.all([crm(claim), earlier(claim).catch(() => [])]);
+  return guidedView(form, claim, c, e);
 }
 
 /** The riivo_answers of the client's other claims, latest first: what pre-fills the vehicle or property (AC 3). */
@@ -568,9 +564,10 @@ export async function fileGuided(ports: GuidedPorts, claimId: string, file: Clie
  */
 const PREFERS_CHAT = [
   /^\s*(chat|whats ?app)\s*(please|pls|instead)?\s*[.!]*\s*$/i,
-  /\b(prefer|rather|instead|just|can we|could we|let'?s|want to|like to)\b.*\b(chat|whats ?app|here|on this|message|text)\b/i,
-  /\b(ask|answer|do it|do this|tell you)\b.*\b(here|on whats ?app|by chat|in chat|over chat|on chat|on this)\b/i,
-  /\b(can'?t|cannot|won'?t|doesn'?t|does not|not|unable to)\b.*\b(open|work|working|load|loading)\b/i,
+  /\b(prefer|rather|instead|can we|could we|let'?s|want to|like to)\b.*\b(chat|whats ?app|on here|here)\b/i,
+  /\b(ask|answer|do it|do this|tell you)\b.*\b(here|on whats ?app|by chat|in chat|over chat|on chat)\b/i,
+  /\b(can'?t|cannot|won'?t|doesn'?t|does not|not|unable to)\b.*\b(open|work|working|load|loading)\b.*\b(link|form|page)\b/i,
+  /\b(link|form|page)\b.*\b(can'?t|cannot|won'?t|doesn'?t|does not|not|unable to)\b.*\b(open|work|working|load|loading)\b/i,
   /\b(don'?t|do not)\b.*\b(want|like)\b.*\b(link|form)\b/i,
 ];
 export const prefersChat = (text: string) => PREFERS_CHAT.some((re) => re.test(text));

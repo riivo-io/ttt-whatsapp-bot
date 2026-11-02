@@ -23,7 +23,7 @@
  * Pure apart from the injected deps (Tina's Ports pattern), so it is tested without Meta, Dataverse, Supabase or Claude.
  * src/services/claimsDemo.service.ts wires the real ones.
  */
-import { claimTurn } from '../departments/insurance/claim';
+import { claimTurn, DEPARTMENT } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { prefersChat } from '../departments/insurance/guided';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
@@ -398,7 +398,17 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
 export async function claimsFormDone(deps: ClaimsDemoDeps, phone: string, claimId: string, now: Date): Promise<'carried-on' | 'stale'> {
     const c = await deps.load(phone);
     const followOn = c?.resume.followOn;
-    if (!c || !followOn || followOn.claimId !== claimId) return 'stale';
+    if (!c || !followOn || followOn.claimId !== claimId) {
+        // The client has moved on to something else on WhatsApp, so Tina can't carry on here. The answers are on the claim:
+        // the broker is told, so a submitted form is never simply left.
+        const ports = deps.ports(c?.requestId ?? '', () => undefined);
+        const claim = await ports.loadClaim(claimId);
+        await ports.createAgentAction({
+            kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at: now.toISOString(),
+            detail: `The client submitted the claim form for ${claim.reference}, but their WhatsApp conversation has moved on, so no signing link went out. Please send them the form to sign.`,
+        });
+        return 'stale';
+    }
     let last: string | undefined;
     const ports = deps.ports(c.requestId, (text) => { last = text; });
     const conversation = claimsConversation(phone, c.requestId, deps.signUpLink, deps.contactNumber);

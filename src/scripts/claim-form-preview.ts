@@ -83,7 +83,7 @@ function session(link: GuidedLinkRow): ClaimFormSession {
     const form = rows.find((r) => r.name === link.claim_id)!.form;
     const p = ports(form);
     return {
-        view: async () => guidedView(form, structuredClone(claims.get(link.claim_id)!), CRM, EARLIER, 'Sipho'),
+        view: async () => guidedView(form, structuredClone(claims.get(link.claim_id)!), CRM, EARLIER),
         save: (input) => saveGuided(p, link.claim_id, input, new Date()),
         file: (file, _bytes, itemKey) => fileGuided(p, link.claim_id, { ...file, id: `upload:${Date.now()}` }, itemKey, new Date()),
         hear: async () => ({ text: 'I was driving to a job and a white Polo drove into the back of the bakkie.' }),

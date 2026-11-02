@@ -765,9 +765,17 @@ test('TTTFG-5562 AC 6: when the client submits, the claim carries on as a chat-a
     const t = await openClaim(w);
     w.since();
     const claimId = w.rows[0].id;
-    assert.equal(await claimsFormDone(w.deps, PHONE, 'another-claim', tick(t, 1)), 'stale');
-    assert.deepEqual(w.since(), []);
     assert.equal(await claimsFormDone(w.deps, PHONE, claimId, tick(t, 1)), 'carried-on');
     assert.notEqual(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
     assert.ok(w.since().length > 0);
+});
+
+test('TTTFG-5562: a form submitted after the conversation moved on tells the broker, so it is never simply left', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    w.store.get(PHONE)!.resume = { followOn: null, pending: null };
+    assert.equal(await claimsFormDone(w.deps, PHONE, w.rows[0].id, tick(t, 1)), 'stale');
+    assert.deepEqual(w.since(), []);
+    assert.ok(w.actions.some((a) => a.kind === 'Follow-up' && /submitted the claim form/.test(a.detail)));
 });

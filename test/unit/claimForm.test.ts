@@ -123,6 +123,15 @@ test('only the page\'s own fields reach the save, and answers are length-limited
     } finally { await s.close(); }
 });
 
+test('a bad link gets no further than the check: the body is not read', async () => {
+    const d = deps(() => new Date());
+    const s = await server(d, []);
+    try {
+        const r = await fetch(`${s.base}/${'x'.repeat(43)}/file`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: Buffer.alloc(30 * 1024 * 1024) });
+        assert.equal(r.status, 404);
+    } finally { await s.close(); }
+});
+
 test('AC 7: a photo is taken under a name of our own; other kinds of file are refused', async () => {
     const d = deps(() => new Date());
     const { url } = await createGuidedLink(d, INPUT);
