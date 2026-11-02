@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 6d6afd1). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit c99946b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -50,7 +50,8 @@ import type { FlagTrigger } from './flags';
 import { formatProblem } from './formats';
 import { claimGate } from './gate';
 import {
-  applies, chased, computedTotals, deferred, evidenceIn, formItems, itemName, missingItems, moreKey, nextBatch, nextItem, sapsStepApplies,
+  applies, chased, computedTotals, deferred, evidenceIn, formItems, itemName, missingItems, moreKey, nextBatch, nextItem, PHONE_OR_TABLET_KEY,
+  phoneFromItems, sapsStepApplies,
   SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
@@ -463,6 +464,13 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
     const record: AnswerRecord = { value: t.value, status: 'answered', at: c.now.toISOString(), source: 'computed' };
     out.push({ kind: 'save-answer', key: t.key, record });
     w.answers[t.key] = record;
+  }
+  // TTTFG-4830 (30 Oct 2026): the items the client named say whether a phone or tablet was stolen.
+  const phone = phoneFromItems(c.form, w.answers);
+  if (phone !== undefined) {
+    const record: AnswerRecord = { value: phone, status: 'answered', at: c.now.toISOString(), source: 'computed' };
+    out.push({ kind: 'save-answer', key: PHONE_OR_TABLET_KEY, record });
+    w.answers[PHONE_OR_TABLET_KEY] = record;
   }
   // The SAPS keys belong to the SAPS step; the questions never ask them again.
   const skip = [...st.skipped, SAPS_CASE_KEY, SAPS_STATION_KEY];

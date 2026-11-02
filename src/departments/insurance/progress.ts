@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 6d6afd1). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit c99946b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -200,6 +200,34 @@ export function computedTotals(form: ClaimForm, answers: ClaimAnswers, facts?: C
     else if (!done && computed) out.push({ key: item.key, value: null });
   }
   return out;
+}
+
+/** TTTFG-4830 (30 Oct 2026): Hybrid's "Was a cellphone or tablet stolen?", answered by the items the client named. */
+export const PHONE_OR_TABLET_KEY = 'phoneOrTablet';
+const ITEM_KEY = 'itemDescription';
+const PHONE_WORDS = /\b(phone|cell ?phone|cell|mobile|smart ?phone|iphone|ipad|tablet|galaxy|huawei|oppo|xiaomi|redmi|nokia|pixel|samsung [saz]\d+|note ?\d+)\b/i;
+
+/**
+ * TTTFG-4830 (30 Oct 2026, the user: a stolen TV was asked about a phone or tablet): once the item list is done, the
+ * items answer whether a phone or tablet was stolen, so it's never asked. Worked out again when the items change; an
+ * answer the client (or the report) gave stays. undefined: nothing to save.
+ */
+export function phoneFromItems(form: ClaimForm, answers: ClaimAnswers): boolean | undefined {
+  const own = answers[PHONE_OR_TABLET_KEY];
+  if (!form.questionList.some((q) => q.key === PHONE_OR_TABLET_KEY) || (own && own.source !== 'computed')) return undefined;
+  const g = (form.questionGroups ?? []).find((x) => x.key === form.questionList.find((q) => q.key === ITEM_KEY)?.group);
+  if (!g) return undefined;
+  const named: string[] = [];
+  for (let n = 1; n <= g.max; n++) {
+    const a = answers[`${ITEM_KEY}.${n}`];
+    if (!a || a.status !== 'answered' || typeof a.value !== 'string') return undefined;
+    named.push(a.value);
+    const more = answers[moreKey(g.key, n)];
+    if (n === g.max || (more?.status === 'answered' && more.value === false)) break;
+    if (!more || more.status !== 'answered' || more.value !== true) return undefined;
+  }
+  const phone = named.some((t) => PHONE_WORDS.test(t));
+  return own?.value === phone ? undefined : phone;
 }
 
 function done(item: QuestionItem, answers: ClaimAnswers, evidence: ReceivedEvidence, facts?: ClaimFacts): boolean {
