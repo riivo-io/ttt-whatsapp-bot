@@ -355,7 +355,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     // TTTFG-4830 (28 Oct 2026): what the report already says goes into the start, so the policy question offers only the
     // policies that fit the claim. As before, a failed read here only means Tina asks for it.
     const opening = await openingFacts(deps.understandModel, m.text, now);
-    const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start', ...opening }, now);
+    const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start', ...opening, ...(deps.guidedForm ? { guided: true } : {}) }, now);
     c.walk = t.state;
     return done('started');
 }

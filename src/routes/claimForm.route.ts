@@ -72,7 +72,7 @@ function saveInput(body: unknown): GuidedSave {
         ? b.answers.filter((a): a is { key: string; value: string | number | boolean } => !!a && typeof a.key === 'string' && a.key.length < 120 && ['string', 'number', 'boolean'].includes(typeof a.value)
             && (typeof a.value !== 'string' || a.value.length <= 5000)).slice(0, 500)
         : [];
-    return { answers, notKnown: keys(b.notKnown), cleared: keys(b.cleared), checked: keys(b.checked), detailsConfirmed: b.detailsConfirmed === true };
+    return { answers, notKnown: keys(b.notKnown), cleared: keys(b.cleared), checked: keys(b.checked), detailsConfirmed: b.detailsConfirmed === true, termsAccepted: b.termsAccepted === true };
 }
 
 export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {

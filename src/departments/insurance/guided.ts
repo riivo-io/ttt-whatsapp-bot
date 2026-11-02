@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -16,15 +16,20 @@ import {
 } from './followon';
 import { emailProblem, formatProblem, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
-import { FORM_CONTROLS, formHint, formPrompt, FORM_STEPPERS, type FormControl } from './formcontrols';
+import { DEPARTMENT } from './claim';
+import { FORM_CONTROLS, FORM_DRAWINGS, formHint, formPrompt, FORM_STEPPERS, type FormControl } from './formcontrols';
+import { factColumns, plumberAsked, plumberDetail, withFacts } from './formfacts';
+import { FORM_TERMS } from './templates';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
-  applies, chased, computedTotals, entryWord, deferred, filesFor, formItems, holds, moreKey, phoneFromItems,
+  applies, chased, CLAIM_COLUMN_FACTS, computedTotals, entryWord, deferred, filesFor, formItems, holds, moreKey, phoneFromItems,
   PHONE_OR_TABLET_KEY, SAPS_CASE_KEY, SAPS_STATION_KEY, type ClaimFacts,
 } from './progress';
 
 /** The screen of what TTT already holds. Saved against this key once the client has gone past it. */
 export const DETAILS_CONFIRMED_KEY = 'guidedDetailsConfirmed';
+/** The client agreed to what opens the form (FORM_TERMS). */
+export const TERMS_KEY = 'guidedTermsAccepted';
 /** An answer that changes a CRM value on the form: `crm:<table>.<column>`. The CRM itself is never written (fill-dataverse.ts). */
 export const isDetailKey = (key: string) => key.startsWith('crm:contact.') || key.startsWith('crm:riivo_policy.');
 
@@ -51,6 +56,8 @@ export interface GuidedField {
   variants?: ReadonlyArray<{ when: GuidedCondition; prompt: string }>;
   /** The entry's heading in a repeating group ("Witness 2"). */
   entry?: string;
+  /** A person's card under a count of people: the cards stay together on one step, which may scroll. */
+  counted?: boolean;
   /** A value from the client's earlier claim, shown filled in for them to confirm. Not an answer until they do. */
   prefill?: string | number | boolean;
 }
@@ -68,6 +75,8 @@ export interface GuidedEvidence {
   prompt: string;
   kind: 'photo' | 'document' | 'video';
   required: boolean;
+  /** The client can draw it with a finger on the form, as well as add a photo. */
+  draw?: boolean;
   when: readonly GuidedCondition[];
   count: number;
 }
@@ -79,6 +88,8 @@ export interface GuidedView {
   /** What TTT holds, for the client to confirm or change (AC 3). */
   details: GuidedDetail[];
   detailsConfirmed: boolean;
+  /** What opens the form, until the client has agreed to it. */
+  terms?: { title: string; lines: readonly string[]; agree: string };
   screens: GuidedScreen[];
   evidence: GuidedEvidence[];
   /** Everything known so far, for the conditions and to fill the boxes. */
@@ -138,6 +149,9 @@ function allEntries(form: ClaimForm, facts: ClaimFacts, sapsRequired: boolean) {
 
 /** A condition as the page tests it, or true / false when only the claim's own columns decide it. */
 function pageCondition(c: Condition, facts: ClaimFacts): GuidedCondition | boolean {
+  // The claim's own columns that the form itself asks for are tested on the answer, so the next question shows on the tap.
+  const fact = c.key.startsWith('crm:') ? CLAIM_COLUMN_FACTS[c.key] : c.key;
+  if (fact && fact !== 'claimType') return { key: fact, oneOf: c.oneOf ?? [c.equals!] };
   if (c.key.startsWith('crm:')) return holds(c, {}, facts);
   return { key: c.key, oneOf: c.oneOf ?? [c.equals!] };
 }
@@ -204,9 +218,7 @@ function earlierValue(item: QuestionItem, master: MasterForm, earlier: readonly 
 }
 
 /** The form's own view of a list: its general questions are asked here, even though Tina doesn't ask them on chat. */
-const asGuided = (form: ClaimForm): ClaimForm => (form.questionList.some((q) => q.formOnly)
-  ? { ...form, questionList: form.questionList.map(({ formOnly: _f, ...q }) => q) }
-  : form);
+const asGuided = (form: ClaimForm, claim: Pick<FollowOnClaim, 'claimType' | 'facts'>): ClaimForm => withFacts(form, claim, 'show');
 
 const POLICE_HELP = "Not reported yet? Please do, and leave this blank. Tina will ask for it later.";
 
@@ -218,37 +230,40 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
   const screens = new Map<string, GuidedScreen>();
   // The SAPS step's questions lead on WhatsApp because Tina asks them first. They aren't on the insurer's list, so on the
   // form they sit with the rest of the police questions, where the list reaches those (or last, on a form with none).
-  const all = allEntries(form, facts, sapsRequired);
+  // Off a claim that doesn't need them, they're still on the page, for a yes to "Was it reported to the police?".
+  const all = allEntries(form, facts, true);
   const added = (i: QuestionItem) => isSaps(i.key) && !form.questionList.some((q) => q.key === i.key);
   for (const item of [...all.filter((i) => !isSaps(i.key)), ...all.filter((i) => isSaps(i.key))]) {
     if (item.kind !== 'question') continue;
     const baseKey = item.group ? item.key.replace(/\.\d+$/, '') : item.key;
     // Worked out from the items and amounts the client gives (progress.ts), so it isn't a question here.
     if (item.sumOf || baseKey === PHONE_OR_TABLET_KEY) continue;
-    // A walkthrough fact or the SAPS step's value already on the claim: never asked twice. The generic list is the exception:
-    // it has no insurer's questions to go on, so it shows them, filled in, for the client to check.
-    if (master.id !== 'generic' && factFor(baseKey, facts) !== undefined) continue;
     const when = conditionsFor(item, form, facts);
     if (!when) continue;
+    if (added(item) && !sapsRequired) when.push({ key: 'saps', oneOf: [true] });
     const isMore = !!item.group && item.key.startsWith(`${item.group}.more.`);
     // A question no master form places yet still shows, under its own section, so a new question is never lost.
     const place = masterPlace(master, baseKey);
     const groupPlace = isMore ? (form.questionList.find((q) => q.group === item.group && masterPlace(master, q.key)) ?? null) : null;
-    const topic = place?.topic ?? (groupPlace ? masterPlace(master, groupPlace.key)?.topic : undefined);
+    const stepper = FORM_STEPPERS[baseKey];
+    const hasGroup = !!stepper && form.questionList.some((q) => q.group === stepper.group);
+    // A count of people sits right above their cards, and "Was it reported?" above the case number.
+    const leads = hasGroup ? form.questionList.find((q) => q.group === stepper.group) : baseKey === 'saps' ? { key: SAPS_CASE_KEY } : undefined;
+    const topic = (leads ? masterPlace(master, leads.key)?.topic : undefined) ?? place?.topic ?? (groupPlace ? masterPlace(master, groupPlace.key)?.topic : undefined);
     const id = topic?.id ?? `section:${item.section ?? 'more'}`;
     const title = topic?.title ?? (item.section ? `${item.section.charAt(0).toUpperCase()}${item.section.slice(1)}` : 'A few more questions');
     const screen: GuidedScreen = screens.get(id) ?? { id, title, ...(id === 'police' && sapsRequired && !claim.sapsCaseNumber ? { help: POLICE_HELP } : {}), fields: [] };
     screens.set(id, screen);
+    // A claim that must have a police case has no use for asking whether there is one.
+    if (baseKey === 'saps' && sapsRequired) continue;
     const n = item.group && !isMore ? Number(/\.(\d+)$/.exec(item.key)?.[1] ?? 0) : 0;
     const original = form.questionList.find((q) => q.key === baseKey);
     const variants = original?.variants?.map((v) => ({ cond: pageCondition(v.when, facts), prompt: v.prompt }));
     const held = variants?.find((v) => v.cond === true);
     const known = answers[item.key]?.status === 'answered';
     const pre = !known && !item.group ? earlierValue(item, master, earlier) : undefined;
-    const stepper = FORM_STEPPERS[baseKey];
-    const hasGroup = !!stepper && form.questionList.some((q) => q.group === stepper.group);
     const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey);
-    const hidden = isMore && Object.values(FORM_STEPPERS).some((x) => x.group === item.group);
+    const hidden = isMore && Object.entries(FORM_STEPPERS).some(([lead, x]) => x.group === item.group && form.questionList.some((q) => q.key === lead));
     screen.fields[added(item) ? 'unshift' : 'push']({
       key: item.key,
       prompt: formPrompt(held?.prompt ?? item.prompt, wordedFor(control)),
@@ -263,12 +278,28 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
         variants: variants.filter((v): v is { cond: GuidedCondition; prompt: string } => typeof v.cond === 'object').map((v) => ({ when: v.cond, prompt: formPrompt(v.prompt, wordedFor(control)) })),
       } : {}),
       ...(item.group && n ? { entry: entryHeading(item.group, n) } : {}),
+      ...(item.group && Object.entries(FORM_STEPPERS).some(([lead, x]) => x.group === item.group && form.questionList.some((q) => q.key === lead)) ? { counted: true } : {}),
       ...(pre !== undefined ? { prefill: pre } : {}),
     });
   }
   // The case number before the station, as the SAPS step asks them (each was put in front in turn).
   const police = screens.get('police')?.fields;
   if (police && police[0]?.key === SAPS_STATION_KEY && police[1]?.key === SAPS_CASE_KEY) [police[0], police[1]] = [police[1], police[0]];
+  const lead = police?.findIndex((f) => f.key === 'saps') ?? -1;
+  if (police && lead > 0) police.unshift(...police.splice(lead, 1));
+  // A count of people has their cards right under it, on one step. What else hangs on the count comes after the cards.
+  for (const s of screens.values()) {
+    for (const lead of s.fields.filter((f) => f.control.kind === 'stepper')) {
+      const group = (lead.control as Extract<GuidedControl, { kind: 'stepper' }>).group;
+      const cards = s.fields.filter((f) => f.counted && (f.key.startsWith(`${group}.more.`) || form.questionList.some((q) => q.group === group && f.key.startsWith(`${q.key}.`))));
+      const moved = new Set([lead, ...cards]);
+      const rest = s.fields.filter((f) => !moved.has(f));
+      const before = s.fields.slice(0, s.fields.indexOf(lead)).filter((f) => !moved.has(f));
+      const firstDependent = before.findIndex((f) => f.when.some((w) => w.key === lead.key));
+      const at = firstDependent >= 0 ? firstDependent : before.length;
+      s.fields = [...rest.slice(0, at), lead, ...cards, ...rest.slice(at)];
+    }
+  }
   // "Is there another?" reads as a question of its own under the entry it follows.
   for (const s of screens.values()) {
     for (const f of s.fields) {
@@ -303,12 +334,21 @@ function detailsFor(form: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm): Guid
   return rows;
 }
 
+/** "2026-11-02T07:40:00Z" as the form holds it: "2026-11-02 09:40". */
+function sastText(iso: string): string {
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? iso : new Date(t + 2 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+}
+
 /** Everything a condition may test, and what fills the boxes. */
 function knownValues(form: ClaimForm, claim: FollowOnClaim) {
   const facts = factsOf(claim);
   const answers: Record<string, string | number | boolean> = {};
   const notKnown: string[] = [];
   for (const [k, v] of Object.entries(facts)) if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') answers[k] = v;
+  // The claim's column holds an instant; the form's pickers show the date and time in South Africa.
+  if (facts.incidentAt) answers.incidentAt = sastText(facts.incidentAt);
+  if (facts.sapsCaseNumber) answers.saps = true;
   for (const [k, a] of Object.entries(claim.answers)) {
     if (a.status === 'answered' && a.value !== null) answers[k] = a.value;
     else if (a.status !== 'answered') notKnown.push(k);
@@ -320,17 +360,17 @@ const evidenceKind = (item: QuestionItem): GuidedEvidence['kind'] => (item.answe
 
 /** The form as the page shows it. `earlier`: the riivo_answers of the client's earlier claims, latest first. */
 export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm, earlier: readonly ClaimAnswers[] = []): GuidedView {
-  const form = asGuided(list);
+  const form = asGuided(list, claim);
   const master = masterFormFor(form);
   const facts = factsOf(claim);
   const sapsRequired = !!claim.sapsRequired;
   const screens = screensFor(form, claim, earlier, sapsRequired);
   const { answers, notKnown } = knownValues(form, claim);
-  const evidence: GuidedEvidence[] = form.questionList.filter((q) => q.kind === 'evidence' && q.onHand !== false).flatMap((q) => {
+  const evidence: GuidedEvidence[] = form.questionList.filter((q) => q.kind === 'evidence' && (q.onHand !== false || FORM_DRAWINGS.has(q.key))).flatMap((q) => {
     const when = conditionsFor(q, form, facts);
-    return when ? [{ key: q.key, prompt: q.prompt, kind: evidenceKind(q), required: q.required, when, count: filesFor(q, claim.evidence) }] : [];
+    return when ? [{ key: q.key, prompt: FORM_DRAWINGS.has(q.key) ? 'A drawing of the accident' : q.prompt, kind: evidenceKind(q), required: q.required, ...(FORM_DRAWINGS.has(q.key) ? { draw: true } : {}), when, count: filesFor(q, claim.evidence) }] : [];
   });
-  const open = guidedOpen(form, claim, sapsRequired);
+  const open = guidedOpen(form, claim, policeOpen(claim));
   const startAt = screens.findIndex((s) => s.fields.some((f) => open.includes(f.key)));
   const detailsConfirmed = claim.answers[DETAILS_CONFIRMED_KEY]?.status === 'answered';
   return {
@@ -339,6 +379,7 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     insurer: claim.insurer,
     details: detailsFor(form, claim, crm),
     detailsConfirmed,
+    ...(claim.answers[TERMS_KEY]?.status === 'answered' ? {} : { terms: { title: FORM_TERMS.title, lines: FORM_TERMS.lines, agree: FORM_TERMS.agree } }),
     screens,
     evidence,
     answers,
@@ -346,6 +387,10 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     startAt: startAt < 0 ? screens.length : startAt,
   };
 }
+
+/** Whether the police case's own questions are open on the form: the claim needs them, or the client said it was reported. */
+const policeOpen = (claim: Pick<FollowOnClaim, 'sapsRequired' | 'facts' | 'answers'>) =>
+  !!claim.sapsRequired || claim.facts.saps === true || claim.answers.saps?.value === true;
 
 /** The questions that still apply and have no answer, in the list's order. An evidence item is never one: Tina asks for those. */
 export function guidedOpen(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers' | 'facts' | 'claimType' | 'sapsCaseNumber' | 'sapsStation'>, sapsRequired: boolean): string[] {
@@ -358,7 +403,8 @@ export function guidedOpen(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers'
 
 // ---------------------------------------------------------------------------------------------------- saving
 
-export type GuidedPorts = Pick<FollowOnPorts, 'loadClaim' | 'claimForm' | 'saveAnswers' | 'saveSaps' | 'fileToPipeline' | 'storeVideo' | 'claimEvidence' | 'claimFlags'>;
+export type GuidedPorts = Pick<FollowOnPorts, 'loadClaim' | 'claimForm' | 'saveAnswers' | 'saveSaps' | 'fileToPipeline' | 'storeVideo' | 'claimEvidence' | 'claimFlags'>
+  & Partial<Pick<FollowOnPorts, 'saveFacts' | 'createAgentAction'>>;
 
 export interface GuidedSave {
   answers?: ReadonlyArray<{ key: string; value: string | number | boolean }>;
@@ -370,6 +416,8 @@ export interface GuidedSave {
   checked?: readonly string[];
   /** The client has gone past the screen of what TTT holds. */
   detailsConfirmed?: boolean;
+  /** The client agreed to what opens the form. */
+  termsAccepted?: boolean;
 }
 
 export interface GuidedSaved {
@@ -430,13 +478,14 @@ export function applyGuidedSave(
     answers[key] = { value, status: 'answered', at, source: 'form' };
     if (key === ADDRESS_KEY) answers[ADDRESS_CHECK_KEY] = { value: 'Another address', status: 'answered', at, source: 'form' };
   }
+  if (input.termsAccepted) answers[TERMS_KEY] = { value: true, status: 'answered', at, source: 'form' };
   if (input.detailsConfirmed) {
     answers[DETAILS_CONFIRMED_KEY] = { value: true, status: 'answered', at, source: 'form' };
     // The address question on WhatsApp is settled too, if the client later moves to chat (AC 8).
     if (!answers[ADDRESS_KEY] && !answers[ADDRESS_CHECK_KEY] && claim.contactAddress?.trim()) answers[ADDRESS_CHECK_KEY] = { value: 'Still the same', status: 'answered', at, source: 'form' };
   }
 
-  const list = () => formItems(form, answers, { ...facts, ...saps.caseNumber ? { sapsCaseNumber: saps.caseNumber } : {}, ...saps.station ? { sapsStation: saps.station } : {} }, sapsRequired);
+  const list = () => formItems(form, answers, { ...facts, ...saps.caseNumber ? { sapsCaseNumber: saps.caseNumber } : {}, ...saps.station ? { sapsStation: saps.station } : {} }, sapsRequired || answers.saps?.value === true);
   for (let pass = 0, more = true; more && pass < 8 && given.size; pass++) {
     more = false;
     for (const [key, v] of [...given]) {
@@ -485,8 +534,8 @@ export function applyGuidedSave(
 async function loaded(ports: GuidedPorts, claimId: string) {
   const claim = await ports.loadClaim(claimId);
   if (!claim.claimFormId) throw new Error(`TTTFG-5562: claim ${claimId} has no claim form yet`);
-  const form = asGuided(await ports.claimForm(claim.claimFormId));
-  return { claim, form, sapsRequired: !!claim.sapsRequired };
+  const form = asGuided(await ports.claimForm(claim.claimFormId), claim);
+  return { claim, form, sapsRequired: policeOpen(claim) };
 }
 
 export async function loadGuided(ports: GuidedPorts, claimId: string, crm: (claim: FollowOnClaim) => Promise<GuidedCrm>, earlier: (claim: FollowOnClaim) => Promise<ClaimAnswers[]>): Promise<GuidedView> {
@@ -514,12 +563,26 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
   const { answers, saps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
   if (saps.caseNumber || saps.station) await ports.saveSaps(claimId, saps);
   if (JSON.stringify(answers) !== JSON.stringify(claim.answers)) await ports.saveAnswers(claimId, answers);
+  // What the walkthrough asks on chat goes on the claim's own columns: the insurer's form and the broker read those.
+  const columns = factColumns(form, claim.facts, answers);
+  if (Object.keys(columns).length) await ports.saveFacts?.(claimId, columns);
+  const at = now.toISOString();
+  const by = { department: DEPARTMENT as typeof DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim' as const, id: claimId }, contactId: claim.contactId, at };
+  if (input.termsAccepted && claim.answers[TERMS_KEY]?.status !== 'answered') {
+    await ports.createAgentAction?.({
+      kind: 'Created', ...by, detail: `The client agreed to the notes that open the claim form for ${claim.reference}.`,
+      template: { name: FORM_TERMS.name, version: FORM_TERMS.version, text: FORM_TERMS.lines.join(' ') },
+    });
+  }
+  if (plumberAsked(claim.answers, answers)) {
+    await ports.createAgentAction?.({ kind: 'Follow-up', ...by, urgent: true, urgencyReason: 'The client needs a plumber', detail: plumberDetail(claim.reference, claim.insurer) });
+  }
   // saveSaps sets riivo_sapsinvolved with a case number, so the questions that hang on the police being involved are open now.
   const after: FollowOnClaim = {
     ...claim, answers, sapsCaseNumber: saps.caseNumber ?? claim.sapsCaseNumber, sapsStation: saps.station ?? claim.sapsStation,
-    ...(saps.caseNumber ? { facts: { ...claim.facts, saps: true } } : {}),
+    facts: { ...claim.facts, ...columns, ...(saps.caseNumber ? { saps: true } : {}) },
   };
-  return { problems, ...knownValues(form, after), open: guidedOpen(form, after, sapsRequired) };
+  return { problems, ...knownValues(form, after), open: guidedOpen(form, after, policeOpen(after)) };
 }
 
 /**

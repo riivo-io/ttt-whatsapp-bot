@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided form's master forms. One per kind of claim, each holding every unique question of every go-live
 // insurer form of that kind, grouped into the topics a client sees one screen at a time. The client only ever sees what
@@ -49,6 +49,8 @@ const fields = (spec: string, prefill = ''): MasterField[] => {
 };
 const topic = (id: string, title: string, spec: string, prefill = ''): MasterTopic => ({ id, title, fields: fields(spec, prefill) });
 
+/** TTTFG-5562: what Tina's walkthrough asks on chat. It opens every form, and the burst pipe only shows on a home claim. */
+const HAPPENED = topic('happened', 'What happened', 'incidentAt place description thirdParties injuries saps burstPipe contractor');
 const POLICY = topic('policy', 'Your policy', 'ownPolicy policyholderRelationship policyDocsReceived preferredContact');
 const WHERE = topic('where', 'Where it happened', 'incidentSuburb incidentProvince incidentCountry dateDiscovered');
 const FINANCE_KEYS = 'vehicleFinanced financeInstitution financeAgreementType financeAccountNumber financeSettlementAmount registrationDocsAvailable';
@@ -64,6 +66,7 @@ export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
     id: 'motor-accident',
     title: 'Motor claim',
     topics: [
+      HAPPENED,
       POLICY,
       topic('vehicle', 'Your vehicle',
         'vehicleMake vehicleModel vehicleRegistration yearModel kmReading transmission hasAccessories vehicleOwnedByClient registeredOwner', VEHICLE_ITSELF),
@@ -74,13 +77,13 @@ export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
         + 'driverRelationship regularDriver alcohol alcoholDetails breathalyser driverPhysicalDefects'),
       topic('licence', "The driver's licence", 'licenceNumber licenceCode licenceDateIssued licenceEndorsements|licenceEndorsed'),
       topic('trip', 'The trip',
-        'vehicleUse privateUseOnly tripFrom tripTo tripPurpose timeAtLocation vehicleParked hadPassengers passengersReason passengersRelationship'),
-      topic('passengers', 'Passengers', 'passengerName passengerPhone passengerInjury'),
-      topic('accident', 'What happened',
+        'vehicleUse privateUseOnly tripFrom tripTo tripPurpose timeAtLocation vehicleParked'),
+      topic('passengers', 'Passengers', 'hadPassengers passengersReason passengersRelationship passengerName passengerPhone passengerInjury'),
+      topic('accident', 'The accident',
         'driverScenario otherScenario speedBefore speedAtCollision weather visibility roadSurface roadCondition potholeDamage precautions additionalInfo'),
-      topic('scene', 'At the scene', `${AUTHORITIES} otherPartyResponsible`),
+      topic('scene', 'At the scene', AUTHORITIES),
       topic('other', 'The other vehicle',
-        'otherVehicle otherVehicleMake otherRegistration otherContact otherInsurer otherDamage otherInsurance otherDriverName otherDriverPhone otherDriverAddress '
+        'otherPartyResponsible otherVehicle otherVehicleMake otherRegistration otherContact otherInsurer otherDamage otherInsurance otherDriverName otherDriverPhone otherDriverAddress '
         + 'otherFirstName otherSurname otherIdNumber otherPhone otherAddress otherResponsible otherGovernment otherInsured otherInsuranceDetails'),
       topic('hurt', 'Anyone hurt', 'injuredName injuredDetails injuredRelationship'),
       topic('witnesses', 'Witnesses', `${WITNESSES} witnessName`),
@@ -94,6 +97,7 @@ export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
     id: 'motor-theft',
     title: 'Vehicle theft claim',
     topics: [
+      HAPPENED,
       POLICY,
       topic('vehicle', 'Your vehicle',
         'vehicleMakeModel vehicleMake vehicleModel vehicleRegistration vehicleYear|yearModel vehicleMileage|kmReading vehicleColour transmission hasAccessories '
@@ -123,6 +127,7 @@ export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
     id: 'property',
     title: 'Household claim',
     topics: [
+      HAPPENED,
       POLICY,
       topic('claim', "What you're claiming for", 'claimContents claimBuilding buildingCause portableSection lossCause lossKind'),
       topic('when', 'When and where',
@@ -164,7 +169,7 @@ export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
     id: 'generic',
     title: 'Claim',
     topics: [
-      topic('what', 'What happened', 'description incidentCause'),
+      topic('what', 'What happened', 'description incidentCause burstPipe contractor'),
       topic('when', 'When and where', 'incidentAt place'),
       topic('lost', 'What was lost or damaged', 'whatDamaged estimatedCost'),
       topic('others', 'Who else was involved', 'thirdParties otherFirstName otherSurname otherPhone otherRegistration otherInsurer'),

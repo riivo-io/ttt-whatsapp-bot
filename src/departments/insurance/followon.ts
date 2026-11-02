@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -56,6 +56,7 @@ import {
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
 import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, type ClaimTemplate } from './templates';
+import { factColumns, factsMissing, OPENED_FOR_FORM_KEY, plumberAsked, plumberDetail, withFacts, type FactColumns } from './formfacts';
 import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
 /**
@@ -92,7 +93,7 @@ export interface FollowOnClaim {
   insurer: string;
   claimType: ClaimType;
   /** The walkthrough's facts on the claim row; `incidentAt` drives the deadline note. */
-  facts: Facts & { incidentAt: string };
+  facts: Facts;
   sapsCaseNumber?: string;
   sapsStation?: string;
   /** riivo_claim.riivo_sapsrequired (TTTFG-5184): the SAPS step applies, set when the follow-on starts. */
@@ -138,6 +139,8 @@ export interface FollowOnPorts {
   setClaimForm(claimId: string, formId: string): Promise<void>;
   /** riivo_sapscasenumber and riivo_sapsstation; a case number also sets riivo_sapsinvolved = Yes. */
   saveSaps(claimId: string, v: { caseNumber?: string; station?: string }): Promise<void>;
+  /** TTTFG-5562: what the form (or chat, on a claim opened for the form) asked instead of the walkthrough, on the claim's columns. */
+  saveFacts?(claimId: string, v: Partial<FactColumns>): Promise<void>;
   /**
    * riivo_sapsrequired = Yes (TTTFG-5184). Claude's describedAsTheft lives only in the start message, so the claim keeps
    * whether the SAPS step applies; a client who comes back days later is still asked for the case number.
@@ -610,22 +613,28 @@ export function stillNeedState(c: Pick<Ctx, 'now'>, st: FollowOnState, missing: 
   };
 }
 
+/** The note on the insurer's deadline, when it's near or passed. Nothing before the date of the incident is known. */
+function deadlineNote(c: Ctx, out: Out[]): void {
+  if (!c.claim.facts.incidentAt) return;
+  const d = notificationDeadline(c.claim.facts.incidentAt, c.form.notificationPeriodDays, c.now, c.warningDays);
+  if (!d) return;
+  const template = d.variant === 'upcoming' ? DEADLINE_UPCOMING_TEMPLATE : DEADLINE_PASSED_TEMPLATE;
+  const vars = { insurer: c.claim.insurer, periodDays: c.form.notificationPeriodDays, deadline: d.deadline };
+  out.push({ kind: 'template', template, text: template.render(vars) });
+}
+
 /** After the SAPS step: the deadline note when needed, the duty of disclosure, then the first question. */
 function intro(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | null {
   if (st.introSent) return proceed(c, w, st, out);
-  st = { ...st, introSent: true };
-  const d = notificationDeadline(c.claim.facts.incidentAt, c.form.notificationPeriodDays, c.now, c.warningDays);
-  if (d) {
-    const template = d.variant === 'upcoming' ? DEADLINE_UPCOMING_TEMPLATE : DEADLINE_PASSED_TEMPLATE;
-    const vars = { insurer: c.claim.insurer, periodDays: c.form.notificationPeriodDays, deadline: d.deadline };
-    out.push({ kind: 'template', template, text: template.render(vars) });
-  }
-  out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
-  // TTTFG-5562: one link instead of the first question (AC 1). The address is on the form's first screen.
+  // TTTFG-5562: one link instead of the first question. The form opens with the duty of disclosure and the AI notice, and
+  // the address is on its first screen. The deadline note waits for the date of the incident, which the form asks.
   if (c.guided) {
     out.push({ kind: 'guided-link' });
     return { ...st, phase: 'form', asking: '', misses: 0 };
   }
+  st = { ...st, introSent: true };
+  deadlineNote(c, out);
+  out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
   // TTTFG-4830: the client's home address goes on every form; confirmed first when it's missing or looks out of date.
   const check = addressAsk(c.claim, w.answers);
   if (check) {
@@ -788,7 +797,10 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
     applyOthers(c, w, st.sapsRequired, reported, report, out);
   }
   // TTTFG-5562: the SAPS questions are on the form, with the rest of the list.
-  if (c.guided) return { state: intro(c, w, st, out), out };
+  if (c.guided) {
+    if (factsMissing(c.claim.facts)) out.push({ kind: 'save-answer', key: OPENED_FOR_FORM_KEY, record: { value: true, status: 'answered', at: c.now.toISOString(), source: 'form' } });
+    return { state: intro(c, w, st, out), out };
+  }
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
     // TTTFG-4830: "please report it" only to a client who didn't say they had.
     if (!w.facts.sapsCaseNumber && !c.claim.facts.saps) out.push({ kind: 'saps-instruction' });
@@ -1265,7 +1277,7 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
 export const GUIDED_LINK_LABEL = 'Open claim form';
 /** The link's message. It says the client can stop and come back, and how to answer on WhatsApp instead. */
 export const guidedLinkText = (first: string | undefined, minutes: number) =>
-  `Thanks${first ? `, ${first}` : ''}. Please tap below to fill in your claim form. Most answers are a tap, I've filled in what we already know, and it takes about ${minutes} minutes. `
+  `${first ? `${first}, please` : 'Please'} tap below to fill in your claim form. Most answers are a tap, I've filled in what we already know, and it takes about ${minutes} minutes. `
   + 'You can stop and come back with the same link.\n\nIf you\'d rather answer here on WhatsApp, just say "chat".';
 export const FORM_OPEN = 'Your claim form is in the link I sent you. You can stop and come back to it with the same link. If you\'d rather answer here on WhatsApp, just say "chat".';
 export const CHAT_INSTEAD = "No problem, let's do it here.";
@@ -1289,6 +1301,13 @@ function advanceForm(c: Ctx, w: Work, st: FollowOnState, input: ClientReply, out
   return st;
 }
 
+/** A yes on the form to "Was it reported to the police?" brings the SAPS step with it, now the client can't change it there. */
+function policeFromForm(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState {
+  if (st.sapsRequired || (w.answers.saps?.value !== true && c.claim.facts.saps !== true)) return st;
+  out.push({ kind: 'saps-required' });
+  return { ...st, sapsRequired: true };
+}
+
 /** What the client said "not yet" to on the form: as for a "not yet" on WhatsApp, not asked again in this conversation. */
 const notYetOnForm = (st: FollowOnState, w: Work) =>
   [...new Set([...st.skipped, ...Object.keys(w.answers).filter((k) => deferred(k, w.answers))])];
@@ -1297,7 +1316,13 @@ const notYetOnForm = (st: FollowOnState, w: Work) =>
 function formChat(c: Ctx, st: FollowOnState, lead: string = CHAT_INSTEAD): Step {
   const w = work(c.claim);
   const out: Out[] = [{ kind: 'text', text: lead }];
-  const base: FollowOnState = { ...st, phase: 'items', asking: '', misses: 0, skipped: notYetOnForm(st, w) };
+  st = policeFromForm(c, w, st, out);
+  // TTTFG-5562: the form would have opened with these. On chat, Tina says them.
+  if (!st.introSent) {
+    deadlineNote(c, out);
+    out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
+  }
+  const base: FollowOnState = { ...st, phase: 'items', asking: '', misses: 0, introSent: true, skipped: notYetOnForm(st, w) };
   const sapsOpen = st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation) && !deferred(SAPS_CASE_KEY, w.answers);
   if (sapsOpen) {
     if (!w.facts.sapsCaseNumber && !c.claim.facts.saps) out.push({ kind: 'saps-instruction' });
@@ -1337,7 +1362,10 @@ function formDone(c: Ctx, st: FollowOnState): Step {
       detail: `The client changed details on the claim form for ${c.claim.reference}. ${changed.join('; ')}. The new values are on the form. Please update the CRM, and check the policy still fits.`,
     });
   }
-  return { state: proceed(c, w, { ...st, phase: 'items', asking: '', misses: 0, skipped: notYetOnForm(st, w) }, out, 'Thanks.'), out };
+  st = policeFromForm(c, w, st, out);
+  // The date of the incident was on the form, so this is the first Tina can say anything about the insurer's deadline.
+  if (!st.introSent) deadlineNote(c, out);
+  return { state: proceed(c, w, { ...st, phase: 'items', asking: '', misses: 0, introSent: true, skipped: notYetOnForm(st, w) }, out, 'Thanks.'), out };
 }
 
 function answerQuestion(c: Ctx, w: Work, st: FollowOnState, input: Extract<ClientReply, { kind: 'question' }>, out: Out[], at: string): FollowOnState | null {
@@ -1980,6 +2008,9 @@ export async function followOnTurn(
     form = await ports.claimForm(claim.claimFormId);
   }
   if (input.kind !== 'start' && input.kind !== 'nudge') await ports.setLastClientMessageOn(claimId, at);
+  // TTTFG-5562: a claim opened for the form holds no walkthrough facts yet; a client who moves to chat is asked them first.
+  const openedForForm = factsMissing(claim.facts) && (input.kind === 'start' ? !!settings.guidedForm && !!ports.guidedFormLink : !!claim.answers[OPENED_FOR_FORM_KEY]);
+  if (openedForForm) form = withFacts(form, claim, 'skip');
 
   const ctx: Ctx = {
     claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays,
@@ -2107,6 +2138,17 @@ export async function followOnTurn(
         break;
     }
   }
+  // TTTFG-5562: a claim opened for the form: what was asked instead of the walkthrough goes on the claim's own columns.
+  if (openedForForm && ports.saveFacts) {
+    const columns = factColumns(form, claim.facts, answers);
+    if (Object.keys(columns).length) await ports.saveFacts(claimId, columns);
+    if (plumberAsked(claim.answers, answers)) {
+      await ports.createAgentAction({
+        kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at, urgent: true,
+        urgencyReason: 'The client needs a plumber', detail: plumberDetail(claim.reference, claim.insurer),
+      });
+    }
+  }
   // TTTFG-5200: once, after the turn's writes, so the score reads every file this message brought. An answer counts
   // when a conditional evidence item depends on it ("If the car was found: …"), and the SAPS step when one tests a claim
   // column. Best effort: the client's turn is done by now, the next evidence works the score out again, and a pack that
@@ -2127,7 +2169,8 @@ export async function followOnTurn(
   // claim opens; the walkthrough ends with the still-need list or the closing line. Nothing comes back into the turn,
   // and a failure is logged, never thrown: a flag never slows the claim down (AC 8).
   const triggers: FlagTrigger[] = [
-    ...(input.kind === 'start' ? ['open' as const] : []),
+    // TTTFG-5562: a claim opened for the form gets its date on the form, and the flags need the date.
+    ...((input.kind === 'start' && claim.facts.incidentAt) || (input.kind === 'form-done' && !state?.introSent) ? ['open' as const] : []),
     ...(step.out.some((o) => o.kind === 'still-missing' || o.kind === 'closing') ? ['walkthrough-end' as const] : []),
     ...(step.out.some((o) => o.kind === 'file') ? ['document' as const] : []),
   ];

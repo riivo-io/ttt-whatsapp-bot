@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
@@ -9,6 +9,11 @@
 export type FormControl =
   /** One option to tap. `other`: "Other" opens a box. `detail`: a box for more, once one is tapped, saved as "<option><joiner><text>". */
   | { kind: 'pills'; options: readonly string[]; other?: boolean; label?: string; bare?: boolean; detail?: { placeholder: string; joiner: string } }
+  /**
+   * A list too long to tap, of things people know the name of: a dropdown they can also type into, which narrows as they
+   * type. `free`: a name that isn't on the list is kept as typed. `detail`: as for pills.
+   */
+  | { kind: 'combo'; options: readonly string[]; free?: boolean; label?: string; bare?: boolean; placeholder?: string; detail?: { placeholder: string; joiner: string } }
   /** Any of the options, saved as "a, b". */
   | { kind: 'multi'; options: readonly string[]; other?: boolean; label?: string; bare?: boolean }
   /**
@@ -34,6 +39,7 @@ export type FormControl =
 
 const pills = (options: readonly string[], o: Omit<Extract<FormControl, { kind: 'pills' }>, 'kind' | 'options'> = {}): FormControl => ({ kind: 'pills', options, ...o });
 const multi = (options: readonly string[], o: Omit<Extract<FormControl, { kind: 'multi' }>, 'kind' | 'options'> = {}): FormControl => ({ kind: 'multi', options, ...o });
+const combo = (options: readonly string[], o: Omit<Extract<FormControl, { kind: 'combo' }>, 'kind' | 'options'> = {}): FormControl => ({ kind: 'combo', options, free: true, ...o });
 const yesText = (label: string, then: string, o: Omit<Extract<FormControl, { kind: 'yes-text' }>, 'kind' | 'label' | 'then'> = {}): FormControl => ({ kind: 'yes-text', label, then, ...o });
 const short = (placeholder?: string, o: Omit<Extract<FormControl, { kind: 'short' }>, 'kind' | 'placeholder'> = {}): FormControl => ({ kind: 'short', ...(placeholder ? { placeholder } : {}), ...o });
 /** A box inside a person's or an item's card: the placeholder says what it is, so it needs no question above it. */
@@ -52,20 +58,20 @@ const PHONE = short('Phone number');
 const KM: FormControl = { kind: 'slider', min: 0, max: 400000, step: 5000, unit: 'km' };
 const YEARS: FormControl = { kind: 'slider', min: 0, max: 30, step: 1, unit: 'years', bare: true };
 const WHERE_ON_CAR = ['Front', 'Rear', 'Left side', 'Right side', 'Bonnet', 'Boot', 'Roof'];
-const INSURERS = ['Santam', 'OUTsurance', 'Discovery Insure', 'Old Mutual Insure', 'Hollard', 'Momentum', 'MiWay', 'King Price', 'Auto & General'];
-const insurer = (label: string): FormControl => pills(INSURERS, { other: true, label, detail: { placeholder: 'Policy number (if you have it)', joiner: ', policy ' } });
+const INSURERS = ['1st for Women', 'Absa Insurance', 'AIG', 'Auto & General', 'Budget Insurance', 'Bryte', 'Clientele', 'Dial Direct', 'Discovery Insure', 'First for Women', 'FNB Insurance', 'Hollard', 'Hybrid', 'iTOO', 'King Price', 'MiWay', 'Momentum', 'Mutual & Federal', 'Naked', 'Nedbank Insurance', 'Old Mutual Insure', 'OUTsurance', 'Pineapple', 'Renasa', 'Santam', 'Sasria', 'Standard Bank Insurance', 'Virseker', 'Western National', 'Zurich'];
+const insurer = (label: string): FormControl => combo(INSURERS, { label, placeholder: 'Choose or type the insurer', detail: { placeholder: 'Policy number (if you have it)', joiner: ', policy ' } });
 const KIN = ['Spouse', 'Child', 'Parent', 'Friend', 'Employee'];
 const KNOWS = ['Family', 'Neighbour', 'Domestic worker', 'Friend', 'Security company'];
 const SEEN_FROM = ['Home', 'Work', 'A shop'];
 const ROOM_IN = ['Front door', 'Back door', 'Window', 'Garage', 'Roof'];
 const ARMED = ['Fidelity ADT', 'Chubb', 'Beagle Watch'];
-const CAR_MAKES = ['Toyota', 'VW', 'Ford', 'Hyundai', 'Nissan', 'Kia', 'Isuzu', 'Suzuki', 'Renault', 'BMW', 'Mercedes-Benz', 'Audi', 'Haval', 'Chery', 'Mazda', 'Honda'];
-const COLOURS = ['White', 'Silver', 'Grey', 'Black', 'Blue', 'Red'];
-const SHOPS = ['Takealot', 'Makro', 'Game', 'Incredible', 'Hi-Fi Corp', 'iStore', 'Woolworths', 'A gift'];
-const ITEMS = ['TV', 'Laptop', 'Cellphone', 'Tablet', 'Camera', 'Jewellery', 'Watch', 'Bicycle', 'Furniture', 'Appliance'];
-const itemControl = (): FormControl => pills(ITEMS, { other: true, label: 'What is the item?', detail: { placeholder: 'Make and model, e.g. Samsung 55 inch', joiner: ': ' } });
-const shopControl = (): FormControl => pills(SHOPS, { other: true, label: 'Where did you buy it or get it?' });
-const makeAndModel = (label: string): FormControl => pills(CAR_MAKES, { other: true, label, detail: { placeholder: 'Model, e.g. Polo Vivo', joiner: ' ' } });
+const CAR_MAKES = ['Alfa Romeo', 'Aston Martin', 'Audi', 'Bentley', 'BMW', 'BYD', 'Chana', 'Changan', 'Chery', 'Chevrolet', 'Chrysler', 'Citroen', 'Daihatsu', 'Datsun', 'Dodge', 'DFSK', 'Ferrari', 'Fiat', 'Ford', 'Foton', 'GAC', 'Geely', 'GWM', 'Haval', 'Honda', 'Hummer', 'Hyundai', 'Infiniti', 'Isuzu', 'Iveco', 'JAC', 'Jaguar', 'Jeep', 'Jetour', 'Kia', 'Lamborghini', 'Land Rover', 'Lexus', 'Mahindra', 'Maserati', 'Mazda', 'McLaren', 'Mercedes-Benz', 'MG', 'Mini', 'Mitsubishi', 'Nissan', 'Omoda', 'Opel', 'Peugeot', 'Porsche', 'Proton', 'Renault', 'Rolls-Royce', 'Saab', 'Seat', 'Smart', 'Ssangyong', 'Subaru', 'Suzuki', 'Tata', 'Tesla', 'Toyota', 'Volkswagen (VW)', 'Volvo'];
+const COLOURS = ['White', 'Silver', 'Grey', 'Black', 'Red'];
+const SHOPS = ['A gift', 'Apple Store', 'Builders', 'Cash Crusaders', 'Dis-Chem', 'Game', 'Hi-Fi Corp', 'Incredible', 'iStore', 'Jet', 'Makro', 'Mr Price', 'Pick n Pay', 'Sportsmans Warehouse', 'Takealot', 'Woolworths'];
+const ITEMS = ['Appliance', 'Bicycle', 'Camera', 'Cellphone', 'Clothing', 'Furniture', 'Gaming console', 'Jewellery', 'Laptop', 'Power tool', 'Sound system', 'Sunglasses', 'Tablet', 'TV', 'Watch'];
+const itemControl = (): FormControl => combo(ITEMS, { label: 'What is the item?', placeholder: 'Choose or type the item', detail: { placeholder: 'Make and model, e.g. Samsung 55 inch', joiner: ': ' } });
+const shopControl = (): FormControl => combo(SHOPS, { label: 'Where did you buy it or get it?', placeholder: 'Choose or type the shop' });
+const makeAndModel = (label: string): FormControl => combo(CAR_MAKES, { label, placeholder: 'Choose or type the make', detail: { placeholder: 'Model, e.g. Polo Vivo', joiner: ' ' } });
 const REPAIRER = ['Dealer', 'Workshop'];
 const LIVES_AT = ['At work', 'On holiday', 'Out shopping', 'Visiting someone'];
 const BUILDING_PARTS = ['Roof', 'Ceilings', 'Walls', 'Floors', 'Windows', 'Doors', 'Gate motor', 'Garage door'];
@@ -76,11 +82,11 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   incidentCause: pills(['An accident', 'Theft or burglary', 'Fire', 'Storm or flood', 'Burst pipe or geyser'], { other: true }),
   incidentAt: { kind: 'datetime', label: 'When did it happen?' },
   place: short('e.g. 12 Oak Avenue, Durbanville', { label: 'Where did it happen?' }),
-  whatDamaged: multi(['Vehicle', 'House or building', 'Furniture', 'Electronics', 'Jewellery', 'Clothing', 'Tools or equipment'], { other: true, label: 'What was lost or damaged?' }),
+  whatDamaged: multi(['Vehicle', 'House or building', 'Furniture', 'Electronics', 'Jewellery'], { other: true, label: 'What was lost or damaged?' }),
   estimatedCost: pills(['Under R5 000', 'R5 000 to R20 000', 'R20 000 to R50 000', 'R50 000 to R100 000', 'Over R100 000'], { label: 'Roughly how much to fix or replace it?' }),
 
   // ---- the vehicle
-  vehicleMake: pills(CAR_MAKES, { other: true }),
+  vehicleMake: combo(CAR_MAKES, { placeholder: 'Choose or type the make' }),
   vehicleModel: short('e.g. Corolla Cross'),
   vehicleMakeModel: makeAndModel('What is the make and model of the car?'),
   vehicleRegistration: short('e.g. CA 123-456'),
@@ -114,7 +120,7 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   driverIdNumber: NAME,
   driverPhone: PHONE,
   driverOccupation: NAME,
-  driverOwnerRelationship: pills(['Owner', ...KIN], { other: true }),
+  driverOwnerRelationship: pills(['Owner', 'Spouse', 'Child', 'Parent', 'Friend'], { other: true }),
   driverRelationship: pills(KIN, { other: true }),
   alcoholDetails: pills(['One or two drinks, earlier', 'More than two drinks, earlier', 'Just before driving'], { other: true, label: 'How much, and when?' }),
   driverPhysicalDefects: yesText('Does the driver have any physical condition that affects driving, for example needing glasses?', 'What is it?'),
@@ -133,7 +139,7 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   passengersRelationship: pills(['Family', 'Friends', 'Colleagues'], { other: true }),
   speedBefore: { kind: 'slider', min: 0, max: 160, step: 5, unit: 'km/h', label: 'Roughly how fast was the car going just before the accident?' },
   speedAtCollision: { kind: 'slider', min: 0, max: 160, step: 5, unit: 'km/h', label: 'And roughly how fast at the moment of the crash?' },
-  weather: pills(['Clear', 'Cloudy', 'Rain', 'Fog', 'Wind', 'Hail']),
+  weather: pills(['Clear', 'Cloudy', 'Rain', 'Fog', 'Wind'], { other: true }),
   visibility: pills(['Good', 'Poor', 'Dark / night', 'Blinded by the sun']),
   roadSurface: pills(['Dry', 'Wet', 'Gravel', 'Potholes', 'Oil / diesel']),
   precautions: multi(['Braked', 'Swerved', 'Hooted', 'Nothing was possible'], { other: true }),
@@ -199,7 +205,7 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
 
   // ---- where, when and the police
   incidentSuburb: short('e.g. Durbanville, Cape Town'),
-  incidentCountry: pills(['South Africa', 'Namibia', 'Botswana', 'Eswatini', 'Lesotho', 'Mozambique', 'Zimbabwe'], { other: true }),
+  incidentCountry: combo(['South Africa', 'Angola', 'Botswana', 'Eswatini', 'Lesotho', 'Malawi', 'Mauritius', 'Mozambique', 'Namibia', 'Tanzania', 'Zambia', 'Zimbabwe'], { placeholder: 'Choose or type the country' }),
   dateDiscovered: RECENT,
   sapsCaseNumber: short('e.g. CAS 112/11/2026'),
   sapsStation: NAME,
@@ -258,7 +264,7 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   suspectFirstName: FIRST,
   suspectSurname: SURNAME,
   suspectPhone: yesText('Do you have their phone number?', 'Phone number', { needsText: true }),
-  suspectRelationship: pills(['Stranger', ...KNOWS], { other: true }),
+  suspectRelationship: pills(['Stranger', 'Family', 'Neighbour', 'Domestic worker', 'Friend'], { other: true }),
   thirdPartyName: NAME,
   thirdPartyPhone: PHONE,
   theftDiscovererFirstName: FIRST,
@@ -295,15 +301,21 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   treeFellerInsurance: insurer('Which insurance company are they with?'),
   geyserTypeOther: NAME,
   damagedAreas: multi(BUILDING_PARTS, { other: true, label: 'Which parts of the building were damaged or stolen?' }),
-  resultantDamageDetails: multi(['Ceilings', 'Walls', 'Floors', 'Carpets', 'Furniture', 'Electronics'], { other: true }),
-  previousInsurer: pills(['This is my first', ...INSURERS], { other: true }),
+  resultantDamageDetails: multi(['Ceilings', 'Walls', 'Floors', 'Carpets', 'Furniture'], { other: true }),
+  previousInsurer: combo(['This is my first', ...INSURERS], { placeholder: 'Choose or type the insurer' }),
   previousLosses: yesText('Have you had a similar loss or claim in the last 5 years?', 'Roughly when, what happened and how much?', { long: true }),
 };
 
 /** The yes/no that a repeating group's card count answers, when the form has that group. */
 export const FORM_STEPPERS: Readonly<Record<string, Extract<FormControl, { kind: 'stepper' }>>> = {
-  hadPassengers: { kind: 'stepper', group: 'passengers', label: 'Was anyone else in the vehicle?', none: 'Only the driver', one: 'passenger', many: 'passengers' },
+  hadPassengers: { kind: 'stepper', group: 'passengers', label: 'How many passengers were in the vehicle?', none: 'Only the driver', one: 'passenger', many: 'passengers' },
+  thirdParties: { kind: 'stepper', group: 'otherParties', label: 'How many other cars or people were involved?', none: 'Nobody else', one: 'other', many: 'others' },
+  injuries: { kind: 'stepper', group: 'injured', label: 'How many people were hurt?', none: 'Nobody', one: 'person', many: 'people' },
+  hadWitnesses: { kind: 'stepper', group: 'witnesses', label: 'How many witnesses were there?', none: 'No witnesses', one: 'witness', many: 'witnesses' },
 };
+
+/** Evidence the client can draw with a finger on the form, as well as add as a photo. */
+export const FORM_DRAWINGS: ReadonlySet<string> = new Set(['accidentSketch']);
 
 /**
  * The question's words on the form: the question and nothing else, because a screen only holds what fits. The first page

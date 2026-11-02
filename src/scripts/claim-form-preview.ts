@@ -47,7 +47,7 @@ function claimFor(row: { name: string; form: StoredClaimForm }, i: number): Foll
     const claimType = (row.form.claimType ?? 'Other') as FollowOnClaim['claimType'];
     return {
         id: row.name, reference: `CLM-${String(24117 + i).padStart(6, '0')}`, contactId: 'preview', providerId: row.form.provider ?? '', insurer: row.form.provider ?? 'Your insurer', claimType,
-        facts: { claimType, description: 'Traffic slowed down and a white VW Polo drove into the back of the bakkie.', incidentAt: '2026-11-02T07:40:00+02:00', place: 'N1 at the Durbanville off-ramp', thirdParties: true, saps: false, injuries: false } as FollowOnClaim['facts'],
+        facts: { claimType },
         sapsRequired: ['Motor accident', 'Motor theft', 'Hijacking'].includes(claimType), status: 'FNOL logged', signatureStatus: 'Not sent', claimFormId: row.form.id, answers: {}, evidence: [],
         owner: { kind: 'user', id: 'u', name: 'Preview' }, contactAddress: '12 Oak Avenue\nDurbanville\n7550',
     };
@@ -62,6 +62,9 @@ const ports = (form: StoredClaimForm): GuidedPorts => ({
     loadClaim: async (id: string) => structuredClone(claims.get(id)!),
     claimForm: async () => form,
     saveAnswers: async (id: string, answers) => { claims.get(id)!.answers = answers; },
+    saveFacts: async (id: string, v) => { claims.get(id)!.facts = { ...claims.get(id)!.facts, ...v }; },
+    setSapsRequired: async () => undefined,
+    createAgentAction: async () => ({ id: 'preview' }),
     saveSaps: async (id: string, v) => {
         const c = claims.get(id)!;
         if (v.caseNumber) c.sapsCaseNumber = v.caseNumber;
