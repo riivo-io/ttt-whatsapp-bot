@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "code",
+  "key": "TTTFG-5340",
+  "tracker": "jira",
+  "title": "Tina: unknown tax numbers get the sign-up link; retire the tax sign-up chat and the ID-number lookup",
+  "base": "main",
+  "kb": "riivo-io/client-ttt",
+  "developer": "ad.hiemstra@gmail.com",
+  "started_at": "2026-11-02T12:34:52Z",
+  "status": "in-progress"
+}
