@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit c99946b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit f7e99c4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the one-page claim summary sheet, for a policy whose insurer has no mapped form (the generic
 // riivo_claimform row). The client signs it like a form, and the broker still fills that insurer's own form by hand
@@ -51,7 +51,7 @@ export const SUMMARY_ROWS: { section: string; label: string; source: string; for
 ];
 
 /** The SAPS rows print when the police were involved, or a case number is on file; otherwise they don't apply. */
-export const sapsApplies = (crm: CrmValues) => crm.riivo_claim?.riivo_sapsinvolved === true || !!crm.riivo_claim?.riivo_sapscasenumber;
+const sapsApplies = (crm: CrmValues) => crm.riivo_claim?.riivo_sapsinvolved === true || !!crm.riivo_claim?.riivo_sapscasenumber;
 
 /** What the client confirms by signing the sheet. Draft: Insurance and Advice approves it with the other templates. */
 export const DECLARATION = {

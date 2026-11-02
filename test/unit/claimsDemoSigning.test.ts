@@ -108,3 +108,17 @@ test('the signed copy goes to the claim folder as "- signed.pdf", gets its own d
     assert.equal(claim.riivo_signedon, audit.signedAt);
     assert.deepEqual(JSON.parse(claim.riivo_signatureaudit), audit);
 });
+
+test('TTTFG-5200: the callback asks for the claim pack once the claim is Signed; a pack it cannot check never fails the signature', async () => {
+    const w = world();
+    const signed = new TextEncoder().encode('%PDF-1.7 signed');
+    const audit = {
+        requestId: 'r1', signedAt: '2026-10-26T09:15:00.000Z', ip: null, userAgent: null, channel: 'whatsapp' as const, sentTo: PHONE,
+        documentHash: sha256(PDF), signedHash: sha256(signed), linkCreatedAt: '2026-10-26T08:00:00.000Z', openedAt: null,
+    };
+    const outcome = await demoClaimSigned(w.ch, { requestId: 'r1', caller: 'claim', callerRecordId: CLAIM, signedPdf: signed, audit });
+    assert.deepEqual(outcome, { filed: { fileRef: 'https://sp/signed.pdf', documentId: 'd-signed' } });
+    // This fake CRM can't answer the pack's reads, so the claim owner is told instead.
+    const followUp = w.writes.filter((x) => x.path.startsWith('riivo_agentactions')).map((x) => x.body.riivo_name).find((n: string) => n.startsWith('Claim pack for '));
+    assert.match(followUp, /^Claim pack for CLM-000301: the client signed, but the agent could not check whether the pack is due/);
+});
