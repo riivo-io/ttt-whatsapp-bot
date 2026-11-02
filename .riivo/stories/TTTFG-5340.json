@@ -6,6 +6,127 @@
   "title": "Tina: unknown tax numbers get the sign-up link; retire the tax sign-up chat and the ID-number lookup",
   "base": "main",
   "kb": "riivo-io/client-ttt",
+  "touches": {
+    "systems": [],
+    "paths": [
+      "src/workers/whatsappProcessor.ts",
+      "src/services/claude.service.ts",
+      "src/services/dynamics.service.ts",
+      "src/services/tools/leadTools.ts",
+      "src/services/tools/registry.ts",
+      "src/services/supabase.service.ts",
+      "src/domain/unknownNumber.ts",
+      "supabase/migrations/",
+      "test/unit/",
+      "docs/",
+      ".env.example"
+    ]
+  },
+  "plan": [
+    {
+      "task": "Remove verify_identity, linkPhoneToContact, searchContactByIdNumber and the ask-for-ID prompt, and update their tests",
+      "owner": "agent",
+      "reason": "code and tests in this repo (AC 2, 3)",
+      "done": false,
+      "area": "build"
+    },
+    {
+      "task": "Replace the cold sign-up template with one fixed reply carrying the tax sign-up link, silent on repeats within 24 hours",
+      "owner": "agent",
+      "reason": "code and a Supabase migration in this repo (AC 1, 2, 4, 6)",
+      "done": false,
+      "area": "build"
+    },
+    {
+      "task": "Create one Tax lead and a Kind Created agent action owned by the Tax team when an unknown number asks about tax",
+      "owner": "agent",
+      "reason": "code in this repo, following the email agent's lead and action shape (AC 5, 6)",
+      "done": false,
+      "area": "build"
+    },
+    {
+      "task": "Make the WhatsApp sign-up form update a lead already on that phone number instead of creating a second one",
+      "owner": "agent",
+      "reason": "code in this repo, the part of AC 5 Tina controls",
+      "done": false,
+      "area": "build"
+    },
+    {
+      "task": "Add scenario tests for the Jane Smith message, repeats, CRM failures and known clients, plus a DEV rehearsal script and test steps",
+      "owner": "agent",
+      "reason": "tests in this repo (AC 1 to 6, 8)",
+      "done": false,
+      "area": "build"
+    },
+    {
+      "task": "Land the unknown-number roadside path from TTTFG-5299 on main",
+      "owner": "developer",
+      "reason": "your own In Progress story; AC 7 has nothing to preserve until it ships",
+      "done": false,
+      "area": "other"
+    },
+    {
+      "task": "Add the AC 7 scenario: an unknown number that has broken down gets the assist number, no sign-up reply and no tax lead",
+      "owner": "agent",
+      "reason": "test in this repo, once the roadside path exists (AC 7)",
+      "done": false,
+      "area": "build",
+      "needs": [
+        6
+      ]
+    },
+    {
+      "task": "Update the repo docs and the Confluence technical page for the unknown-number path",
+      "owner": "agent",
+      "reason": "documentation subtask; no secrets or sign-off involved",
+      "done": false,
+      "area": "other",
+      "jira": "TTTFG-5341"
+    },
+    {
+      "task": "Find where the online sign-up creates its lead and agree with its owner how it matches on phone number",
+      "owner": "developer",
+      "reason": "the LOE app is in a repo I can't see, so the other half of AC 5 needs its owner",
+      "done": false,
+      "area": "approval"
+    },
+    {
+      "task": "Tell Luc the ID lookup was unreachable and the sign-up conversation was never built, and correct Xray test TTTFG-5514",
+      "owner": "developer",
+      "reason": "the story's premise and the test's wording are Luc's and QC's to change",
+      "done": false,
+      "area": "approval"
+    },
+    {
+      "task": "Run the test steps on DEV from a new WhatsApp number and record the evidence",
+      "owner": "developer",
+      "reason": "your own test, using a real phone",
+      "done": false,
+      "area": "other",
+      "jira": "TTTFG-5342"
+    },
+    {
+      "task": "Apply the unknown_number_replies migration to Tina's Supabase before merging",
+      "owner": "developer",
+      "reason": "deployments are the developer's, and merging deploys Tina to production",
+      "done": false,
+      "area": "deployment"
+    }
+  ],
+  "approval": {
+    "at": "2026-11-02T12:42:11.079Z",
+    "by": "ad.hiemstra@gmail.com",
+    "plan_hash": "sha256:044d666bf9f431a3fccda450636fc45e7cd832d98e83d388b692531a35b0c40a",
+    "risky": [
+      {
+        "id": "R1",
+        "task": 2,
+        "kind": "migration",
+        "dir": "supabase/migrations",
+        "name": "unknown_number_replies"
+      }
+    ]
+  },
   "developer": "ad.hiemstra@gmail.com",
   "started_at": "2026-11-02T12:34:52Z",
   "status": "in-progress"
