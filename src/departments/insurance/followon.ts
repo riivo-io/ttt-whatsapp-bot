@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit bec6d7f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 45f65a9). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -742,7 +742,7 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
   const out: Out[] = [];
   const st: FollowOnState = {
     claimId: c.claim.id, phase: 'items', asking: '', misses: 0, skipped: [], signingRequested: false,
-    sapsRequired: sapsStepApplies(c.claim.claimType, c.form, describedAsTheft),
+    sapsRequired: sapsStepApplies(c.claim.claimType, c.form, describedAsTheft, c.claim.facts.saps === true),
     evidenceStarted: c.claim.status === 'Awaiting client docs',
   };
   if (st.sapsRequired) out.push({ kind: 'saps-required' });
@@ -876,7 +876,8 @@ const isSaps = (key: string) => key === SAPS_CASE_KEY || key === SAPS_STATION_KE
  * has a SAPS case number or station (a column for it is suggested to TTTFG-4885).
  */
 function resumedSaps(c: Ctx): boolean {
-  return !!c.claim.sapsRequired || sapsStepApplies(c.claim.claimType, c.form, false) || !!(c.claim.sapsCaseNumber || c.claim.sapsStation);
+  return !!c.claim.sapsRequired || sapsStepApplies(c.claim.claimType, c.form, false, c.claim.facts.saps === true)
+    || !!(c.claim.sapsCaseNumber || c.claim.sapsStation);
 }
 
 /**

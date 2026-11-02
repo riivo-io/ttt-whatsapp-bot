@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit bec6d7f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit 45f65a9). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -44,13 +44,18 @@ export interface ProgressOptions {
   skip?: readonly string[];
 }
 
+/** The claim types that always get the SAPS step. A motor accident is reported to SAPS within 24 hours (2 Nov 2026). */
+export const SAPS_CLAIM_TYPES: readonly string[] = ['Motor accident', 'Motor theft', 'Hijacking'];
+
 /**
- * TTTFG-5254 step 4: the SAPS step runs for a theft or hijacking, for a form that needs the case number, or when Claude
- * read the description as a theft, burglary or hijacking (`describedAsTheft`, a yes/no Claude supplies; code decides).
+ * TTTFG-5254 step 4: the SAPS step runs for a motor accident, theft or hijacking, for a form that needs the case number,
+ * when Claude read the description as a theft, burglary or hijacking (`describedAsTheft`, a yes/no Claude supplies;
+ * code decides), or when the client said the police were involved (`policeInvolved`, the walkthrough's `saps` fact).
+ * 2 Nov 2026: the case number is essential; before, a motor accident with the police involved was never asked for it.
  */
-export function sapsStepApplies(claimType: ClaimType | string, form: ClaimForm, describedAsTheft: boolean): boolean {
+export function sapsStepApplies(claimType: ClaimType | string, form: ClaimForm, describedAsTheft: boolean, policeInvolved = false): boolean {
   return (
-    claimType === 'Motor theft' || claimType === 'Hijacking' || form.sapsCaseRequired || describedAsTheft ||
+    SAPS_CLAIM_TYPES.includes(claimType) || form.sapsCaseRequired || describedAsTheft || policeInvolved ||
     form.questionList.some((q) => q.key === SAPS_CASE_KEY && q.required)
   );
 }

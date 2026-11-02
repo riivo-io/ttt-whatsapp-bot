@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit bec6d7f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 45f65a9). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -196,6 +196,8 @@ const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
     place: 'Where did it happen? For example the street and suburb, or the road and the nearest exit.',
     thirdParties: 'Was anyone else involved, for example another driver?',
     thirdPartyDetails: 'Please send me their details, for example their name, phone number and vehicle registration.',
+    // 2 Nov 2026: every accident gets the SAPS step, so the question is whether they've reported it yet.
+    saps: REPORTED,
   },
   windscreen: {
     description: 'What happened to the glass? For example a stone hit the windscreen on the highway.',
