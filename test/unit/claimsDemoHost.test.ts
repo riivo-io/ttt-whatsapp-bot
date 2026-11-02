@@ -49,7 +49,7 @@ const blankAnswer = { kind: 'unclear', policyNumber: null, claimType: null, desc
 const blankReply = { kind: 'unparsed', valueText: null, valueNumber: null, valueBool: null, sapsCaseNumber: null, sapsStation: null, differentIncident: false,
     chosenClaim: null, yesNo: null, forItem: null, claimType: null, description: null, incidentDate: null, place: null, otherAnswers: [], corrections: [] };
 
-function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, unknown>[]; form?: StoredClaimForm; policies?: Policy[]; signing?: boolean } = {}) {
+function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, unknown>[]; form?: StoredClaimForm; policies?: Policy[]; signing?: boolean; sapsOnFile?: boolean } = {}) {
     const form = o.form ?? MOTOR;
     const reportedSeen: string[] = [];
     const rows: Row[] = o.rows ?? [];
@@ -76,6 +76,9 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
                 id, reference, contactId: r.contactId, providerId: r.providerId, insurer: 'Discovery Insure', claimType: r.claimType,
                 facts: { claimType: r.claimType, description: r.description, incidentAt: r.incidentAt, place: r.place, thirdParties: r.thirdParties, saps: r.saps, injuries: r.injuries },
                 status: r.status, signatureStatus: 'Not sent', answers: {}, evidence: [], owner: r.owner, lastClientMessageOn: r.lastClientMessageOn,
+                // A motor accident always gets the SAPS step (2 Nov 2026). Unless a test asks it (sapsOnFile: false), the
+                // case number is on file, so the tests about other things start at the form's questions.
+                ...(o.sapsOnFile === false ? {} : { sapsCaseNumber: 'AR 77/10/2026', sapsStation: 'Claremont' }),
             });
             return { id, reference };
         },
@@ -86,7 +89,7 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
         genericClaimForm: async () => GENERIC,
         claimForm: async (id) => (id === form.id ? form : GENERIC),
         setClaimForm: async (id, formId) => void (row(id).claimFormId = formId),
-        saveSaps: async () => {},
+        saveSaps: async (id, v) => void Object.assign(row(id), v.caseNumber ? { sapsCaseNumber: v.caseNumber } : {}, v.station ? { sapsStation: v.station } : {}),
         setSapsRequired: async (id) => void (row(id).sapsRequired = true),
         saveAnswers: async (id, a: ClaimAnswers) => void (row(id).answers = structuredClone(a)),
         setStatus: async (id, s) => void (row(id).status = s),
@@ -150,7 +153,7 @@ test('a hello with no open claim gets the demo hello, and opens nothing', async 
 });
 
 test('the whole claim: walkthrough, the questions, the photo, then the form to sign at the end; nothing asked twice', async () => {
-    const w = world();
+    const w = world({ sapsOnFile: false });
     let t = DAY1;
     assert.equal(await say(w, 'Someone drove into the back of my car at the Claremont robot', t), 'started');
     assert.deepEqual(w.requests, ['Someone drove into the back of my car at the Claremont robot']);
@@ -167,8 +170,17 @@ test('the whole claim: walkthrough, the questions, the photo, then the form to s
     assert.ok(w.sent.indexOf(onScene[0]) < w.sent.findIndex((t) => /in your own words what happened|On what date/.test(t)));
     const opened = w.since().join('\n');
     assert.match(opened, /CLM-000001/); // the acknowledgement
-    assert.match(opened, /Who was driving the vehicle\?/); // the follow-on's first question, straight after
+    // 2 Nov 2026: a motor accident always gets the SAPS step: not reported yet, so the instruction, then the case number.
+    assert.match(opened, /please report this to the SAPS/);
+    assert.match(opened, /What is the SAPS case number, and at which police station did you report it\?/);
     assert.equal(w.store.get(PHONE)?.walk, null);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.asking, 'sapsCaseNumber');
+    assert.equal(w.rows[0].sapsRequired, true);
+
+    w.replies.push({ kind: 'saps', sapsCaseNumber: 'AR 123/10/2026', sapsStation: 'Claremont' });
+    assert.equal(await say(w, 'AR 123/10/2026 at Claremont', (t = tick(t, 2))), 'follow-on');
+    assert.equal(w.rows[0].sapsCaseNumber, 'AR 123/10/2026');
+    assert.match(w.since().join('\n'), /Who was driving the vehicle\?/); // then the form's first question
     assert.equal(w.store.get(PHONE)?.resume.followOn?.asking, 'driverName');
 
     w.replies.push({ kind: 'value', valueText: 'Me, Adriaan' });
@@ -459,6 +471,7 @@ test("TTTFG-5212: the claim owner's day-5 alert and stop-day call go through the
         id: 'claim-1', reference: 'CLM-000001', contactId: CONTACT, providerId: 'prov-discovery', insurer: 'Discovery Insure', claimType: 'Motor accident',
         facts: { claimType: 'Motor accident', description: 'Rear-ended at the Claremont robot', incidentAt: '2026-10-12T15:30:00Z', place: 'Claremont',
             thirdParties: false, saps: false, injuries: false },
+        sapsCaseNumber: 'AR 77/10/2026', sapsStation: 'Claremont', // a motor accident always gets the SAPS step (2 Nov 2026)
         status: 'Awaiting client docs', signatureStatus: 'Not sent', claimFormId: MOTOR.id, answers: {}, evidence: [], owner: SIPHO,
         lastClientMessageOn: '2026-10-14T05:00:00.000Z',
     };
