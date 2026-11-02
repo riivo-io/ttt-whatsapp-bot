@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 45f65a9). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit f5fd929). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -756,13 +756,16 @@ export async function sendText(
   return gate.text;
 }
 
+/** TTTFG-4830: on the claim's description when the client uses their own plumber; followon.ts forTtt reads it. */
+export const OWN_PLUMBER_NOTE = 'The client will use their own plumber.';
+
 async function openClaim(ports: ClaimPorts, conv: Conversation, state: WalkthroughState & { policyId: string }, at: string) {
   const policy = state.policies.find((p) => p.id === state.policyId)!;
   const owner = await ownerFor(ports, policy.id);
   const f = state.facts as Required<Pick<Facts, 'claimType' | 'incidentAt' | 'place' | 'description' | 'thirdParties' | 'saps' | 'injuries'>> & Facts;
   // TTTFG-4830 (28 Oct 2026): what the claim's columns can't hold goes on the description, for the broker.
   const notes = [f.timeUnknown ? 'Time not known.' : '', f.contractor === 'insurer' ? 'The client would like the insurer to send a plumber.' : '',
-    f.contractor === 'own' ? 'The client will use their own plumber.' : '',
+    f.contractor === 'own' ? OWN_PLUMBER_NOTE : '',
     f.contractor === 'not-known' ? "The client didn't say whether the insurer should send a plumber." : ''].filter(Boolean).join(' ');
   const { id, reference } = await ports.createClaim({
     contactId: state.contactId, policyId: policy.id, providerId: policy.providerId,
