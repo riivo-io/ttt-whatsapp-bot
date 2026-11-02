@@ -23,6 +23,8 @@
  * --form 4320: TTTFG-5562's guided form on http://localhost:4320 (links in memory): a new claim gets the link instead of the
  *   first question. It prints here; open it at phone size and fill it in. Submit carries on here, and with --sign the
  *   signing link follows. A recording on the page is transcribed for real (OPENAI_API_KEY) or, without the key, says it can't listen.
+ * --generic-from <generic.json>: the generic row's questions come from this config file instead of DEV's row, read here only,
+ *   so a changed list can be tried without touching the row the live demo reads.
  *
  * Sign-in: `az login` to TTT's tenant (Dataverse and Graph tokens). Claude: ANTHROPIC_API_KEY, else the DEV email
  * agent's Key Vault secret. DEV only: it refuses any other Dataverse.
@@ -71,8 +73,9 @@ if (!phone || !contactId) {
 const scriptFile = flag('--script');
 const signPort = flag('--sign');
 const formPort = flag('--form');
+const genericFrom = flag('--generic-from');
 const waitSeconds = Number(flag('--wait') ?? 900);
-const oneMessage = args.filter((a, i) => !a.startsWith('--') && !['--phone', '--contact', '--script', '--sign', '--form', '--wait'].includes(args[i - 1] ?? ''))[0];
+const oneMessage = args.filter((a, i) => !a.startsWith('--') && !['--phone', '--contact', '--script', '--sign', '--form', '--generic-from', '--wait'].includes(args[i - 1] ?? ''))[0];
 
 // --- az login tokens ----------------------------------------------------------------------------------------------------
 const tokens = new Map<string, { value: string; until: number }>();
@@ -88,7 +91,20 @@ function azToken(resource: string): string {
 }
 
 // Tina's own Dataverse call (429s waited out); cachedDv below gives each message the same per-message cache as Tina.
-const rawDv: Dv = dataverseCall(DEV, () => azToken(DEV));
+const liveDv: Dv = dataverseCall(DEV, () => azToken(DEV));
+/** --generic-from: DEV's generic row, read with the config file's questions. Nothing is written to the row. */
+const genericList = genericFrom ? (JSON.parse(fs.readFileSync(path.resolve(genericFrom), 'utf8')) as { questionList: unknown[] }).questionList : null;
+const withGeneric = <T,>(row: T): T => {
+    const r = row as { riivo_Provider?: unknown; riivo_questionlist?: string };
+    if (!r || r.riivo_Provider || !r.riivo_questionlist) return row;
+    return { ...row, riivo_questionlist: JSON.stringify({ ...JSON.parse(r.riivo_questionlist), questionList: genericList }) };
+};
+const rawDv: Dv = !genericList ? liveDv : (async <T,>(method: 'GET' | 'POST' | 'PATCH', p: string, body?: unknown, opts?: { formatted?: boolean; returnRow?: boolean }) => {
+    const res = await liveDv<T>(method, p, body, opts);
+    if (method !== 'GET' || !p.startsWith('riivo_claimforms')) return res;
+    const many = res as { value?: unknown[] };
+    return (many.value ? { ...many, value: many.value.map(withGeneric) } : withGeneric(res)) as T;
+}) as Dv;
 
 const graph: Graph = async (method, p, body, contentType) => fetch(p.startsWith('https://') ? p : `https://graph.microsoft.com/v1.0${p}`, {
     method, body, headers: { Authorization: `Bearer ${azToken('https://graph.microsoft.com')}`, ...(contentType ? { 'Content-Type': contentType } : {}) },
