@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit e041603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit 35c5250). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided form's master forms. One per kind of claim, each holding every unique question of every go-live
 // insurer form of that kind, grouped into the topics a client sees one screen at a time. The client only ever sees what
@@ -163,7 +163,16 @@ export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
   generic: {
     id: 'generic',
     title: 'Claim',
-    topics: [topic('claim', 'Anything else', 'additionalInfo')],
+    topics: [
+      topic('what', 'What happened', 'description incidentCause'),
+      topic('when', 'When and where', 'incidentAt place'),
+      topic('lost', 'What was lost or damaged', 'whatDamaged estimatedCost'),
+      topic('others', 'Who else was involved', 'thirdParties otherFirstName otherSurname otherPhone otherRegistration otherInsurer'),
+      topic('hurt', 'Anyone hurt', 'injuries injuredName injuredDetails'),
+      topic('witnesses', 'Witnesses', 'hadWitnesses witnessFirstName witnessSurname witnessPhone'),
+      topic('police', 'The police', 'saps sapsCaseNumber sapsStation'),
+      topic('claim', 'Anything else', 'additionalInfo'),
+    ],
     evidence: fields('damagePhotos quotes otherEvidence'),
   },
 };

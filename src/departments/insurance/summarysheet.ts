@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit e041603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/summarysheet.ts (commit 35c5250). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the one-page claim summary sheet, for a policy whose insurer has no mapped form (the generic
 // riivo_claimform row). The client signs it like a form, and the broker still fills that insurer's own form by hand
@@ -79,6 +79,8 @@ export function summaryRows(form: ClaimForm, answers: ClaimAnswers, crm: CrmValu
   for (const r of SUMMARY_ROWS) if (!r.saps || sapsApplies(crm)) add(r.section, r.label, r.source, r.format);
   for (const q of form.questionList) {
     if (q.kind !== 'question') continue; // evidence is the pack's job (TTTFG-5200)
+    // TTTFG-5562: the guided form's general questions print only when the client answered them there.
+    if (q.formOnly && answers[q.key]?.status !== 'answered') continue;
     const format = q.answerType === 'date' ? 'date' : undefined;
     if (!q.group) { add('Your answers', q.prompt, `answer:${q.key}`, format); continue; }
     // A repeating group: one row per entry the client gave (entries they never gave are not applicable).

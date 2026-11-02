@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit e041603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 35c5250). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
@@ -68,6 +68,14 @@ const LIVES_AT = ['At work', 'On holiday', 'Out shopping', 'Visiting someone'];
 const BUILDING_PARTS = ['Roof', 'Ceilings', 'Walls', 'Floors', 'Windows', 'Doors', 'Gate motor', 'Garage door'];
 
 export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
+  // ---- the generic list's general questions: what Tina's walkthrough asks on chat, filled in from it when she has
+  description: { kind: 'long', label: 'What happened? Tell us in your own words.' },
+  incidentCause: pills(['An accident', 'Theft or burglary', 'Fire', 'Storm or flood', 'Burst pipe or geyser'], { other: true }),
+  incidentAt: { kind: 'datetime', label: 'When did it happen?' },
+  place: short('e.g. 12 Oak Avenue, Durbanville', { label: 'Where did it happen?' }),
+  whatDamaged: multi(['Vehicle', 'House or building', 'Furniture', 'Electronics', 'Jewellery', 'Clothing', 'Tools or equipment'], { other: true, label: 'What was lost or damaged?' }),
+  estimatedCost: pills(['Under R5 000', 'R5 000 to R20 000', 'R20 000 to R50 000', 'R50 000 to R100 000', 'Over R100 000'], { label: 'Roughly how much to fix or replace it?' }),
+
   // ---- the vehicle
   vehicleMake: pills(CAR_MAKES, { other: true }),
   vehicleModel: short('e.g. Corolla Cross'),
@@ -295,20 +303,24 @@ export const FORM_STEPPERS: Readonly<Record<string, Extract<FormControl, { kind:
 };
 
 /**
- * The question's words on the form. "Say 'don't know'" becomes "leave it blank", because on the form a blank is what says
- * so. What the client tapped is the answer, so "Say 'no' if not" and an example the options already show are left out.
+ * The question's words on the form: the question and nothing else, because a screen only holds what fits. The first page
+ * says to leave blank what they don't know, what they tap is the answer, and an example goes in the box (formHint).
  */
 export function formPrompt(prompt: string, control?: FormControl): string {
   if (control && 'label' in control && control.label) return control.label;
-  let p = prompt
-    .replace(/\s*Say "don't know"[^.?!]*[.?!]?/i, " Leave blank if you don't know.")
-    .replace(/\s*Say "I was home"[^.?!]*[.?!]?/i, ' Leave blank if you were home.')
-    .replace(/\s*Say "still empty"[^.?!]*[.?!]?/i, ' Leave blank if it still is.')
-    .replace(/,? or say "no"\.?/i, '.')
-    .replace(/\s*Say "[^"]*"[^.?!]*[.?!]?/i, '')
-    .trim();
-  if (control && ['pills', 'multi', 'slider', 'date', 'time', 'datetime', 'year', 'stepper'].includes(control.kind)) {
-    p = p.replace(/\s*For example[^.?!]*[.?!]/i, '').replace(/,\s*in km\/h\?$/i, '?').trim();
-  }
+  const end = prompt.indexOf('?');
+  const p = end >= 0 ? prompt.slice(0, end + 1) : prompt.replace(/\s*(Say "[^"]*"|For example)[^.?!]*[.?!]?/gi, '').trim();
   return control?.kind === 'multi' && !/choose any/i.test(p) ? `${p} (choose any)` : p;
+}
+
+/** What goes in an empty box: the prompt's example, or what it asks for. Nothing when there's no short way to say it. */
+export function formHint(prompt: string, control?: FormControl): string | undefined {
+  if (control && !['short', 'number'].includes(control.kind)) return undefined;
+  if (control && 'placeholder' in control && control.placeholder) return undefined;
+  const end = prompt.indexOf('?');
+  if (end < 0) return undefined;
+  const rest = prompt.slice(end + 1).replace(/\s*Say "[^"]*"[^.?!]*[.?!]?/gi, '').trim();
+  const hint = rest.replace(/^For example,?\s*/i, 'e.g. ').replace(/^Please give\s+/i, '').replace(/\.$/, '').trim();
+  if (!hint || hint.length > 40) return undefined;
+  return hint.startsWith('e.g.') ? hint : hint.charAt(0).toUpperCase() + hint.slice(1);
 }

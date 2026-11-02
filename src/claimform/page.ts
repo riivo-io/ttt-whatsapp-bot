@@ -1,7 +1,9 @@
 /**
  * TTTFG-5562: the guided claim form's page. One self-contained page, phone first: one topic per screen, known details filled
  * in, and tapping wherever it can be tapped: options, sliders, dates and times to pick. A box only where the client has to
- * give a name or a number, and a recording only for their own words. A blank is an answer: it says they don't know. The
+ * give a name or a number, and a recording only for their own words. A blank is an answer: it says they don't know. A step
+ * doesn't scroll: the page measures the phone's screen and shows the questions that fit, and the rest are the next step. Only
+ * the summary at the end may scroll. The
  * token is read from the address and everything else comes from /claim-form/<token>/state, so the page's source holds
  * nothing about a client. The design follows the guided form in the claims demo, in TTT's blue with TTT's logo.
  *
@@ -17,9 +19,6 @@ export const CLAIM_FORM_CSP = [
     "style-src 'unsafe-inline' https://fonts.googleapis.com", 'font-src https://fonts.gstatic.com', "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 ].join('; ');
 
-/** The AI disclosure (AC 9). It says who checks the claim, and nothing about whether it is covered. */
-export const DISCLOSURE = "Tina is TTT's AI assistant. A person on TTT's insurance team checks your claim before it goes to the insurer. Only the insurer can decide on your claim.";
-
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 const STYLE = `
@@ -32,29 +31,52 @@ html, body { height:100%; }
 body { margin:0; background:var(--panel); color:var(--text); font:15.5px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
 button { font:inherit; color:inherit; }
 :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-.app { display:flex; flex-direction:column; height:100vh; height:100dvh; background:var(--bg); max-width:520px; margin:0 auto; }
+.app { position:relative; display:flex; flex-direction:column; height:100vh; height:100dvh; background:var(--bg); max-width:520px; margin:0 auto; }
 @media (min-width:560px) { body { padding:24px 0; } .app { height:calc(100dvh - 48px); border-radius:20px; overflow:hidden; box-shadow:0 1px 2px rgba(11,15,20,.04),0 12px 32px -12px rgba(11,15,20,.14); } }
 .brand { display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--accent); padding:calc(10px + env(safe-area-inset-top,0px)) 18px 10px; color:#fff; }
 .brand img { height:24px; width:auto; display:block; }
 .brand span { font:500 11px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; opacity:.92; }
-.top { padding:12px 18px 10px; border-bottom:1px solid var(--line); display:grid; gap:8px; }
+.top { padding:10px 18px 10px; border-bottom:1px solid var(--line); display:grid; gap:8px; }
 .prog { height:4px; background:var(--line); border-radius:99px; overflow:hidden; }
 .prog i { display:block; height:100%; width:0; background:var(--accent); border-radius:99px; transition:width .3s; }
-.sec { display:flex; justify-content:space-between; gap:12px; font-size:12px; color:var(--muted); }
-.body { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:20px 18px 28px; display:grid; gap:20px; align-content:start; }
+.sec { font-size:18px; line-height:1.2; font-weight:500; letter-spacing:-.02em; color:var(--ink); }
+.body { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:16px 18px; display:grid; gap:16px; align-content:start; }
 h1 { margin:0; font-size:21px; line-height:1.2; font-weight:500; letter-spacing:-.025em; color:var(--ink); text-wrap:balance; }
 .help { margin:0; font-size:13.5px; color:var(--muted); line-height:1.45; }
-.q { display:grid; gap:8px; min-width:0; }
+.q { display:grid; gap:7px; min-width:0; }
 .ql { font-size:14px; font-weight:500; color:var(--ink); line-height:1.35; }
 .opts { display:flex; flex-wrap:wrap; gap:8px; }
 .opt { cursor:pointer; min-height:42px; border:1px solid var(--line-strong); background:var(--bg); border-radius:10px; padding:9px 13px; font-size:14px; color:var(--ink); line-height:1.25; text-align:left; transition:background .12s,border-color .12s; }
 .opt[aria-pressed="true"] { background:var(--accent-soft); border-color:var(--accent); color:var(--accent-deep); font-weight:500; }
 .inp { width:100%; min-height:44px; border:1px solid var(--line-strong); border-radius:10px; padding:10px 12px; font:inherit; font-size:16px; color:var(--ink); background:var(--bg); }
 .inp:focus { outline:2px solid var(--accent); outline-offset:-1px; border-color:var(--accent); }
-select.inp { appearance:none; -webkit-appearance:none; padding-right:26px; background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%); background-position:calc(100% - 15px) 19px,calc(100% - 10px) 19px; background-size:5px 5px; background-repeat:no-repeat; }
 textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block; }
 .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-.row3 { display:grid; grid-template-columns:.8fr 1.1fr 1.1fr; gap:8px; }
+.opts.tight { gap:6px; }
+.opts.tight .opt { min-height:36px; padding:7px 11px; font-size:13.5px; }
+.tiles { display:grid; gap:8px; grid-template-columns:1fr 1fr; }
+.tiles.t3 { grid-template-columns:.75fr 1.1fr 1fr; }
+.tiles.t1 { grid-template-columns:1fr; }
+.tile { display:grid; gap:3px; align-content:center; text-align:left; min-height:54px; padding:8px 12px; border:1px solid var(--line-strong); border-radius:12px; background:var(--bg); cursor:pointer; transition:background .12s,border-color .12s; }
+.tile small { font:500 10.5px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+.tile b { font-size:16px; line-height:1.2; font-weight:400; color:var(--faint); }
+.tile.on { border-color:var(--accent); background:var(--accent-soft); }
+.tile.on small { color:var(--accent-deep); }
+.tile.on b { color:var(--accent-deep); font-weight:500; }
+.sheet { position:absolute; inset:0; z-index:5; display:flex; flex-direction:column; justify-content:flex-end; }
+.scrim { position:absolute; inset:0; background:rgba(11,15,20,.38); }
+.panel { position:relative; display:grid; gap:14px; grid-template-rows:auto minmax(0,1fr); max-height:72%; padding:16px 18px calc(18px + env(safe-area-inset-bottom,0px)); background:var(--bg); border-radius:20px 20px 0 0; box-shadow:0 -8px 28px rgba(11,15,20,.14); animation:rise .18s ease; }
+@keyframes rise { from { transform:translateY(24px); opacity:.6; } to { transform:none; opacity:1; } }
+.panel-head { display:flex; justify-content:space-between; align-items:center; font-size:16px; font-weight:500; color:var(--ink); }
+.panel-head button { width:32px; height:32px; border:none; border-radius:50%; background:var(--panel); color:var(--muted); cursor:pointer; font-size:14px; }
+.grid { display:grid; gap:8px; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+.grid.g7 { grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px; }
+.grid.g6 { grid-template-columns:repeat(6,minmax(0,1fr)); gap:6px; }
+.grid.g4 { grid-template-columns:repeat(4,minmax(0,1fr)); }
+.grid.g3 { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.grid.g1 .cell { text-align:left; padding:10px 12px; font-size:14px; line-height:1.3; }
+.cell { min-height:44px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--ink); font-size:15px; font-variant-numeric:tabular-nums; cursor:pointer; }
+.cell.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:500; }
 .say { display:grid; grid-template-columns:minmax(0,1fr) 44px; gap:8px; align-items:start; }
 .mic { width:44px; height:44px; border-radius:50%; border:none; background:var(--accent); color:#fff; cursor:pointer; display:grid; place-items:center; }
 .mic svg { width:20px; height:20px; }
@@ -74,24 +96,22 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .amt span { position:absolute; left:12px; top:11px; color:var(--muted); font-size:16px; }
 .amt .inp { padding-left:28px; }
 .err { font-size:13.5px; color:var(--warn); background:var(--warn-soft); border-radius:8px; padding:8px 10px; }
-.tag { display:inline-flex; align-items:center; gap:6px; font:500 10.5px/1 var(--mono); letter-spacing:.04em; text-transform:uppercase; padding:5px 8px; border-radius:99px; background:var(--good-soft); color:var(--good); width:max-content; max-width:100%; }
 .sub { display:grid; gap:12px; padding:14px; border:1px solid var(--line); border-radius:12px; }
 .sub .sh { font:500 11px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
 .card { border:1px solid var(--line); border-radius:12px; padding:2px 14px; background:var(--panel); }
-.kv { display:flex; justify-content:space-between; gap:14px; padding:10px 0; font-size:14px; border-bottom:1px solid var(--line); }
+.kv { display:flex; justify-content:space-between; align-items:baseline; gap:14px; width:100%; min-height:40px; padding:9px 0; font-size:14px; border:none; border-bottom:1px solid var(--line); background:none; cursor:pointer; text-align:left; }
+.kv.fixed { cursor:default; }
 .kv:last-child { border-bottom:none; }
 .kv span { color:var(--muted); flex:none; }
 .kv b { font-weight:500; color:var(--ink); text-align:right; overflow-wrap:anywhere; }
-.row { display:grid; gap:4px; padding:10px 0; border-bottom:1px solid var(--line); }
+.ups { display:grid; gap:10px; }
+.row { display:grid; gap:3px; padding:9px 0; border-bottom:1px solid var(--line); }
 .row:last-child { border-bottom:none; }
 .row .rl { font-size:12.5px; color:var(--muted); line-height:1.35; }
 .row .rv2 { font-size:14.5px; font-weight:500; color:var(--ink); overflow-wrap:anywhere; }
 .row .rv2.empty { color:var(--faint); font-weight:400; }
 .head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
 .link { border:none; background:none; padding:2px 0 2px 8px; color:var(--accent-deep); font-size:13px; cursor:pointer; min-height:28px; }
-.av { width:54px; height:54px; border-radius:50%; background:var(--accent); color:#fff; display:grid; place-items:center; font:500 20px/1 var(--sans); }
-.disc { font-size:13px; color:var(--muted); padding:10px 12px; border-radius:10px; background:var(--panel); line-height:1.45; margin:0; }
-.ups { display:grid; gap:10px; }
 .up { display:grid; grid-template-columns:40px minmax(0,1fr) auto; gap:12px; align-items:center; padding:12px; border:1px solid var(--line); border-radius:12px; }
 .up .ic { width:40px; height:40px; border-radius:10px; background:var(--panel); display:grid; place-items:center; color:var(--muted); }
 .up .ic.ok { background:var(--good-soft); color:var(--good); }
@@ -130,11 +150,12 @@ const SCRIPT = String.raw`
   var ICON_STOP = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var THIS_YEAR = new Date().getFullYear();
-  var BLANK_HELP = 'Leave anything you don\'t know blank.';
 
   var V = null, A = {}, NK = {}, here = null, draft = {}, errors = {}, checked = {}, busy = false, thumbs = {}, extra = 0;
   /** Which "Other" box is open, which "Earlier" date picker is open, and part-picked dates and times. */
-  var otherOpen = {}, earlierOpen = {}, parts = {}, FIELD = {}, PRE = {};
+  var otherOpen = {}, earlierOpen = {}, parts = {}, FIELD = {}, PRE = {}, editing = {};
+  /** What's on the page now, whether more of this step comes after it, and the height a step has to fit in. */
+  var page = [], morePages = false, pageH = 0;
 
   function api(path, opts) {
     return fetch(base + path, opts).then(function (r) {
@@ -205,30 +226,65 @@ const SCRIPT = String.raw`
     var ta = '<textarea class="inp" id="f-' + q(key) + '" ' + attr + (placeholder ? ' placeholder="' + esc(placeholder) + '"' : '') + '>' + esc(v == null ? '' : v) + '</textarea>';
     return canRecord ? '<div class="say">' + ta + micHtml(key) + '</div><div class="micnote" id="note-' + q(key) + '" hidden></div>' : ta;
   }
-  function selectHtml(key, part, label, options, current) {
-    return '<select class="inp" aria-label="' + esc(label) + '" data-pick="' + q(key) + '" data-part="' + part + '"><option value="">' + esc(label) + '</option>'
-      + options.map(function (o) { return '<option value="' + o[0] + '"' + (String(o[0]) === String(current) ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>';
-  }
   function range(from, to) { var out = []; for (var i = from; from <= to ? i <= to : i >= to; i += from <= to ? 1 : -1) out.push(i); return out; }
   function dateParts(key, v) {
     var p = parts[key] || {};
     var s = typeof v === 'string' ? v : '';
     return { y: p.y !== undefined ? p.y : s.slice(0, 4), m: p.m !== undefined ? p.m : s.slice(5, 7), d: p.d !== undefined ? p.d : s.slice(8, 10), h: p.h !== undefined ? p.h : s.slice(11, 13), i: p.i !== undefined ? p.i : s.slice(14, 16) };
   }
-  function dateSelects(key, c, v) {
-    var p = dateParts(key, v);
-    var years = c.recent ? range(THIS_YEAR, THIS_YEAR - 2) : range(THIS_YEAR, THIS_YEAR - 60);
-    var months = MONTHS.map(function (m, i) { return [pad(i + 1), m]; });
-    var y = selectHtml(key, 'y', 'Year', years.map(function (x) { return [x, x]; }), p.y);
-    var m = selectHtml(key, 'm', 'Month', months, p.m);
-    if (c.month) return '<div class="row2">' + m + y + '</div>';
-    return '<div class="row3">' + selectHtml(key, 'd', 'Day', range(1, 31).map(function (x) { return [pad(x), x]; }), p.d) + m + y + '</div>';
+  function tile(key, part, label, text) {
+    return '<button type="button" class="tile' + (text ? ' on' : '') + '" data-tile="' + q(key) + '" data-part="' + part + '"><small>' + esc(label) + '</small><b>' + esc(text || 'Select') + '</b></button>';
   }
-  function timeSelects(key, v, isTime) {
-    var s = typeof v === 'string' ? v : '';
-    var p = isTime ? { h: (parts[key] || {}).h !== undefined ? parts[key].h : s.slice(0, 2), i: (parts[key] || {}).i !== undefined ? parts[key].i : s.slice(3, 5) } : dateParts(key, v);
-    return '<div class="row2">' + selectHtml(key, 'h', 'Hour', range(0, 23).map(function (x) { return [pad(x), pad(x)]; }), p.h)
-      + selectHtml(key, 'i', 'Minute', range(0, 11).map(function (x) { return [pad(x * 5), pad(x * 5)]; }), p.i) + '</div>';
+  function dateTiles(key, c, v) {
+    var p = dateParts(key, v), month = p.m ? MONTHS[Number(p.m) - 1] : '';
+    if (c.month) return '<div class="tiles">' + tile(key, 'm', 'Month', month) + tile(key, 'y', 'Year', p.y) + '</div>';
+    return '<div class="tiles t3">' + tile(key, 'd', 'Day', p.d ? String(Number(p.d)) : '') + tile(key, 'm', 'Month', month) + tile(key, 'y', 'Year', p.y) + '</div>';
+  }
+  function timeTiles(key, v, isTime) {
+    var s = typeof v === 'string' ? v : '', own = parts[key] || {};
+    var p = isTime ? { h: own.h !== undefined ? own.h : s.slice(0, 2), i: own.i !== undefined ? own.i : s.slice(3, 5) } : dateParts(key, v);
+    return '<div class="tiles">' + tile(key, 'h', 'Hour', p.h) + tile(key, 'i', 'Minute', p.i) + '</div>';
+  }
+  // ---- picking a date or a time: a grid to tap, on a sheet over the page ---------------------------------------------
+  var SHEET = { d: ['Day', 'g7'], m: ['Month', 'g3'], y: ['Year', 'g4'], v: ['Year', 'g4'], h: ['Hour', 'g6'], i: ['Minute', 'g4'], o: ['Choose one', 'g1'] };
+  var picking = null;
+  function sheetOptions(key, part) {
+    var c = FIELD[key].control, p = dateParts(key, value(key));
+    if (part === 'o') return c.options.map(function (o) { return [esc(o), esc(o)]; });
+    if (part === 'm') return MONTHS.map(function (m, i) { return [pad(i + 1), m]; });
+    if (part === 'd') {
+      var days = p.m ? new Date(Number(p.y) || 2024, Number(p.m), 0).getDate() : 31;
+      return range(1, days).map(function (x) { return [pad(x), x]; });
+    }
+    if (part === 'h') return range(0, 23).map(function (x) { return [pad(x), pad(x)]; });
+    if (part === 'i') return range(0, 11).map(function (x) { return [pad(x * 5), pad(x * 5)]; });
+    var years = part === 'v' ? range(THIS_YEAR + 1, THIS_YEAR - 45) : c.recent ? range(THIS_YEAR, THIS_YEAR - 2) : range(THIS_YEAR, THIS_YEAR - 60);
+    return years.map(function (y) { return [y, y]; });
+  }
+  function currentPart(key, part) {
+    var v = value(key), c = FIELD[key].control;
+    if (part === 'v' || part === 'o') return filled(v) ? esc(String(v)) : '';
+    if (c.kind === 'time') { var s = typeof v === 'string' ? v : '', own = parts[key] || {}; return part === 'h' ? (own.h !== undefined ? own.h : s.slice(0, 2)) : (own.i !== undefined ? own.i : s.slice(3, 5)); }
+    return dateParts(key, v)[part];
+  }
+  function openSheet(key, part) {
+    picking = { key: key, part: part };
+    $('sheetTitle').textContent = SHEET[part][0];
+    var cur = currentPart(key, part), grid = $('sheetGrid');
+    grid.className = 'grid ' + SHEET[part][1];
+    grid.innerHTML = sheetOptions(key, part).map(function (o) {
+      return '<button type="button" class="cell' + (String(o[0]) === String(cur) ? ' on' : '') + '" data-cell="' + o[0] + '">' + o[1] + '</button>';
+    }).join('');
+    $('sheet').hidden = false;
+    grid.scrollTop = 0;
+  }
+  function closeSheet() { picking = null; $('sheet').hidden = true; render(); }
+  /** The next part still to pick of this date or time, so a whole date takes three taps. */
+  function nextPart(key, part) {
+    var c = FIELD[key].control;
+    var order = part === 'h' || part === 'i' ? ['h', 'i'] : c.kind === 'year' ? [] : c.month ? ['m', 'y'] : ['d', 'm', 'y'];
+    for (var i = order.indexOf(part) + 1; i > 0 && i < order.length; i++) if (!currentPart(key, order[i])) return order[i];
+    return null;
   }
   function fmtNumber(n) { return Number(n).toLocaleString('en-ZA'); }
   function sliderShown(c, v) { return filled(v) ? fmtNumber(v) + ' ' + c.unit : 'Not set'; }
@@ -248,8 +304,12 @@ const SCRIPT = String.raw`
       case 'yes-no':
         return '<div class="opts">' + optBtn('data-k="' + q(k) + '" data-b="true"', 'Yes', v === true) + optBtn('data-k="' + q(k) + '" data-b="false"', 'No', v === false) + '</div>';
       case 'pills': {
+        // Long sentences don't fit as pills on one screen: they're a list to pick from, on the sheet.
+        if (c.options.join('').length > 200 || c.options.some(function (o) { return o.length > 42; })) {
+          return '<div class="tiles t1">' + tile(k, 'o', 'Choose one', filled(v) ? String(v) : '') + '</div>';
+        }
         var b = pillBase(c, v), other = otherOpen[k] || (filled(b) && !isOption(c, b));
-        var html = '<div class="opts">' + c.options.map(function (o) { return optBtn('data-k="' + q(k) + '" data-v="' + esc(o) + '"', o, !other && same(b, o)); }).join('')
+        var html = '<div class="opts' + (c.options.length > 6 ? ' tight' : '') + '">' + c.options.map(function (o) { return optBtn('data-k="' + q(k) + '" data-v="' + esc(o) + '"', o, !other && same(b, o)); }).join('')
           + (c.other ? optBtn('data-other="' + q(k) + '"', 'Other', other) : '') + '</div>';
         if (other) html += box(f, filled(v) ? String(v) : '', { placeholder: 'Please tell us' });
         else if (c.detail && filled(b)) {
@@ -263,7 +323,7 @@ const SCRIPT = String.raw`
         var known = picked.filter(function (p) { return isOption(c, p); });
         var more = picked.filter(function (p) { return !isOption(c, p); }).join(', ');
         var on = otherOpen[k] || !!more;
-        return '<div class="opts">' + c.options.map(function (o) { return optBtn('data-m="' + q(k) + '" data-v="' + esc(o) + '"', o, known.some(function (p) { return same(p, o); })); }).join('')
+        return '<div class="opts' + (c.options.length > 6 ? ' tight' : '') + '">' + c.options.map(function (o) { return optBtn('data-m="' + q(k) + '" data-v="' + esc(o) + '"', o, known.some(function (p) { return same(p, o); })); }).join('')
           + (c.other ? optBtn('data-other="' + q(k) + '" data-multi="1"', 'Other', on) : '') + '</div>'
           + (on ? '<input class="inp" autocomplete="off" data-mother="' + q(k) + '" placeholder="Please tell us" value="' + esc(more) + '">' : '');
       }
@@ -278,99 +338,117 @@ const SCRIPT = String.raw`
           + '<b id="rv-' + q(k) + '"' + (filled(v) ? '' : ' class="unset"') + '>' + esc(sliderShown(c, v)) + '</b></div>'
           + '<input type="range" id="f-' + q(k) + '" data-range="' + q(k) + '" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '" value="' + (filled(v) ? Number(v) : c.min) + '"></div>';
       case 'date': {
-        if (!c.recent) return dateSelects(k, c, v);
+        if (!c.recent) return dateTiles(k, c, v);
         var today = daysAgo(0), yest = daysAgo(1), early = earlierOpen[k] || (filled(v) && v !== today && v !== yest);
         return '<div class="opts">' + optBtn('data-day="' + q(k) + '" data-v="' + today + '"', 'Today', !early && v === today) + optBtn('data-day="' + q(k) + '" data-v="' + yest + '"', 'Yesterday', !early && v === yest)
-          + optBtn('data-day="' + q(k) + '" data-v="earlier"', 'Earlier', early) + '</div>' + (early ? dateSelects(k, c, v) : '');
+          + optBtn('data-day="' + q(k) + '" data-v="earlier"', 'Earlier', early) + '</div>' + (early ? dateTiles(k, c, v) : '');
       }
-      case 'time': return timeSelects(k, v, true);
-      case 'datetime': return dateSelects(k, c, v) + timeSelects(k, v, false);
+      case 'time': return timeTiles(k, v, true);
+      case 'datetime': return dateTiles(k, c, v) + timeTiles(k, v, false);
       case 'year':
-        return '<select class="inp" id="f-' + q(k) + '" data-bind="' + q(k) + '"><option value="">Select the year</option>' + range(THIS_YEAR + 1, THIS_YEAR - 45).map(function (y) { return '<option value="' + y + '"' + (String(v) === String(y) ? ' selected' : '') + '>' + y + '</option>'; }).join('') + '</select>';
+        return '<div class="tiles">' + tile(k, 'v', 'Year', filled(v) ? String(v) : '') + '</div>';
       case 'stepper': {
         var n = stepCount(f, c);
         return '<div class="step-n"><button type="button" data-step="' + q(k) + '" data-d="-1" aria-label="Fewer">−</button><b>' + n + '</b><button type="button" data-step="' + q(k) + '" data-d="1" aria-label="More">+</button><span class="help">' + esc(n === 0 ? c.none : n === 1 ? c.one : c.many) + '</span></div>';
       }
       case 'amount':
         return '<div class="amt"><span>R</span>' + box(f, v, { mode: 'numeric', placeholder: c.placeholder }) + '</div>';
-      case 'number': return box(f, v, { mode: 'decimal' });
+      case 'number': return box(f, v, { mode: 'decimal', placeholder: f.hint });
       case 'long': return longBox(k, v, 'data-bind="' + q(k) + '"');
-      default: return box(f, v, { placeholder: c.placeholder });
+      default: return box(f, v, { placeholder: c.placeholder || f.hint });
     }
   }
   function labelHtml(f) {
     var c = f.control;
     if (c.bare || c.kind === 'slider') return '';
     var text = c.kind === 'stepper' ? c.label : promptOf(f);
-    var tappable = ['yes-no', 'pills', 'multi', 'yes-text', 'date', 'time', 'datetime', 'stepper'].indexOf(c.kind) >= 0;
+    var tappable = ['yes-no', 'pills', 'multi', 'yes-text', 'date', 'time', 'datetime', 'year', 'stepper'].indexOf(c.kind) >= 0;
     return tappable ? '<div class="ql">' + esc(text) + '</div>' : '<label class="ql" for="f-' + q(f.key) + '">' + esc(text) + '</label>';
   }
   function fieldHtml(f) {
-    var tag = PRE[f.key] !== undefined && A[f.key] === undefined && !(f.key in draft) ? '<span class="tag">From your last claim</span>' : '';
-    return '<div class="q" data-q="' + q(f.key) + '">' + labelHtml(f) + tag + controlHtml(f) + (errors[f.key] ? '<div class="err" role="alert">' + esc(errors[f.key]) + '</div>' : '') + '</div>';
+    return '<div class="q" data-q="' + q(f.key) + '">' + labelHtml(f) + controlHtml(f) + (errors[f.key] ? '<div class="err" role="alert">' + esc(errors[f.key]) + '</div>' : '') + '</div>';
   }
-  /** Two half-width boxes share a row, under the first one's question. */
-  function fieldsHtml(list) {
-    var html = '';
-    for (var i = 0; i < list.length; i++) {
-      var f = list[i], g = list[i + 1];
-      if (f.control.half && g && g.control.half) {
-        html += '<div class="q" data-q="' + q(f.key) + '">' + labelHtml(f) + '<div class="row2">' + controlHtml(f) + controlHtml(g) + '</div>'
-          + (errors[f.key] ? '<div class="err" role="alert">' + esc(errors[f.key]) + '</div>' : '') + (errors[g.key] ? '<div class="err" role="alert">' + esc(errors[g.key]) + '</div>' : '') + '</div>';
-        i++;
-      } else html += fieldHtml(f);
+  // ---- a step shows what fits ---------------------------------------------------------------------------------------
+  function err(k) { return errors[k] ? '<div class="err" role="alert">' + esc(errors[k]) + '</div>' : ''; }
+  /** What can't be split across steps: one question, or two half-width boxes that share a row. */
+  function blocksOf(fields) {
+    var out = [];
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i], g = fields[i + 1];
+      if (f.control.half && g && g.control.half && f.entry === g.entry) { out.push({ key: f.key, fields: [f, g], entry: f.entry || null }); i++; }
+      else out.push({ key: f.key, fields: [f], entry: f.entry || null });
     }
-    return html;
+    return out;
   }
-  function screenHtml(s) {
-    var html = '<h1>' + esc(s.title) + '</h1><p class="help">' + esc(s.help || BLANK_HELP) + '</p>';
-    var run = [], entry = null;
+  function visibleBlocks(step) {
+    if (step.id === 'photos') {
+      return V.evidence.filter(shows).map(function (e) { return { key: e.key, ev: e }; })
+        .concat([{ key: '__other', ev: { key: '', prompt: 'Anything else that may help', kind: 'photo', count: extra } }]);
+    }
+    return blocksOf(V.screens[step.i].fields.filter(function (f) { return shows(f) && !f.hidden; }));
+  }
+  function blockHtml(b) {
+    if (b.fields.length === 1) return fieldHtml(b.fields[0]);
+    return '<div class="q" data-q="' + q(b.key) + '">' + labelHtml(b.fields[0]) + '<div class="row2">' + controlHtml(b.fields[0]) + controlHtml(b.fields[1]) + '</div>' + err(b.fields[0].key) + err(b.fields[1].key) + '</div>';
+  }
+  function stepHtml(step, blocks) {
+    if (step.id === 'photos') {
+      return '<div class="ups">' + blocks.map(function (b) { return upHtml(b.ev.key, b.ev.prompt, b.ev.kind, b.ev.key ? b.ev.count : extra); }).join('') + '</div>' + err('photos');
+    }
+    var s = V.screens[step.i], html = s.help ? '<p class="help">' + esc(s.help) + '</p>' : '', entry = null, run = '';
     function flush() {
-      if (!run.length) return;
-      var body = fieldsHtml(run);
-      html += entry ? '<div class="sub"><div class="sh">' + esc(entry) + '</div>' + body + '</div>' : body;
-      run = [];
+      if (!run) return;
+      html += entry ? '<div class="sub"><div class="sh">' + esc(entry) + '</div>' + run + '</div>' : run;
+      run = '';
     }
-    s.fields.forEach(function (f) {
-      if (!shows(f) || f.hidden) return;
-      var e = f.entry || null;
-      if (e !== entry) { flush(); entry = e; }
-      run.push(f);
+    blocks.forEach(function (b) {
+      if (b.entry !== entry) { flush(); entry = b.entry; }
+      run += blockHtml(b);
     });
     flush();
     return html;
   }
+  function typing() { var a = document.activeElement; return !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); }
+  function overflows(body) { return body.scrollHeight > pageH + 1; }
+  /** Puts as many of the blocks on the page as fit, and says how many. One that can't fit alone still shows, and scrolls. */
+  function fit(step, blocks) {
+    var body = $('body'), n = blocks.length;
+    body.innerHTML = stepHtml(step, blocks);
+    if (!overflows(body)) return n;
+    var limit = body.getBoundingClientRect().top + pageH, els = body.querySelectorAll('[data-q]');
+    for (var i = 0; i < els.length; i++) if (els[i].getBoundingClientRect().bottom > limit) { n = Math.max(1, i); break; }
+    body.innerHTML = stepHtml(step, blocks.slice(0, n));
+    while (n > 1 && overflows(body)) { n--; body.innerHTML = stepHtml(step, blocks.slice(0, n)); }
+    return n;
+  }
+  /** Where each page of a step starts, up to (not including) the page that starts at stopKey. */
+  function pageStarts(step, stopKey) {
+    var all = visibleBlocks(step), starts = [], start = 0, stop = -1;
+    all.forEach(function (b, i) { if (b.key === stopKey) stop = i; });
+    while (start < all.length && !(stop >= 0 && start >= stop)) {
+      starts.push(all[start].key);
+      start += fit(step, all.slice(start));
+    }
+    return starts;
+  }
   function helloHtml() {
-    var name = V.firstName ? 'Hi ' + esc(V.firstName) + ', let\'s get your claim to the insurer.' : 'Let\'s get your claim to the insurer.';
-    return '<div class="av">T</div><h1>' + name + '</h1>'
-      + '<p class="help">Most answers are a tap, and we\'ve filled in what we already know. It takes about ' + V.minutes + ' minutes, and you can stop and come back with the same link. If you don\'t know something, just leave it blank.</p>'
-      + '<div class="card"><div class="kv"><span>Claim</span><b>' + esc(V.title) + ' · ' + esc(V.reference) + '</b></div><div class="kv"><span>Insurer</span><b>' + esc(V.insurer) + '</b></div></div>'
-      + '<p class="disc">' + esc(DISCLOSURE) + '</p>';
+    return '<h1>Fill out this form to submit your claim as fast as possible.</h1><p class="help">If you don\'t know something, just leave it blank.</p>';
   }
   function detailsHtml() {
-    return '<h1>Are these details still right?</h1><p class="help">From TTT\'s records. Change anything that\'s out of date.</p><span class="tag">Filled from TTT\'s records</span>'
+    return '<p class="help">Tap anything that\'s out of date to change it.</p><div class="card">'
       + V.details.map(function (d) {
         var v = d.key in draft ? draft[d.key] : d.value;
-        if (!d.editable) return '<div class="card"><div class="kv"><span>' + esc(d.label) + '</span><b>' + esc(v) + '</b></div></div>';
-        var long = /address/i.test(d.label);
+        if (!d.editable) return '<div class="kv fixed"><span>' + esc(d.label) + '</span><b>' + esc(v) + '</b></div>';
+        if (!editing[d.key]) return '<button type="button" class="kv" data-edit="' + q(d.key) + '"><span>' + esc(d.label) + '</span><b>' + (esc(v) || 'Add') + '</b></button>';
         var type = /cellphone|number$/i.test(d.label) && !/policy/i.test(d.label) ? 'tel' : /email/i.test(d.label) ? 'email' : 'text';
-        var input = long ? '<textarea class="inp" id="f-' + q(d.key) + '" data-bind="' + q(d.key) + '">' + esc(v) + '</textarea>'
-          : '<input class="inp" type="' + type + '" autocomplete="off" id="f-' + q(d.key) + '" data-bind="' + q(d.key) + '" value="' + esc(v) + '">';
-        return '<div class="q"><label class="ql" for="f-' + q(d.key) + '">' + esc(d.label) + '</label>' + input + (errors[d.key] ? '<div class="err" role="alert">' + esc(errors[d.key]) + '</div>' : '') + '</div>';
-      }).join('');
-  }
-  function photosHtml() {
-    var items = V.evidence.filter(shows);
-    return '<h1>Add your photos and documents</h1><p class="help">Add what you have now. Tina will ask on WhatsApp for anything still missing.</p><div class="ups">'
-      + items.map(function (e) { return upHtml(e.key, e.prompt, e.kind, e.count); }).join('')
-      + upHtml('', 'Anything else that may help', 'photo', extra)
-      + '</div>' + (errors.photos ? '<div class="err" role="alert">' + esc(errors.photos) + '</div>' : '');
+        return '<div class="q" style="padding:10px 0"><label class="ql" for="f-' + q(d.key) + '">' + esc(d.label) + '</label><input class="inp" type="' + type + '" autocomplete="off" id="f-' + q(d.key) + '" data-bind="' + q(d.key) + '" value="' + esc(v) + '">' + err(d.key) + '</div>';
+      }).join('') + '</div>';
   }
   function upHtml(key, label, kind, count) {
     var accept = kind === 'video' ? 'video/*' : 'image/*,application/pdf';
     var id = 'up-' + (key || 'other');
     var th = (thumbs[key] || []).map(function (u) { return '<img src="' + u + '" alt="">'; }).join('');
-    return '<div class="up"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(label) + '</b><small id="st-' + q(id) + '">' + (count ? count + ' added' : 'Not added yet') + '</small></div>'
+    return '<div class="up" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(label) + '</b><small id="st-' + q(id) + '">' + (count ? count + ' added' : 'Not added yet') + '</small></div>'
       + '<label class="addb" for="' + q(id) + '">Add</label><input class="sr" type="file" id="' + q(id) + '" data-up="' + q(key) + '" accept="' + accept + '" multiple>'
       + (th ? '<div class="thumbs">' + th + '</div>' : '') + '</div>';
   }
@@ -383,66 +461,82 @@ const SCRIPT = String.raw`
     if (c.kind === 'date' || c.kind === 'datetime') {
       var s = String(v), m = MONTHS[Number(s.slice(5, 7)) - 1];
       if (!m) return s;
-      return (s.length >= 10 ? Number(s.slice(8, 10)) + ' ' : '') + m + ' ' + s.slice(0, 4) + (s.length > 10 ? ' at ' + s.slice(11) : '');
+      return (s.length >= 10 ? Number(s.slice(8, 10)) + ' ' : '') + m + ' ' + s.slice(0, 4) + (s.length > 10 ? ' at ' + s.slice(11, 16) : '');
     }
     return String(v);
   }
+  /** The summary: the one step that may scroll. */
   function reviewHtml() {
-    var html = '<h1>Check your claim</h1><p class="help">Tap Change to fix anything. Next, Tina sends your filled-in form to sign on WhatsApp.</p>';
+    var html = '<p class="help">Tap Change to fix anything. Next, Tina sends your form to sign on WhatsApp.</p>';
     visibleScreens().forEach(function (i) {
       var s = V.screens[i], rows = '';
       s.fields.forEach(function (f) {
         if (!shows(f) || f.hidden) return;
-        var v = A[f.key], has = filled(v);
-        var label = f.control.kind === 'stepper' ? f.control.label : promptOf(f);
-        var text = f.control.kind === 'stepper' ? String(stepCount(f, f.control)) : has ? esc(shown(f, v)) : 'Left blank';
-        rows += '<div class="row"><div class="rl">' + (f.entry ? esc(f.entry) + ': ' : '') + esc(label) + '</div><div class="rv2' + (has || f.control.kind === 'stepper' ? '' : ' empty') + '">' + text + '</div></div>';
+        var v = A[f.key], has = filled(v), step = f.control.kind === 'stepper';
+        var text = step ? String(stepCount(f, f.control)) : has ? esc(shown(f, v)) : 'Left blank';
+        rows += '<div class="row"><div class="rl">' + (f.entry ? esc(f.entry) + ': ' : '') + esc(step ? f.control.label : promptOf(f)) + '</div><div class="rv2' + (has || step ? '' : ' empty') + '">' + text + '</div></div>';
       });
       html += '<div class="q"><div class="head"><div class="ql">' + esc(s.title) + '</div><button type="button" class="link" data-go="' + i + '">Change</button></div><div class="card">' + rows + '</div></div>';
     });
     var count = V.evidence.reduce(function (n, e) { return n + (shows(e) ? e.count : 0); }, 0) + extra;
-    html += '<div class="q"><div class="head"><div class="ql">Photos and documents</div><button type="button" class="link" data-go="photos">Change</button></div><div class="card"><div class="kv"><span>Added</span><b>' + count + '</b></div></div></div>';
-    html += '<p class="disc">' + esc(DISCLOSURE) + '</p>' + (errors.submit ? '<div class="err" role="alert">' + esc(errors.submit) + '</div>' : '');
-    return html;
+    html += '<div class="q"><div class="head"><div class="ql">Photos and documents</div><button type="button" class="link" data-go="photos">Change</button></div><div class="card"><div class="kv fixed"><span>Added</span><b>' + count + '</b></div></div></div>';
+    return html + err('submit');
   }
 
-  function render(keepScroll) {
-    var body = $('body'), top = body.scrollTop;
-    var steps = route(), i = stepIndex(steps), step = steps[i];
-    here = step;
-    var count = steps.length - 1;
-    $('prog').style.width = (i === 0 ? 0 : Math.round(i / count * 100)) + '%';
-    $('sec').textContent = step.id === 'hello' ? 'Welcome' : step.id === 'details' ? 'Your details' : step.id === 'photos' ? 'Photos' : step.id === 'review' ? 'Check' : V.screens[step.i].title;
-    $('count').textContent = i > 0 ? i + ' of ' + count : '';
-    body.innerHTML = step.id === 'hello' ? helloHtml() : step.id === 'details' ? detailsHtml() : step.id === 'photos' ? photosHtml() : step.id === 'review' ? reviewHtml() : screenHtml(V.screens[step.i]);
+  function render() {
+    var body = $('body');
+    var steps = route(), i = stepIndex(steps), step = steps[i], anchor = here && here.anchor;
+    here = { id: step.id, i: step.i, anchor: anchor };
+    $('sec').textContent = step.id === 'hello' ? '' : step.id === 'details' ? 'Are these details still right?' : step.id === 'photos' ? 'Add your photos and documents' : step.id === 'review' ? 'Check your claim' : V.screens[step.i].title;
+    $('sec').hidden = step.id === 'hello';
     $('back').hidden = i === 0;
+    // The height to fit is the page without the phone's keyboard open.
+    if (!typing() || !pageH) { body.innerHTML = ''; pageH = body.clientHeight; }
+    var part = 0;
+    page = []; morePages = false;
+    if (step.id === 'screen' || step.id === 'photos') {
+      var all = visibleBlocks(step), from = 0;
+      all.forEach(function (b, x) { if (b.key === anchor) from = x; });
+      var rest = all.slice(from), n = fit(step, rest);
+      page = rest.slice(0, n);
+      morePages = n < rest.length;
+      part = all.length ? from / all.length : 0;
+    } else body.innerHTML = step.id === 'hello' ? helloHtml() : step.id === 'review' ? reviewHtml() : detailsHtml();
+    body.scrollTop = 0;
+    $('prog').style.width = Math.round((i + part) / Math.max(1, steps.length - 1) * 100) + '%';
     $('next').textContent = step.id === 'hello' ? 'Start' : step.id === 'details' ? 'All correct' : step.id === 'review' ? 'Submit claim' : 'Continue';
     $('next').disabled = busy;
-    body.scrollTop = keepScroll ? top : 0;
-    if (!keepScroll) { var h = body.querySelector('h1'); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); h.style.outline = 'none'; } }
   }
 
   // ---- saving: a blank says "I don't know" -------------------------------------------------------------------------
-  function collectScreen(s) {
+  function collect(blocks) {
     var answers = [], notKnown = [], cleared = [];
-    s.fields.forEach(function (f) {
-      if (!shows(f)) return;
-      var v = value(f.key);
-      // Passing the count with nobody added says there was nobody.
-      if (f.control.kind === 'stepper' && !filled(v)) v = false;
-      if (filled(v)) {
-        if (v !== A[f.key] || NK[f.key]) answers.push({ key: f.key, value: v });
-        return;
-      }
-      if (A[f.key] !== undefined) cleared.push(f.key);
-      if (!NK[f.key] || A[f.key] !== undefined) notKnown.push(f.key);
+    blocks.forEach(function (b) {
+      b.fields.forEach(function (f) {
+        var v = value(f.key);
+        if (f.control.kind === 'stepper') {
+          // Passing the count with nobody added says there was nobody. "Is there another?" goes with it.
+          if (!filled(v)) v = false;
+          Object.keys(draft).forEach(function (k) {
+            if (k.indexOf(f.control.group + '.more.') !== 0) return;
+            if (filled(draft[k])) answers.push({ key: k, value: draft[k] });
+            else if (A[k] !== undefined) cleared.push(k);
+          });
+        }
+        if (filled(v)) {
+          if (v !== A[f.key] || NK[f.key]) answers.push({ key: f.key, value: v });
+          return;
+        }
+        if (A[f.key] !== undefined) cleared.push(f.key);
+        if (!NK[f.key] || A[f.key] !== undefined) notKnown.push(f.key);
+      });
     });
     return { answers: answers, notKnown: notKnown, cleared: cleared };
   }
-  function applySaved(r) {
+  function applySaved(r, keys) {
     A = r.answers; NK = {};
     r.notKnown.forEach(function (k) { NK[k] = true; });
-    draft = {};
+    (keys || []).forEach(function (k) { delete draft[k]; });
   }
   function alertBar(text) {
     var b = $('body'), el = document.createElement('div');
@@ -452,37 +546,64 @@ const SCRIPT = String.raw`
   function save(body, done) {
     busy = true; $('next').disabled = true;
     body.checked = Object.keys(checked);
+    var keys = (body.answers || []).map(function (a) { return a.key; }).concat(body.notKnown || [], body.cleared || []);
     post('/answers', body).then(function (r) {
       busy = false;
       errors = {};
       if (r.problems && r.problems.length) {
         r.problems.forEach(function (p) { errors[p.key] = p.text; checked[p.key] = true; });
-        var keep = draft;
         applySaved(r);
-        draft = keep;
-        render(true);
-        var firstErr = document.querySelector('.err'); if (firstErr) firstErr.scrollIntoView({ block: 'center' });
+        render();
         return;
       }
-      applySaved(r);
+      applySaved(r, keys);
       done(r);
     }).catch(function (e) {
       busy = false;
       if (e.message === 'gone') return;
-      alertBar('No connection. Your answers on this screen aren\'t saved yet. Please try again.');
+      alertBar('No connection. Your answers aren\'t saved yet. Please try again.');
       $('next').disabled = false;
     });
   }
   function move(by) {
-    var steps = route(), i = stepIndex(steps);
-    here = steps[Math.max(0, Math.min(steps.length - 1, i + by))];
+    var steps = route(), i = stepIndex(steps), t = steps[Math.max(0, Math.min(steps.length - 1, i + by))];
+    here = { id: t.id, i: t.i, anchor: null };
     errors = {};
+    // Going back lands on the last page of that step.
+    if (by < 0 && (t.id === 'screen' || t.id === 'photos')) here.anchor = pageStarts(t).pop() || null;
     render();
+  }
+  function back() {
+    if (busy || rec) return;
+    if ((here.id === 'screen' || here.id === 'photos') && here.anchor) {
+      var earlier = pageStarts(here, here.anchor);
+      if (earlier.length) { here.anchor = earlier.pop(); errors = {}; return render(); }
+    }
+    move(-1);
+  }
+  /** On from the page that ended at lastKey: the rest of this step, or the next step. */
+  function advance(lastKey) {
+    var all = visibleBlocks(here), at = -1;
+    all.forEach(function (b, i) { if (b.key === lastKey) at = i; });
+    if (at >= 0 && at + 1 < all.length) { here.anchor = all[at + 1].key; errors = {}; return render(); }
+    // The question it ended at has gone (the SAPS case number, now on the claim): what the answers opened comes next.
+    if (at < 0 && here.id === 'screen') {
+      var open = all.filter(function (b) { return b.fields.some(function (f) { return A[f.key] === undefined && !NK[f.key]; }); })[0];
+      if (open) { here.anchor = open.key; errors = {}; return render(); }
+    }
+    move(1);
   }
   // An answer can open a question only the server knows about: a SAPS case number means the police were involved, which
   // the form's conditions read from the claim. When one is open that the page doesn't hold, it reads the form again.
   function holdsKey(key) { return V.screens.some(function (s) { return s.fields.some(function (f) { return f.key === key; }); }); }
   function adopt(s) {
+    // Answers can add or drop a topic, so the step is found again by what it is, not where it was.
+    var at = here && here.id === 'screen' && V.screens[here.i] ? V.screens[here.i].id : null;
+    if (at !== null) {
+      var moved = -1;
+      s.screens.forEach(function (x, i) { if (x.id === at) moved = i; });
+      if (moved >= 0) here.i = moved; else here = { id: 'photos', anchor: null };
+    }
     V.screens = s.screens; V.evidence = s.evidence; A = s.answers; NK = {}; FIELD = {};
     s.notKnown.forEach(function (k) { NK[k] = true; });
     s.screens.forEach(function (x) { x.fields.forEach(function (f) { FIELD[f.key] = f; if (f.prefill !== undefined) PRE[f.key] = f.prefill; }); });
@@ -492,7 +613,12 @@ const SCRIPT = String.raw`
     busy = true;
     api('/state').then(function (s) { busy = false; adopt(s); then(); }).catch(function () { busy = false; then(); });
   }
-  function hasOpen(open, screen) { return !!screen && screen.fields.some(function (f) { return shows(f) && !f.hidden && open.indexOf(f.key) >= 0; }); }
+  /** The page a question is on: it starts at that question, so the client lands right on it. */
+  function anchorFor(i, test) {
+    var hit = null;
+    blocksOf(V.screens[i].fields.filter(function (f) { return shows(f) && !f.hidden; })).forEach(function (b) { if (!hit && b.fields.some(test)) hit = b.key; });
+    return hit;
+  }
   function next() {
     if (busy) return;
     var step = here;
@@ -502,25 +628,19 @@ const SCRIPT = String.raw`
       var changed = {};
       answers.forEach(function (a) { changed[a.key] = a.value; });
       return save({ answers: answers, detailsConfirmed: true }, function () {
-        V.details.forEach(function (d) { if (d.key in changed) d.value = changed[d.key]; });
+        V.details.forEach(function (d) { if (d.key in changed) d.value = changed[d.key]; delete draft[d.key]; });
         V.detailsConfirmed = true;
+        editing = {};
         move(1);
       });
     }
-    if (step.id === 'photos') return move(1);
+    var last = page.length ? page[page.length - 1].key : null;
     if (step.id === 'review') return submit();
-    var c = collectScreen(V.screens[step.i]);
-    if (!c.answers.length && !c.notKnown.length && !c.cleared.length) return move(1);
-    var at = step.i;
-    var before = {};
-    V.screens[at].fields.forEach(function (f) { if (shows(f) && !f.hidden) before[f.key] = true; });
+    if (step.id === 'photos') return morePages ? advance(last) : move(1);
+    var c = collect(page);
+    if (!c.answers.length && !c.notKnown.length && !c.cleared.length) return advance(last);
     save({ answers: c.answers, notKnown: c.notKnown, cleared: c.cleared }, function (r) {
-      freshen(r.open, function () {
-        // A question open here now, that wasn't showing a moment ago, is one the answers opened: it comes first.
-        var s = V.screens[at];
-        if (s && s.fields.some(function (f) { return shows(f) && !f.hidden && !before[f.key] && (r.open || []).indexOf(f.key) >= 0; })) return render();
-        move(1);
-      });
+      freshen(r.open, function () { advance(last); });
     });
   }
   function submit() {
@@ -530,11 +650,10 @@ const SCRIPT = String.raw`
       if (r.open && r.open.length) {
         freshen(r.open, function () {
           var target = null;
-          V.screens.forEach(function (s, i) { if (target === null && hasOpen(r.open, s)) target = i; });
+          V.screens.forEach(function (s, i) { if (target === null && s.fields.some(function (f) { return shows(f) && !f.hidden && r.open.indexOf(f.key) >= 0; })) target = i; });
           if (target === null) return location.reload();
-          here = { id: 'screen', i: target };
+          here = { id: 'screen', i: target, anchor: anchorFor(target, function (f) { return r.open.indexOf(f.key) >= 0; }) };
           errors = {};
-          r.open.forEach(function (k) { errors[k] = 'One more to check. Leave it blank if you don\'t know.'; });
           render();
         });
         return;
@@ -544,7 +663,7 @@ const SCRIPT = String.raw`
       busy = false;
       if (e.message === 'gone') return;
       errors = { submit: (e.body && e.body.message) || 'No connection. Please try again.' };
-      render(true);
+      render();
     });
   }
 
@@ -605,7 +724,7 @@ const SCRIPT = String.raw`
     var i = 0;
     busy = true; $('next').disabled = true;
     function one() {
-      if (i >= files.length) { busy = false; render(true); return; }
+      if (i >= files.length) { busy = false; render(); return; }
       var f = files[i++];
       if (st) st.textContent = 'Adding ' + i + ' of ' + files.length + '…';
       fetch(base + '/file' + (key ? '?item=' + encodeURIComponent(key) : ''), { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(f.name || 'file') }, body: f })
@@ -617,7 +736,7 @@ const SCRIPT = String.raw`
           if (f.type && f.type.indexOf('image/') === 0 && f.type !== 'image/heic' && f.type !== 'image/heif') (thumbs[key] = thumbs[key] || []).push(URL.createObjectURL(f));
           one();
         })
-        .catch(function () { errors.photos = 'No connection. Please try again.'; busy = false; render(true); });
+        .catch(function () { errors.photos = 'No connection. Please try again.'; busy = false; render(); });
     }
     one();
   }
@@ -635,7 +754,7 @@ const SCRIPT = String.raw`
   }
   function pickChanged(key, part, val) {
     var f = FIELD[key], c = f.control;
-    var p = c.kind === 'time' ? parts[key] || {} : parts[key] || {};
+    var p = parts[key] || {};
     p[part] = val; parts[key] = p;
     var v = value(key);
     if (c.kind === 'time') {
@@ -649,7 +768,7 @@ const SCRIPT = String.raw`
     if (d.y && d.m && d.d) {
       // There's no 31 February: the day is brought back to the end of the month.
       var last = new Date(Number(d.y), Number(d.m), 0).getDate();
-      if (Number(d.d) > last) { d.d = pad(last); p.d = d.d; var sel = document.querySelector('[data-pick="' + key.replace(/"/g, '') + '"][data-part="d"]'); if (sel) sel.value = d.d; }
+      if (Number(d.d) > last) { d.d = pad(last); p.d = d.d; }
       var date = d.y + '-' + d.m + '-' + d.d;
       draft[key] = c.kind === 'datetime' && d.h && d.i ? date + ' ' + d.h + ':' + d.i : date;
     } else draft[key] = '';
@@ -662,7 +781,7 @@ const SCRIPT = String.raw`
       var cur = FIELD[k] && FIELD[k].control.kind === 'pills' ? pillBase(FIELD[k].control, value(k)) : value(k);
       draft[k] = filled(cur) && sameStrict(typeof v === 'string' ? String(cur) : cur, v) ? '' : v;
       delete otherOpen[k]; delete errors[k];
-      return render(true);
+      return render();
     }
     var other = e.target.closest('[data-other]');
     if (other) {
@@ -671,7 +790,7 @@ const SCRIPT = String.raw`
       otherOpen[ok] = open;
       if (f.control.kind === 'pills') draft[ok] = '';
       else if (!open) draft[ok] = (filled(value(ok)) ? String(value(ok)).split(', ') : []).filter(function (p) { return isOption(f.control, p); }).join(', ');
-      return render(true);
+      return render();
     }
     var m = e.target.closest('[data-m]');
     if (m) {
@@ -679,31 +798,40 @@ const SCRIPT = String.raw`
       var has = list.some(function (p) { return same(p, opt); });
       draft[mk] = (has ? list.filter(function (p) { return !same(p, opt); }) : list.concat(opt)).join(', ');
       if (mf) delete errors[mk];
-      return render(true);
+      return render();
     }
     var yt = e.target.closest('[data-ytb]');
     if (yt) {
       var yk = yt.dataset.ytb, yc = FIELD[yk].control, no = yc.no || 'No', now = value(yk), isNo = filled(now) && same(now, no), isYes = filled(now) && !isNo;
       draft[yk] = yt.dataset.v === 'no' ? (isNo ? '' : no) : (isYes ? '' : 'Yes');
-      return render(true);
+      return render();
     }
     var dy = e.target.closest('[data-day]');
     if (dy) {
       var dk = dy.dataset.day, dv = dy.dataset.v;
       if (dv === 'earlier') { earlierOpen[dk] = !earlierOpen[dk]; draft[dk] = ''; delete parts[dk]; }
       else { delete earlierOpen[dk]; delete parts[dk]; draft[dk] = value(dk) === dv ? '' : dv; }
-      return render(true);
+      return render();
     }
     var st = e.target.closest('[data-step]');
     if (st) {
       var sf = FIELD[st.dataset.step];
       setCount(sf, sf.control, stepCount(sf, sf.control) + Number(st.dataset.d));
-      return render(true);
+      return render();
     }
     var mc = e.target.closest('[data-mic]');
     if (mc) { mic(mc.dataset.mic); return; }
+    var t = e.target.closest('[data-tile]');
+    if (t) return openSheet(t.dataset.tile, t.dataset.part);
     var g = e.target.closest('[data-go]');
-    if (g) { here = g.dataset.go === 'photos' ? { id: 'photos' } : { id: 'screen', i: Number(g.dataset.go) }; errors = {}; render(); }
+    if (g) { here = g.dataset.go === 'photos' ? { id: 'photos', anchor: null } : { id: 'screen', i: Number(g.dataset.go), anchor: null }; errors = {}; return render(); }
+    var ed = e.target.closest('[data-edit]');
+    if (ed) {
+      editing[ed.dataset.edit] = true;
+      render();
+      var input = $('f-' + ed.dataset.edit);
+      if (input) input.focus();
+    }
   });
   $('body').addEventListener('input', function (e) {
     var t = e.target, d = t.dataset;
@@ -730,20 +858,31 @@ const SCRIPT = String.raw`
     var d = e.target.dataset;
     if (!d) return;
     if (d.up !== undefined) return upload(e.target);
-    if (d.pick) pickChanged(d.pick, d.part, e.target.value);
+  });
+  $('sheet').addEventListener('click', function (e) {
+    if (e.target.closest('[data-sheet-close]')) return closeSheet();
+    var cell = e.target.closest('[data-cell]');
+    if (!cell || !picking) return;
+    var key = picking.key, part = picking.part, val = cell.dataset.cell;
+    if (part === 'v') draft[key] = Number(val);
+    else if (part === 'o') draft[key] = val;
+    else pickChanged(key, part, val);
+    var then = nextPart(key, part);
+    return then ? openSheet(key, then) : closeSheet();
   });
   $('next').addEventListener('click', next);
-  $('back').addEventListener('click', function () { if (!busy && !rec) move(-1); });
+  $('back').addEventListener('click', back);
+  // Turning the phone changes what fits. The keyboard opening doesn't: typing never moves a question to another step.
+  window.addEventListener('resize', function () { if (V && !typing()) render(); });
 
   // ---- open --------------------------------------------------------------------------------------------------------
-  var DISCLOSURE = ${JSON.stringify(DISCLOSURE)};
   api('/state').then(function (s) {
     V = s;
     adopt(s);
     if ($('brandTitle')) $('brandTitle').textContent = s.title;
     if (!s.detailsConfirmed) here = { id: 'hello' };
     else {
-      here = s.startAt >= s.screens.length ? { id: 'photos' } : { id: 'screen', i: s.startAt };
+      here = s.startAt >= s.screens.length ? { id: 'photos' } : { id: 'screen', i: s.startAt, anchor: anchorFor(s.startAt, function (f) { return A[f.key] === undefined && !NK[f.key]; }) };
       if (!route().some(function (x) { return sameStep(x, here); })) here = { id: 'photos' };
     }
     $('app').hidden = false; $('loading').hidden = true;
@@ -763,10 +902,17 @@ export function claimFormPage(): string {
   ${BRAND()}
   <div class="top">
     <div class="prog"><i id="prog"></i></div>
-    <div class="sec"><span id="sec"></span><span id="count"></span></div>
+    <div class="sec" id="sec"></div>
   </div>
   <main class="body" id="body"></main>
   <div class="foot"><button type="button" id="back">Back</button><button type="button" class="go" id="next">Start</button></div>
+  <div class="sheet" id="sheet" hidden>
+    <div class="scrim" data-sheet-close></div>
+    <div class="panel" role="dialog" aria-labelledby="sheetTitle">
+      <div class="panel-head"><span id="sheetTitle"></span><button type="button" data-sheet-close aria-label="Close">✕</button></div>
+      <div class="grid" id="sheetGrid"></div>
+    </div>
+  </div>
 </div>
 <script>${SCRIPT}</script>
 </body></html>`;

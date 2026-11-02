@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit e041603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 35c5250). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -113,6 +113,11 @@ export const QuestionItemSchema = z.object({
    * worked out again when an amount or the items change; asked as usual when an amount is missing.
    */
   sumOf: z.string().min(1).optional(),
+  /**
+   * TTTFG-5562: asked on the guided form only. Tina doesn't ask it on WhatsApp, and it stays off the summary sheet unless
+   * the client answered it. The generic list's general questions: on chat the walkthrough covers what happened.
+   */
+  formOnly: z.boolean().optional(),
 });
 export type QuestionItem = z.infer<typeof QuestionItemSchema>;
 

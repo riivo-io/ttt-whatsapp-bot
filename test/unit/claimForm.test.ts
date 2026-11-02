@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { createGuidedLink, guidedFormOn, LINK_DAYS, memoryLinkStore, openGuidedLink, sha256, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
-import { CLAIM_FORM_CSP, claimFormPage, DISCLOSURE, refusedPage } from '../../src/claimform/page';
+import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../../src/claimform/page';
 import { joinParts, LINK_LOGGED, linkInteractive, withLinkLine } from '../../src/domain/claimsOutbox';
 import { claimFormRouter, type ClaimFormSession } from '../../src/routes/claimForm.route';
 
@@ -178,13 +178,21 @@ test('AC 6: Submit with a required question open sends the client back; ready, T
     } finally { await s.close(); }
 });
 
-test('AC 9: the form shows the AI disclosure, says a person checks the claim, and never says whether it is covered', () => {
+test('AC 9: nothing on the form says whether the claim is covered', () => {
+    // The AI disclosure and who checks the claim go on WhatsApp, just before the link (2 Nov 2026: taken off the form).
     const html = claimFormPage();
-    assert.ok(html.includes("TTT's AI assistant"));
-    assert.match(DISCLOSURE, /person on TTT's insurance team checks your claim/);
-    for (const page of [DISCLOSURE, html, refusedPage('done'), refusedPage('expired')]) {
+    assert.doesNotMatch(html, /TTT's AI assistant/);
+    for (const page of [html, refusedPage('done'), refusedPage('expired')]) {
         assert.doesNotMatch(page, /\b(is|are|isn't|not) covered\b|\bwill be paid\b|\bapproved\b|\bdeclined\b/i);
     }
+});
+
+test('the first page says only what to do, and that a blank is fine', () => {
+    const html = claimFormPage();
+    assert.match(html, /Fill out this form to submit your claim as fast as possible\./);
+    assert.match(html, /If you don\\'t know something, just leave it blank\./);
+    assert.doesNotMatch(html, /reply "chat"/i);
+    assert.match(html, /Check your claim/);
 });
 
 test('the link goes as a WhatsApp button, in its own message after what comes before it, and the log never keeps the address', () => {

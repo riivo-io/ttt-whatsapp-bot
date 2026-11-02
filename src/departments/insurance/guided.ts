@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit e041603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 35c5250). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -12,11 +12,11 @@
 // topics; the screens come in the order the form's list first reaches each topic, and a topic's questions in list order.
 import type { ClaimAnswers, AnswerRecord, ClaimForm, Condition, QuestionItem } from './contracts';
 import {
-  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, type FollowOnClaim, type FollowOnPorts, type ClientFile, type StoredClaimForm,
+  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, type FollowOnClaim, type FollowOnPorts, type ClientFile,
 } from './followon';
 import { emailProblem, formatProblem, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
-import { FORM_CONTROLS, formPrompt, FORM_STEPPERS, type FormControl } from './formcontrols';
+import { FORM_CONTROLS, formHint, formPrompt, FORM_STEPPERS, type FormControl } from './formcontrols';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
   applies, chased, computedTotals, deferred, filesFor, formItems, holds, moreKey, phoneFromItems,
@@ -40,6 +40,8 @@ export interface GuidedField {
   /** How it's answered on the form (formcontrols.ts). Tapping first; a box only where there's no way round one. */
   control: GuidedControl;
   required: boolean;
+  /** What shows in an empty box: the question's example. */
+  hint?: string;
   /** Input hints for the phone's keyboard. */
   keyboard?: 'tel' | 'email';
   /** Answered by the group's stepper, so it isn't asked itself: "is there another?" under a count of people. */
@@ -206,7 +208,12 @@ function earlierValue(item: QuestionItem, master: MasterForm, earlier: readonly 
   return undefined;
 }
 
-const POLICE_HELP = "The insurer needs the SAPS case number. If you haven't reported it yet, please do, and leave this blank. Tina will ask for it on WhatsApp.";
+/** The form's own view of a list: its general questions are asked here, even though Tina doesn't ask them on chat. */
+const asGuided = (form: ClaimForm): ClaimForm => (form.questionList.some((q) => q.formOnly)
+  ? { ...form, questionList: form.questionList.map(({ formOnly: _f, ...q }) => q) }
+  : form);
+
+const POLICE_HELP = "Not reported yet? Please do, and leave this blank. Tina will ask for it later.";
 
 /** One topic's screen per topic of the form, in the order the form's list reaches them (AC 2). */
 function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly ClaimAnswers[], sapsRequired: boolean): GuidedScreen[] {
@@ -218,13 +225,14 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
   // form they sit with the rest of the police questions, where the list reaches those (or last, on a form with none).
   const all = allEntries(form, facts, sapsRequired);
   const added = (i: QuestionItem) => isSaps(i.key) && !form.questionList.some((q) => q.key === i.key);
-  for (const item of [...all.filter((i) => !added(i)), ...all.filter(added)]) {
+  for (const item of [...all.filter((i) => !isSaps(i.key)), ...all.filter((i) => isSaps(i.key))]) {
     if (item.kind !== 'question') continue;
     const baseKey = item.group ? item.key.replace(/\.\d+$/, '') : item.key;
     // Worked out from the items and amounts the client gives (progress.ts), so it isn't a question here.
     if (item.sumOf || baseKey === PHONE_OR_TABLET_KEY) continue;
-    // A walkthrough fact or the SAPS step's value already on the claim: never asked twice.
-    if (factFor(baseKey, facts) !== undefined) continue;
+    // A walkthrough fact or the SAPS step's value already on the claim: never asked twice. The generic list is the exception:
+    // it has no insurer's questions to go on, so it shows them, filled in, for the client to check.
+    if (master.id !== 'generic' && factFor(baseKey, facts) !== undefined) continue;
     const when = conditionsFor(item, form, facts);
     if (!when) continue;
     const isMore = !!item.group && item.key.startsWith(`${item.group}.more.`);
@@ -249,6 +257,7 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     screen.fields[added(item) ? 'unshift' : 'push']({
       key: item.key,
       prompt: formPrompt(held?.prompt ?? item.prompt, wordedFor(control)),
+      ...(formHint(item.prompt, wordedFor(control)) ? { hint: formHint(item.prompt, wordedFor(control)) } : {}),
       type: fieldType(item),
       control,
       ...(hidden ? { hidden: true } : {}),
@@ -315,7 +324,8 @@ function knownValues(form: ClaimForm, claim: FollowOnClaim) {
 const evidenceKind = (item: QuestionItem): GuidedEvidence['kind'] => (item.answerType === 'video' ? 'video' : item.answerType === 'document' ? 'document' : 'photo');
 
 /** The form as the page shows it. `earlier`: the riivo_answers of the client's earlier claims, latest first. */
-export function guidedView(form: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm, earlier: readonly ClaimAnswers[] = [], firstName = ''): GuidedView {
+export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm, earlier: readonly ClaimAnswers[] = [], firstName = ''): GuidedView {
+  const form = asGuided(list);
   const master = masterFormFor(form);
   const facts = factsOf(claim);
   const sapsRequired = !!claim.sapsRequired;
@@ -479,7 +489,7 @@ export function applyGuidedSave(
 async function loaded(ports: GuidedPorts, claimId: string) {
   const claim = await ports.loadClaim(claimId);
   if (!claim.claimFormId) throw new Error(`TTTFG-5562: claim ${claimId} has no claim form yet`);
-  const form: StoredClaimForm = await ports.claimForm(claim.claimFormId);
+  const form = asGuided(await ports.claimForm(claim.claimFormId));
   return { claim, form, sapsRequired: !!claim.sapsRequired };
 }
 
