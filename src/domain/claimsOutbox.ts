@@ -15,7 +15,12 @@
  */
 import type { Choice } from '../departments/insurance/claim';
 
-export interface OutPart { text: string; choices?: Choice[] }
+export interface OutPart {
+    text: string;
+    choices?: Choice[];
+    /** TTTFG-5562: the message carries a link, as a button where WhatsApp can show one. */
+    link?: { url: string; label: string };
+}
 
 /**
  * CLAIMS_MESSAGE_MAX_CHARS: how long one message may get before the rest goes in the next one. Default 700, about half
@@ -35,10 +40,10 @@ export function joinParts(parts: readonly OutPart[], maxChars: number): OutPart[
     for (const p of parts) {
         const last = out.at(-1);
         const joined = last ? `${last.text}\n\n${p.text}` : '';
-        if (last && !last.choices?.length && maxChars > 0 && joined.length <= maxChars) {
-            out[out.length - 1] = { text: joined, ...(p.choices?.length ? { choices: p.choices } : {}) };
+        if (last && !last.choices?.length && !last.link && maxChars > 0 && joined.length <= maxChars) {
+            out[out.length - 1] = { text: joined, ...(p.choices?.length ? { choices: p.choices } : {}), ...(p.link ? { link: p.link } : {}) };
         } else {
-            out.push(p.choices?.length ? { text: p.text, choices: p.choices } : { text: p.text });
+            out.push(p.choices?.length ? { text: p.text, choices: p.choices } : p.link ? { text: p.text, link: p.link } : { text: p.text });
         }
     }
     return out;
@@ -108,6 +113,15 @@ export function interactiveFor(text: string, choices: readonly Choice[]): Intera
     });
     return { type: 'list', body: { text }, action: { button: LIST_BUTTON, sections: [{ title: LIST_BUTTON, rows }] } };
 }
+
+/** TTTFG-5562: a link as WhatsApp's call-to-action button (at most 1024 characters of text and a 20-character label). */
+export const linkInteractive = (text: string, link: { url: string; label: string }) => ({
+    type: 'cta_url' as const, body: { text: text.slice(0, 1024) }, action: { name: 'cta_url', parameters: { display_text: link.label.slice(0, 20), url: link.url } },
+});
+/** The same as plain text, when WhatsApp refuses the button. */
+export const withLinkLine = (text: string, link: { url: string }) => `${text}\n\n${link.url}`;
+/** What the log and the CRM timeline keep: never the address, which is the client's key to their claim. */
+export const LINK_LOGGED = '(link to the claim form)';
 
 /** The choices as numbered lines under the text, when they can't be buttons or a list. */
 export const withChoiceLines = (text: string, choices: readonly Choice[]) =>

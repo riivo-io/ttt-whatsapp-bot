@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit d9e4ce7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -255,7 +255,8 @@ export async function remindTurn(
 
   // One claim reminded on WhatsApp, and all its questions asked: the conversation goes back on its list.
   const only = reminded.length === 1 ? reminded[0] : undefined;
-  if (only && only.missing.every(chased)) {
+  // Not while a guided form is open (TTTFG-5562): the client is still on it, and its Submit carries on from that phase.
+  if (only && only.missing.every(chased) && state.followOn?.phase !== 'form') {
     const followOn = stillNeedState({ now }, resumeFollowOn(only.ctx, true), only.missing);
     return { state: { followOn, pending: null }, outcomes, lastSent };
   }

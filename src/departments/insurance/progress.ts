@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit d9e4ce7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -66,7 +66,7 @@ export function sapsStepApplies(claimType: ClaimType | string, form: ClaimForm, 
  * never missing, never chased.
  */
 export function itemsFor(form: ClaimForm, sapsRequired = false): QuestionItem[] {
-  const list = form.questionList.filter((q) => q.onHand !== false);
+  const list = form.questionList.filter((q) => q.onHand !== false && !q.formOnly);
   if (!sapsRequired) return list;
   const isSaps = (q: QuestionItem) => q.key === SAPS_CASE_KEY || q.key === SAPS_STATION_KEY;
   const saps = SAPS_ITEMS.map((s) => list.find((q) => q.key === s.key) ?? s);
@@ -339,7 +339,7 @@ export function missingItems(form: ClaimForm, answers: ClaimAnswers, evidence: R
 const words = (key: string) => key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_.-]+/g, ' ').toLowerCase();
 
 /** One entry of a repeating group, in words: "witnesses" -> "witness", "otherParties" -> "other party". */
-function entryWord(group: string): string {
+export function entryWord(group: string): string {
   const w = words(group);
   if (/ies$/.test(w)) return w.replace(/ies$/, 'y');
   if (/(?:ss|sh|ch|x)es$/.test(w)) return w.replace(/es$/, '');

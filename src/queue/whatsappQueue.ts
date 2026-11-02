@@ -104,6 +104,24 @@ export async function enqueueClaimsBatchCheck(phone: string, token: string, dela
     await getSender().sendMessages(msg);
 }
 
+/** TTTFG-5562: the rawMessage type of "the client submitted the guided form" (see enqueueClaimsFormDone). */
+export const CLAIMS_FORM_DONE = 'claims_form_done';
+
+/**
+ * TTTFG-5562: the client submitted the guided form on the web host. Tina carries on on the client's own session, so it
+ * can't cross a message the client is sending. The message id names the claim: a double tap on Submit runs once.
+ */
+export async function enqueueClaimsFormDone(phone: string, claimId: string, phoneNumberId: string | null): Promise<void> {
+    const payload: WhatsAppJobPayload = {
+        metaMessageId: `${claimId}:form-done`,
+        phone,
+        phoneNumberId,
+        receivedAt: Date.now(),
+        rawMessage: { type: CLAIMS_FORM_DONE, claimId },
+    };
+    await getSender().sendMessages({ body: payload, sessionId: phone, messageId: payload.metaMessageId });
+}
+
 /** TTTFG-5212 (claims demo): the rawMessage type of the morning reminder (see enqueueClaimsReminder). */
 export const CLAIMS_REMINDER = 'claims_reminder';
 

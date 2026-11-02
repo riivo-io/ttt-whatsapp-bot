@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
+    batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, claimsFormDone, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
     filesQuietMs, optionalQuietMs, reminderDays, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
 } from '../../src/domain/claimsDemoHost';
 import { claimsContactNumber } from '../../src/domain/claimsHost';
@@ -702,4 +702,80 @@ test('TTTFG-4830 (QC, 28 Oct): "Can we not continue with this claim?" at the sum
     assert.equal(w.rows.length, 0);
     assert.equal(w.store.get(PHONE)?.walk, null);
     assert.deepEqual(w.store.get(PHONE)?.held, []); // the photo doesn't go to their next claim
+});
+
+// ---- TTTFG-5562: the guided form ----------------------------------------------------------------------------------
+
+function guidedWorld() {
+    const w = world();
+    const ports = w.deps.ports;
+    w.deps.ports = (r, sent) => ({ ...ports(r, sent), guidedFormLink: async () => ({ url: 'https://tina.example/claim-form/abc', firstName: 'Adriaan' }) });
+    w.deps.guidedForm = true;
+    return w;
+}
+async function openClaim(w: ReturnType<typeof world>) {
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    return t;
+}
+
+test('TTTFG-5562 AC 1: with the setting on, a new claim gets the link after the duty of disclosure, instead of the first question', async () => {
+    const w = guidedWorld();
+    await openClaim(w);
+    const followOn = w.store.get(PHONE)?.resume.followOn;
+    assert.equal(followOn?.phase, 'form');
+    assert.match(w.sent.at(-1)!, /tap below to fill in your claim form/);
+    assert.match(w.sent.join("\n"), /all the facts that matter/);
+    assert.ok(w.sent.findIndex((t) => /all the facts that matter/.test(t)) >= 0);
+    assert.ok(w.actions.some((a) => /Guided claim form link sent/.test(a.detail)));
+});
+
+test('TTTFG-5562: without the setting, the claim asks on WhatsApp as before', async () => {
+    const w = world();
+    await openClaim(w);
+    assert.notEqual(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.doesNotMatch(w.sent.join('\n'), /tap below to fill in your claim form/);
+});
+
+test('TTTFG-5562 AC 8: a client who prefers chat gets the questions on WhatsApp from the first unanswered one', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    assert.equal(await say(w, "I'd rather just chat", tick(t, 1)), 'follow-on');
+    const after = w.store.get(PHONE)?.resume.followOn;
+    assert.notEqual(after?.phase, 'form');
+    assert.match(w.since().join('\n'), /No problem, let's do it here\./);
+});
+
+test('TTTFG-5562: any other message while the form is open gets a reminder of the link', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    w.replies.push({ decision: 'follow-on' });
+    await say(w, 'ok thanks', tick(t, 1));
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.match(w.since().join('\n'), /Your claim form is in the link I sent you/);
+});
+
+test('TTTFG-5562 AC 6: when the client submits, the claim carries on as a chat-answered one; a stale call changes nothing', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    const claimId = w.rows[0].id;
+    assert.equal(await claimsFormDone(w.deps, PHONE, claimId, tick(t, 1)), 'carried-on');
+    assert.notEqual(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.ok(w.since().length > 0);
+});
+
+test('TTTFG-5562: a form submitted after the conversation moved on tells the broker, so it is never simply left', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    w.store.get(PHONE)!.resume = { followOn: null, pending: null };
+    assert.equal(await claimsFormDone(w.deps, PHONE, w.rows[0].id, tick(t, 1)), 'stale');
+    assert.deepEqual(w.since(), []);
+    assert.ok(w.actions.some((a) => a.kind === 'Follow-up' && /submitted the claim form/.test(a.detail)));
 });

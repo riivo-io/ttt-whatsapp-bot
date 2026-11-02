@@ -23,8 +23,9 @@
  * Pure apart from the injected deps (Tina's Ports pattern), so it is tested without Meta, Dataverse, Supabase or Claude.
  * src/services/claimsDemo.service.ts wires the real ones.
  */
-import { claimTurn } from '../departments/insurance/claim';
+import { claimTurn, DEPARTMENT } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
+import { prefersChat } from '../departments/insurance/guided';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
 import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyModel, type ReportedModel } from '../departments/insurance/reply';
 import { remindTurn, type BrokerStep, type ReminderOutcome, type ReminderPorts, type ReminderSettings } from '../departments/insurance/reminder';
@@ -168,6 +169,8 @@ export interface ClaimsDemoDeps {
      * heard as they're likely meant. Absent: voice notes are off, and Tina asks the client to type.
      */
     transcribe?(voice: DemoVoice, hint: string): Promise<VoiceHeard>;
+    /** TTTFG-5562: a new claim gets the link to the guided form (CLAIMS_GUIDED_FORM). Absent: every question on WhatsApp. */
+    guidedForm?: boolean;
 }
 
 export type DemoOutcome =
@@ -287,7 +290,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         const reported = await formAnswersFromReport(deps, ports, r.claim.id, walk, c.said ?? [], now);
         const fo = await followOnTurn(ports, conv(), null, {
             kind: 'start', claimId: r.claim.id, describedAsTheft: describedAsTheft(walk), files: c.held, reported,
-        }, now);
+        }, now, deps.guidedForm ? { guidedForm: true } : {});
         c.resume = { followOn: fo.state, pending: null };
         c.held = [];
         c.said = [];
@@ -296,6 +299,12 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
 
     // ---- no walkthrough: which open claim is this about? ----
     const ports = deps.ports(c.requestId, sent);
+    // TTTFG-5562 (AC 8): the client has the form's link and would rather answer here: from the first unanswered question.
+    if (c.resume.followOn?.phase === 'form' && !m.file && prefersChat(m.text)) {
+        const fo = await followOnTurn(ports, conv(), c.resume.followOn, { kind: 'form-chat', wamid: m.wamid }, now);
+        c.resume = { followOn: fo.state, pending: null };
+        return done('follow-on');
+    }
     const ctx = await replyContext(ports, m.contactId, c.resume, c.lastSent ?? undefined);
     const reading = await readReply(watch(deps.replyModel), ctx, m.text, m.file, m.wamid, now, { spoken });
     if (unavailable) return busy();
@@ -379,6 +388,37 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
     if (last !== undefined) c.lastSent = last;
     await deps.save(phone, c);
     return 'listed';
+}
+
+/**
+ * TTTFG-5562 (AC 6): the client submitted the guided form. The claim carries on as a chat-answered one does: what's still
+ * missing is asked here, then the form is filled and the signing link goes out. A client who moved to chat in the meantime
+ * simply gets the next open question; a conversation on another claim, or none, is left alone (the answers are on the claim).
+ */
+export async function claimsFormDone(deps: ClaimsDemoDeps, phone: string, claimId: string, now: Date): Promise<'carried-on' | 'stale'> {
+    const c = await deps.load(phone);
+    const followOn = c?.resume.followOn;
+    if (!c || !followOn || followOn.claimId !== claimId) {
+        // The client has moved on to something else on WhatsApp, so Tina can't carry on here. The answers are on the claim:
+        // the broker is told, so a submitted form is never simply left.
+        const ports = deps.ports(c?.requestId ?? '', () => undefined);
+        const claim = await ports.loadClaim(claimId);
+        await ports.createAgentAction({
+            kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at: now.toISOString(),
+            detail: `The client submitted the claim form for ${claim.reference}, but their WhatsApp conversation has moved on, so no signing link went out. Please send them the form to sign.`,
+        });
+        return 'stale';
+    }
+    let last: string | undefined;
+    const ports = deps.ports(c.requestId, (text) => { last = text; });
+    const conversation = claimsConversation(phone, c.requestId, deps.signUpLink, deps.contactNumber);
+    const r = await followOnTurn(ports, conversation, followOn, { kind: 'form-done', wamid: `${claimId}:form-done` }, now, deps.scheduleBatchCheck ? { waitForMore: true } : {});
+    c.resume = { followOn: r.state, pending: null };
+    if (last !== undefined) c.lastSent = last;
+    await deps.save(phone, c);
+    const token = r.state?.waiting;
+    if (token && deps.scheduleBatchCheck) await deps.scheduleBatchCheck(phone, token, quietSpell(r.state?.waitingFor)).catch((e) => console.warn('[ClaimsDemo] Scheduling the check failed:', (e as Error).message));
+    return 'carried-on';
 }
 
 /**

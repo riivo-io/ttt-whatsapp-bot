@@ -20,6 +20,11 @@
  * --sign 4319: TTTFG-5196's signing page on http://localhost:4319 (requests in memory): the form's "ready to sign" link
  *   prints here; open it in a browser and sign, and the callback files the signed copy and sets the DEV claim to Signed.
  *   When a message or a script sends the link, the rehearsal waits for that signature (--wait <seconds>, default 900).
+ * --form 4320: TTTFG-5562's guided form on http://localhost:4320 (links in memory): a new claim gets the link instead of the
+ *   first question. It prints here; open it at phone size and fill it in. Submit carries on here, and with --sign the
+ *   signing link follows. A recording on the page is transcribed for real (OPENAI_API_KEY) or, without the key, says it can't listen.
+ * --generic-from <generic.json>: the generic row's questions come from this config file instead of DEV's row, read here only,
+ *   so a changed list can be tried without touching the row the live demo reads.
  *
  * Sign-in: `az login` to TTT's tenant (Dataverse and Graph tokens). Claude: ANTHROPIC_API_KEY, else the DEV email
  * agent's Key Vault secret. DEV only: it refuses any other Dataverse.
@@ -34,15 +39,17 @@ import readline from 'readline';
 import type { Dv } from '../departments/insurance/dataverse';
 import type { Choice } from '../departments/insurance/claim';
 import type { ClientFile } from '../departments/insurance/followon';
-import { interactiveFor, messageMaxChars, outbox, withChoiceLines } from '../domain/claimsOutbox';
+import { createGuidedLink, memoryLinkStore, type GuidedLinkDeps } from '../claimform/links';
+import { interactiveFor, messageMaxChars, outbox, withChoiceLines, withLinkLine } from '../domain/claimsOutbox';
 import {
-    claimsDemoTurn, demoContactFor, parseDemoNumbers, type ClaimsDemoDeps, type DemoConversation, type DemoVoice,
+    claimsDemoTurn, claimsFormDone, demoContactFor, parseDemoNumbers, voiceHint, type ClaimsDemoDeps, type DemoConversation, type DemoVoice,
 } from '../domain/claimsDemoHost';
 import { claimsContactNumber } from '../domain/claimsHost';
 import { transcribeVoiceNote } from '../services/transcribe.service';
 import {
-    cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
+    cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
 } from '../services/claimsDemoWiring';
+import { claimFormRouter } from '../routes/claimForm.route';
 import { signingRouter } from '../routes/signing.route';
 import { callerCallbackKey, createSigningRequest, SIGNATURE_HEADER, type SigningDeps } from '../signing/signing';
 import { memorySigningStore } from '../signing/store';
@@ -65,8 +72,10 @@ if (!phone || !contactId) {
 }
 const scriptFile = flag('--script');
 const signPort = flag('--sign');
+const formPort = flag('--form');
+const genericFrom = flag('--generic-from');
 const waitSeconds = Number(flag('--wait') ?? 900);
-const oneMessage = args.filter((a, i) => !a.startsWith('--') && !['--phone', '--contact', '--script', '--sign', '--wait'].includes(args[i - 1] ?? ''))[0];
+const oneMessage = args.filter((a, i) => !a.startsWith('--') && !['--phone', '--contact', '--script', '--sign', '--form', '--generic-from', '--wait'].includes(args[i - 1] ?? ''))[0];
 
 // --- az login tokens ----------------------------------------------------------------------------------------------------
 const tokens = new Map<string, { value: string; until: number }>();
@@ -82,7 +91,20 @@ function azToken(resource: string): string {
 }
 
 // Tina's own Dataverse call (429s waited out); cachedDv below gives each message the same per-message cache as Tina.
-const rawDv: Dv = dataverseCall(DEV, () => azToken(DEV));
+const liveDv: Dv = dataverseCall(DEV, () => azToken(DEV));
+/** --generic-from: DEV's generic row, read with the config file's questions. Nothing is written to the row. */
+const genericList = genericFrom ? (JSON.parse(fs.readFileSync(path.resolve(genericFrom), 'utf8')) as { questionList: unknown[] }).questionList : null;
+const withGeneric = <T,>(row: T): T => {
+    const r = row as { riivo_Provider?: unknown; riivo_questionlist?: string };
+    if (!r || r.riivo_Provider || !r.riivo_questionlist) return row;
+    return { ...row, riivo_questionlist: JSON.stringify({ ...JSON.parse(r.riivo_questionlist), questionList: genericList }) };
+};
+const rawDv: Dv = !genericList ? liveDv : (async <T,>(method: 'GET' | 'POST' | 'PATCH', p: string, body?: unknown, opts?: { formatted?: boolean; returnRow?: boolean }) => {
+    const res = await liveDv<T>(method, p, body, opts);
+    if (method !== 'GET' || !p.startsWith('riivo_claimforms')) return res;
+    const many = res as { value?: unknown[] };
+    return (many.value ? { ...many, value: many.value.map(withGeneric) } : withGeneric(res)) as T;
+}) as Dv;
 
 const graph: Graph = async (method, p, body, contentType) => fetch(p.startsWith('https://') ? p : `https://graph.microsoft.com/v1.0${p}`, {
     method, body, headers: { Authorization: `Bearer ${azToken('https://graph.microsoft.com')}`, ...(contentType ? { 'Content-Type': contentType } : {}) },
@@ -169,10 +191,15 @@ function localSigning(port: number): DemoSigning {
 }
 const signing = signPort ? localSigning(Number(signPort)) : undefined;
 
+/** TTTFG-5562: the guided form's link, once Tina sent it. */
+let linkPrinted = '';
+let formsDone = 0;
+
 /** What Tina's last message offered to tap: typing one of its titles (or "/tap 2") taps it. */
 let lastChoices: Choice[] = [];
 const box = outbox(async (_to, m) => {
     lastChoices = m.choices ?? [];
+    if (m.link) { linkPrinted = m.link.url; return show(`Tina [button: ${m.link.label}]`, withLinkLine(m.text, m.link)); }
     const interactive = m.choices?.length ? interactiveFor(m.text, m.choices) : null;
     if (!interactive) return show('Tina', m.choices?.length ? withChoiceLines(m.text, m.choices) : m.text);
     const taps = interactive.type === 'button'
@@ -183,7 +210,7 @@ const box = outbox(async (_to, m) => {
 
 const channels: DemoChannels = {
     get dv() { return dv; }, graph, site: SITE,
-    sendText: async (to, text, choices) => box.push(to, { text, ...(choices?.length ? { choices } : {}) }),
+    sendText: async (to, text, choices, link) => box.push(to, { text, ...(choices?.length ? { choices } : {}), ...(link ? { link } : {}) }),
     sendDocument: async (_to, bytes, fileName, caption) => {
         await box.flush();
         fs.mkdirSync(OUT, { recursive: true });
@@ -196,7 +223,33 @@ const channels: DemoChannels = {
     blankFormFallback: localBlankForm,
     note: (text) => console.log(`  [${text}]`),
     ...(signing ? { signing } : {}),
+    ...(formPort ? { guidedLink: ({ claimId, phone: to, contactId: c }) => createGuidedLink(formLinks!, { claimId, phone: to, contactId: c }) } : {}),
 };
+
+// --- TTTFG-5562: the guided form on localhost -----------------------------------------------------------------------------
+const formLinks: GuidedLinkDeps | null = formPort ? { store: memoryLinkStore(), publicUrl: `http://localhost:${formPort}` } : null;
+if (formLinks) {
+    const app = express();
+    app.use('/claim-form', claimFormRouter(() => ({
+        ...formLinks,
+        session: (link) => demoClaimFormSession(channels, link, {
+            hear: async (bytes, mimeType, asked) => {
+                if (!process.env.OPENAI_API_KEY) return { problem: 'unavailable' };
+                const r = await transcribeVoiceNote(bytes, mimeType, voiceHint(asked));
+                return 'problem' in r ? { problem: r.problem } : { text: r.text };
+            },
+            carryOn: async () => {
+                show('Guided form', `The client submitted the form for ${link.claim_id}.`);
+                dv = cachedDv(rawDv, newCrmStats());
+                const outcome = await claimsFormDone(deps, link.phone, link.claim_id, new Date());
+                await box.flush();
+                console.log(`  (${outcome})`);
+                formsDone++;
+            },
+        }),
+    })));
+    app.listen(Number(formPort), () => console.log(`  [guided form on http://localhost:${formPort}]`));
+}
 
 const deps: ClaimsDemoDeps = {
     load: async () => (fs.existsSync(storeFile) ? (JSON.parse(fs.readFileSync(storeFile, 'utf8')) as DemoConversation) : null),
@@ -210,6 +263,7 @@ const deps: ClaimsDemoDeps = {
     openRequest: (c, p, text) => openDemoRequest(dv, c, p, text),
     withdrawOpenClaims: (c) => withdrawOpenClaims(dv, c),
     say: (p, text) => channels.sendText(p, text),
+    ...(formPort ? { guidedForm: true } : {}),
     signUpLink: 'https://www.ttt-tax.co.za/client-onboarding',
     contactNumber: claimsContactNumber(process.env.CLAIMS_CONTACT_NUMBER), // as on Tina
     // TTTFG-4830: the voice note's "media id" is the local file's path.
@@ -259,6 +313,11 @@ async function say(line: string) {
 
 /** With --sign, after a message or a script that sent a signing link: wait for the client to sign on the page. */
 async function waitForSignature() {
+    if (formPort && linkPrinted) {
+        console.log(`\n  Waiting up to ${waitSeconds}s for the guided form to be submitted: ${linkPrinted}`);
+        const until = Date.now() + waitSeconds * 1000;
+        while (formsDone === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 1000));
+    }
     if (!signPort || !linksSent) process.exit(0);
     console.log(`\n  Waiting up to ${waitSeconds}s for the form to be signed on the page...`);
     const until = Date.now() + waitSeconds * 1000;

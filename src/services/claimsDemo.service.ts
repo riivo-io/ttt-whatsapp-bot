@@ -42,7 +42,7 @@
  * contact; a voice note with its transcript and the recording attached (writeDemoLog).
  */
 import {
-    batchQuietMs, claimsDemoBatchCheck, filesQuietMs, optionalQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, reminderDays, type ClaimsDemoDeps,
+    batchQuietMs, claimsDemoBatchCheck, claimsFormDone, voiceHint, filesQuietMs, optionalQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, reminderDays, type ClaimsDemoDeps,
     type DemoConversation, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
@@ -55,15 +55,17 @@ import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
 import { claimsContactNumber } from '../domain/claimsHost';
-import { interactiveFor, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, type OutPart } from '../domain/claimsOutbox';
+import { interactiveFor, LINK_LOGGED, linkInteractive, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, withLinkLine, type OutPart } from '../domain/claimsOutbox';
 import {
-    cachedDv, dataverseCall, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
+    cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
     type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
 } from './claimsDemoWiring';
 import type { SignedCallback } from '../departments/insurance/signing';
+import { createGuidedLink, guidedFormOn, guidedLinksFromEnv, type GuidedLinkRow } from '../claimform/links';
+import type { ClaimFormDeps, ClaimFormSession } from '../routes/claimForm.route';
 import { signingFromEnv } from '../signing/env';
 import { createSigningRequest } from '../signing/signing';
-import { enqueueClaimsBatchCheck, enqueueClaimsReminder } from '../queue/whatsappQueue';
+import { enqueueClaimsBatchCheck, enqueueClaimsFormDone, enqueueClaimsReminder } from '../queue/whatsappQueue';
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService, type ClaimConversationRow } from './supabase.service';
@@ -120,22 +122,25 @@ const graph: Graph = async (method, path, body, contentType) => {
 async function deliver(to: string, m: OutPart, log: DemoLog): Promise<void> {
     const at = new Date().toISOString();
     const interactive = m.choices?.length ? interactiveFor(m.text, m.choices) : null;
-    const lines = m.choices?.length ? withChoiceLines(m.text, m.choices) : m.text;
-    const tries: (() => Promise<string | null>)[] = interactive
-        ? [() => metaWhatsAppService.sendInteractive(to, interactive), () => metaWhatsAppService.sendInteractive(to, interactive), () => metaWhatsAppService.sendMessage(to, lines)]
+    // TTTFG-5562: a link goes as WhatsApp's button; the log keeps the words, never the address.
+    const button = m.link ? linkInteractive(m.text, m.link) : null;
+    const rich = interactive ?? button;
+    const lines = m.link ? withLinkLine(m.text, m.link) : m.choices?.length ? withChoiceLines(m.text, m.choices) : m.text;
+    const tries: (() => Promise<string | null>)[] = rich
+        ? [() => metaWhatsAppService.sendInteractive(to, rich), () => metaWhatsAppService.sendInteractive(to, rich), () => metaWhatsAppService.sendMessage(to, lines)]
         : [() => metaWhatsAppService.sendMessage(to, lines), () => metaWhatsAppService.sendMessage(to, lines)];
     for (const [i, send] of tries.entries()) {
         try {
             const wamid = await send();
             if (!wamid) console.warn(`[ClaimsDemo] WhatsApp send to ${to} returned no message id`);
-            log.outbound.push({ text: interactive && i < 2 ? loggedText(m) : lines, at, wamid });
+            log.outbound.push({ text: m.link ? `${m.text}\n${LINK_LOGGED}` : interactive && i < 2 ? loggedText(m) : lines, at, wamid });
             return;
         } catch (e: any) {
             console.error(`[ClaimsDemo] WhatsApp send to ${to} refused (attempt ${i + 1}):`, JSON.stringify(e?.response?.data ?? e?.message));
             if (i === 0) await new Promise((r) => setTimeout(r, 2000));
         }
     }
-    log.outbound.push({ text: `${lines}\n(WhatsApp didn't deliver this message.)`, at });
+    log.outbound.push({ text: `${m.link ? `${m.text}\n${LINK_LOGGED}` : lines}\n(WhatsApp didn't deliver this message.)`, at });
 }
 
 /**
@@ -149,7 +154,7 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Prom
         dv: dataverse(stats),
         graph,
         site: process.env.CLAIMS_DEMO_SHAREPOINT_SITE || DEV_SITE,
-        sendText: async (to, text, choices) => box.push(to, { text, ...(choices?.length ? { choices } : {}) }),
+        sendText: async (to, text, choices, link) => box.push(to, { text, ...(choices?.length ? { choices } : {}), ...(link ? { link } : {}) }),
         flush: () => box.flush(),
         sendDocument: async (to, bytes, fileName, caption) => {
             await box.flush();
@@ -172,8 +177,16 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Prom
         mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
         note: (text) => console.log(`[ClaimsDemo] ${text}`),
         signing: signing(),
+        ...guidedLinkMaker(),
     };
 };
+
+/** TTTFG-5562: the guided form's links, when the page is set up (src/claimform/links.ts). */
+function guidedLinkMaker(): Pick<DemoChannels, 'guidedLink'> {
+    const d = guidedLinksFromEnv();
+    if (!d) return {};
+    return { guidedLink: ({ claimId, phone, contactId }) => createGuidedLink(d, { claimId, phone, contactId, phoneNumberId: getActivePhoneNumberId() || null }) };
+}
 
 /** TTTFG-5196: the signing page, when it's set up. Its callback comes back to /webhook/claim-signed (handleClaimSigned). */
 function signing(): DemoSigning | undefined {
@@ -291,6 +304,7 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
         contactNumber: claimsContactNumber(process.env.CLAIMS_CONTACT_NUMBER),
         lastReminderOn: (claimId) => lastReminderPort(ch.dv).lastReminderOn(claimId),
         lastBrokerStepOn: (claimId, step) => lastReminderPort(ch.dv).lastBrokerStepOn(claimId, step),
+        ...(guidedFormOn(process.env.CLAIMS_GUIDED_FORM, phone) ? { guidedForm: true } : {}),
         ...((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off'
             ? {}
             : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint, log) }),
@@ -302,6 +316,48 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
             : {}),
     };
 }
+/**
+ * TTTFG-5562 (AC 6): the worker's half of Submit, on the client's own queue. Never throws: the answers are on the claim,
+ * and the client's next message carries on from them.
+ */
+export async function handleClaimsFormDone(phone: string, claimId: string): Promise<void> {
+    const contactId = claimsDemoContact(phone);
+    if (!contactId || !claimId) return;
+    const stats = newCrmStats();
+    const log = newDemoLog();
+    const ch = channels(stats, log);
+    try {
+        const outcome = await claimsFormDone(deps(phone, contactId, ch, log), phone, claimId, new Date());
+        console.log(`[ClaimsDemo] ${phone}: guided form ${outcome}; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes`);
+    } catch (e) {
+        console.error(`[ClaimsDemo] ${phone} guided form end failed:`, (e as Error).message, (e as Error).stack);
+    }
+    await ch.flush();
+    await writeLog(ch, log, phone, contactId, null);
+}
+
+/** TTTFG-5562: the web host's half of the guided form: one link's claim, through the same ports as a WhatsApp message. */
+function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
+    return demoClaimFormSession(channels(newCrmStats(), newDemoLog()), link, {
+        hear: (bytes, mimeType, hint) => transcribeVoiceNote(bytes, mimeType, voiceHint(hint)),
+        async carryOn() {
+            try {
+                await enqueueClaimsFormDone(link.phone, link.claim_id, link.phone_number_id);
+            } catch (e) {
+                // No queue (the bus is down): run it here rather than leave the client waiting.
+                console.warn('[ClaimForm] Queueing the end of the form failed; running it now:', (e as Error).message);
+                await handleClaimsFormDone(link.phone, link.claim_id);
+            }
+        },
+    });
+}
+
+/** TTTFG-5562: the guided form's route, when the page is set up. */
+export function claimFormDeps(): ClaimFormDeps | null {
+    const d = guidedLinksFromEnv();
+    return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null } : null;
+}
+
 export interface DemoInbound {
     from: string;
     text: string;

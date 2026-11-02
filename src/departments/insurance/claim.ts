@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit d9e4ce7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -90,7 +90,11 @@ export interface Choice { title: string; description?: string; reply?: string }
 
 export type Outbound =
   /** `choices` (TTTFG-4830): the message asks one closed question, and these answer it. */
-  | { kind: 'text'; text: string; choices?: Choice[] }
+  | {
+    kind: 'text'; text: string; choices?: Choice[];
+    /** TTTFG-5562: the message carries a link, as a button where WhatsApp can show one. */
+    link?: { url: string; label: string };
+  }
   /**
    * `params` (TTTFG-5212): the template's variables, in order, when it goes out as an approved WhatsApp template (the
    * morning reminder, always). Without them the client is inside the 24-hour window: send `text`.
