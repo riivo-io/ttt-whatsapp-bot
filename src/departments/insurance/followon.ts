@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit bec6d7f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 6e8bf76). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -44,7 +44,7 @@
 // conversation stays on it (phase `still-need`): whatever the client sends next is read against the list, and the
 // morning reminder (reminder.ts) puts a client back on it. "I don't know" to one of those items is "not yet", so it
 // stays the client's to send; the broker takes only what the client can't get.
-import { clientQuestionDetail, DEPARTMENT, PACK_FOLLOW_UP, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
+import { clientQuestionDetail, DEPARTMENT, OWN_PLUMBER_NOTE, PACK_FOLLOW_UP, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import type { FlagTrigger } from './flags';
 import { formatProblem } from './formats';
@@ -56,7 +56,7 @@ import {
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
 import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, type ClaimTemplate } from './templates';
-import { VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
+import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
 /**
  * Package settings. `claims.notificationWarningDays`: send the Upcoming note when this many days or fewer are left.
@@ -529,12 +529,19 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
  * TTTFG-4830 (29 Oct 2026): the insurer's required evidence Tina doesn't ask a client for (contracts.ts `onHand: false`:
  * quotes, registration papers, a settlement letter) that applies to this claim and isn't on it. TTT gets it, so the
  * broker's Follow-up and the evidence complete note name it. A question of that kind is a box on the form, on the fill's
- * blank list.
+ * blank list. The quotes aren't for TTT to get when the insurer appoints the contractor (insurerAppoints).
  */
 export function forTtt(form: ClaimForm, w: Pick<Work, 'answers' | 'evidence' | 'facts'>): QuestionItem[] {
   return form.questionList.filter((q) => q.kind === 'evidence' && q.onHand === false && q.required && !q.group
+    && !(q.key === 'quotes' && insurerAppoints(w.facts))
     && applies(q, w.answers, w.facts) && !evidenceIn(q, w.evidence));
 }
+
+/**
+ * TTTFG-4830 (2 Nov 2026, TTT's feedback): the insurer appoints the contractor on a windscreen, and on a burst geyser
+ * unless the client uses their own plumber.
+ */
+const insurerAppoints = (f: ClaimFacts) => f.claimType === 'Windscreen' || (isGeyser(f) && !f.description?.includes(OWN_PLUMBER_NOTE));
 
 /** TTTFG-4830 (28 Oct 2026): what Tina says when the last thing still to come arrives after the form went out. */
 export const EVERYTHING_IN = "Thanks, that's everything we need from you for now.";
