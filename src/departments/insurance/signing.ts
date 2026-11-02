@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit c99946b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit f7e99c4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -24,7 +24,7 @@
 // I/O sits behind ports (signing-dataverse.ts is the Dataverse adapter; the host adds the page and the senders).
 import { createHash } from 'node:crypto';
 import { PDFDocument, type PDFPage, type PDFRef } from 'pdf-lib';
-import { DEPARTMENT, type AgentActionRow, type Owner } from './claim';
+import { DEPARTMENT, PACK_FOLLOW_UP, type AgentActionRow, type Owner } from './claim';
 import type { ClaimForm, SignatureResult } from './contracts';
 import { READY_TO_REGISTER, readyToRegister } from './followon';
 import type { ClaimForFill, SigningStep, UnsignedDocument } from './signature-fill';
@@ -337,7 +337,7 @@ async function packAfterSigned(ports: ClaimSignedPorts, claim: SignedClaim, at: 
     const msg = String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').slice(0, 300);
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
-      detail: `The client signed claim ${claim.reference}, but the agent could not check whether its claim pack is due: ${msg}. Please check the claim, and put the pack together by hand if every required item is in.`,
+      detail: `${PACK_FOLLOW_UP}${claim.reference}: the client signed, but the agent could not check whether the pack is due: ${msg}. Please check the claim, and put the pack together by hand if every required item is in.`,
     });
   }
 }

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit c99946b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit f7e99c4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -44,7 +44,7 @@
 // conversation stays on it (phase `still-need`): whatever the client sends next is read against the list, and the
 // morning reminder (reminder.ts) puts a client back on it. "I don't know" to one of those items is "not yet", so it
 // stays the client's to send; the broker takes only what the client can't get.
-import { clientQuestionDetail, DEPARTMENT, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
+import { clientQuestionDetail, DEPARTMENT, PACK_FOLLOW_UP, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import type { FlagTrigger } from './flags';
 import { formatProblem } from './formats';
@@ -1966,7 +1966,17 @@ export async function followOnTurn(
   // when a conditional evidence item depends on it ("If the car was found: …"), and the SAPS step when one tests a claim
   // column. Best effort: the client's turn is done by now, the next evidence works the score out again, and a pack that
   // can't be built raises its own Follow-up, so a failure here never fails the turn (it would send the replies twice).
-  if (ports.claimEvidence && step.out.some((o) => movesScore(o, form))) await ports.claimEvidence(claimId).catch(() => undefined);
+  // The one turn that ends the evidence may make the pack, so a failure there tells the owner (it happens once).
+  if (ports.claimEvidence && step.out.some((o) => movesScore(o, form))) {
+    await ports.claimEvidence(claimId).catch(async (err) => {
+      if (!step.out.some((o) => o.kind === 'evidence-complete')) return;
+      const msg = String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').slice(0, 300);
+      await ports.createAgentAction({
+        kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at,
+        detail: `${PACK_FOLLOW_UP}${claim.reference}: every required item is in, but the agent could not check whether the pack is due: ${msg}. Please check the claim, and put the pack together by hand once the client has signed.`,
+      }).catch(() => undefined);
+    });
+  }
 
   // TTTFG-5263: the risk flags, once everything this turn sends has gone out. Tina starts the follow-on straight after the
   // claim opens; the walkthrough ends with the still-need list or the closing line. Nothing comes back into the turn,

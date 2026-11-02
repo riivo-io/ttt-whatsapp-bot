@@ -13,6 +13,8 @@
  *    change. Either way it is the conversation's last message, once every item is in (TTTFG-5196).
  */
 import type { Choice } from '../departments/insurance/claim';
+import { updateClaimPack, type PackOutcome } from '../departments/insurance/claimpack';
+import { dataverseClaimPackPorts, type ClaimPackFiles } from '../departments/insurance/claimpack-dataverse';
 import type { Dv } from '../departments/insurance/dataverse';
 import { captureDate } from '../departments/insurance/exif';
 import { dataverseFillPorts, type ClaimFormFiles } from '../departments/insurance/fill-dataverse';
@@ -283,9 +285,32 @@ export function demoClaimSigningStep(ch: DemoChannels, signing: DemoSigning, pho
     });
 }
 
+/**
+ * TTTFG-5200: the claim pack for a demo claim (claimpack.ts updateClaimPack): the score worked out again, and once the
+ * claim is signed with every required item in, the pack (signed form, summary page, evidence PDFs) filed in the claim
+ * folder and its Claim pack Review item in the claim owner's My Day. The pack reads the evidence back by its link.
+ */
+export function demoClaimPack(ch: DemoChannels): (claimId: string) => Promise<PackOutcome> {
+    const files: ClaimPackFiles = {
+        save: claimFolders(ch).forms.save,
+        async read(fileRef) {
+            const res = await ch.graph('GET', `/shares/${shareId(fileRef)}/driveItem/content`);
+            if (!res.ok) throw new Error(`SharePoint download: HTTP ${res.status}`);
+            return new Uint8Array(await res.arrayBuffer());
+        },
+    };
+    const ports = dataverseClaimPackPorts({ dv: ch.dv, files });
+    return async (claimId) => {
+        const out = await updateClaimPack(ports, claimId, new Date().toISOString());
+        if ('built' in out) ch.note?.(`Claim pack ${out.built.fileName} filed (${out.score}%), Review item ${out.built.itemId}`);
+        else if ('failed' in out) console.error(`[ClaimsDemo] Claim pack failed for ${claimId}: ${out.failed}`);
+        return out;
+    };
+}
+
 /** TTTFG-5196: the signing page's callback for a demo claim: the signed copy filed and the claim set to Signed. */
 export const demoClaimSigned = (ch: DemoChannels, cb: SignedCallback) =>
-    onClaimFormSigned(dataverseSigningPorts({ dv: ch.dv, files: claimFolders(ch).forms }), cb);
+    onClaimFormSigned(dataverseSigningPorts({ dv: ch.dv, files: claimFolders(ch).forms, claimPack: demoClaimPack(ch) }), cb);
 
 /**
  * The package's ports for one conversation. `contactId` is the demo number's contact: the number lookup is replaced,
@@ -299,6 +324,8 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
     const base = dataverseResumePorts({
         dv: ch.dv,
         files,
+        // TTTFG-5200: the score after evidence, and the pack when the claim is ready for one.
+        claimEvidence: demoClaimPack(ch),
         // A fill that fails (the blank PDF unreachable, say) must not stop the conversation: Tina ends it without a link
         // and the broker fills the form. The error is logged.
         requestClaimSignature: async (claimId) => {

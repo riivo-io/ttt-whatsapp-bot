@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit c99946b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit f7e99c4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -15,6 +15,9 @@ import {
 } from './walkthrough';
 
 export const DEPARTMENT = 'Insurance and Advice';
+
+/** TTTFG-5200: every claim pack Follow-up starts so (riivo_name), so a failure that repeats is raised once. */
+export const PACK_FOLLOW_UP = 'Claim pack for ';
 
 /** The riivo_policy owner as Dataverse has it. */
 export type PolicyOwner = { kind: 'user'; id: string; firstName: string; enabled: boolean } | { kind: 'team'; id: string; name: string };
