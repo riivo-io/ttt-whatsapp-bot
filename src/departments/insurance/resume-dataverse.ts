@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
@@ -19,6 +19,7 @@ interface OpenClaimRow {
   riivo_claimtype: number | null;
   riivo_claimstatus: number;
   riivo_incidentdate: string | null;
+  createdon: string;
   riivo_lastclientmessageon: string | null;
   riivo_channel?: number | null;
 }
@@ -34,15 +35,15 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
     async openClaimsForClient(contactId): Promise<OpenClaim[]> {
       if (!GUID.test(contactId)) throw new Error(`Not a Dataverse id: ${contactId}`);
       const r = await dv<{ value: OpenClaimRow[] }>('GET',
-        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,riivo_lastclientmessageon,riivo_channel'
+        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,createdon,riivo_lastclientmessageon,riivo_channel'
         + `&$filter=_riivo_contact_value eq ${contactId} and statecode eq 0 and ${OPEN_STATUS_FILTER}&$orderby=riivo_incidentdate asc`);
       const disputed = await disputedClaims(dv, r.value.map((c) => c.riivo_claimid));
       return r.value.map((c) => ({
         id: c.riivo_claimid,
         reference: c.riivo_name,
         claimType: c.riivo_claimtype == null ? 'Other' : CLAIM_TYPE_VALUES[c.riivo_claimtype] ?? 'Other',
-        // A claim with no incident date sorts by when it was reported; resume.ts only uses the date to name the claim.
-        incidentAt: c.riivo_incidentdate ?? new Date(0).toISOString(),
+        // A claim with no incident date yet (TTTFG-5562: its form isn't back) goes by when it was opened; resume.ts only uses the date to name the claim.
+        incidentAt: c.riivo_incidentdate ?? c.createdon,
         status: CLAIM_STATUSES[c.riivo_claimstatus - OPT],
         lastClientMessageOn: c.riivo_lastclientmessageon ?? undefined,
         ...(c.riivo_channel === CLAIM_CHANNEL_EMAIL ? { channel: 'Email' as const } : {}),

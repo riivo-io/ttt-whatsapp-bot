@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -44,13 +44,14 @@ export interface ClaimRow {
   providerId: string;
   claimType: ClaimType;
   reportedOn: string;
-  incidentAt: string;
-  place: string;
-  description: string;
-  thirdParties: boolean;
+  /** TTTFG-5562: not yet known on a claim opened for the guided form, which asks them. */
+  incidentAt?: string;
+  place?: string;
+  description?: string;
+  thirdParties?: boolean;
   thirdPartyDetails?: string;
-  saps: boolean;
-  injuries: boolean;
+  saps?: boolean;
+  injuries?: boolean;
   injuryDetails?: string;
   channel: 'WhatsApp';
   status: 'FNOL logged';
@@ -655,7 +656,7 @@ export interface TurnResult {
 
 /** One message from the client: { kind: 'start' } when Anchor first routes a claim here, else what Claude understood. */
 export async function claimTurn(
-  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null, input: { kind: 'start'; facts?: Facts; opening?: string } | Answer, now: Date,
+  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null, input: { kind: 'start'; facts?: Facts; opening?: string; guided?: boolean } | Answer, now: Date,
 ): Promise<TurnResult> {
   const at = now.toISOString();
   let turn;
@@ -663,7 +664,7 @@ export async function claimTurn(
   if (input.kind === 'start' || !state) {
     const contact = await ports.contactByWhatsApp(conv.phone);
     contactId = contact?.id;
-    turn = start(contact, contact ? await ports.activePolicies(contact.id) : [], input.kind === 'start' ? input.facts : undefined, input.kind === 'start' ? input.opening : undefined);
+    turn = start(contact, contact ? await ports.activePolicies(contact.id) : [], input.kind === 'start' ? input.facts : undefined, input.kind === 'start' ? input.opening : undefined, input.kind === 'start' && input.guided);
   } else {
     turn = advance(state, input as Answer);
   }
@@ -687,8 +688,10 @@ export async function claimTurn(
   }
 
   if (turn.effects.some((e) => e.kind === 'open-claim')) {
-    if (!state || !complete(state)) throw new Error('TTTFG-5168: open-claim before the walkthrough is complete');
-    const claim = await openClaim(ports, conv, state, at);
+    // TTTFG-5562: for the guided form, the policy and the kind of claim are enough: the form asks the rest.
+    const from = turn.state?.guided ? turn.state : state;
+    if (!from || !(from.guided ? from.policyId && from.facts.claimType : complete(from))) throw new Error('TTTFG-5168: open-claim before the walkthrough is complete');
+    const claim = await openClaim(ports, conv, from as WalkthroughState & { policyId: string }, at);
     return { state: null, claim, lastSent: claim.text };
   }
   return { state: turn.state, lastSent };
@@ -766,14 +769,14 @@ export const OWN_PLUMBER_NOTE = 'The client will use their own plumber.';
 async function openClaim(ports: ClaimPorts, conv: Conversation, state: WalkthroughState & { policyId: string }, at: string) {
   const policy = state.policies.find((p) => p.id === state.policyId)!;
   const owner = await ownerFor(ports, policy.id);
-  const f = state.facts as Required<Pick<Facts, 'claimType' | 'incidentAt' | 'place' | 'description' | 'thirdParties' | 'saps' | 'injuries'>> & Facts;
+  const f = state.facts as Required<Pick<Facts, 'claimType'>> & Facts;
   // TTTFG-4830 (28 Oct 2026): what the claim's columns can't hold goes on the description, for the broker.
   const notes = [f.timeUnknown ? 'Time not known.' : '', f.contractor === 'insurer' ? 'The client would like the insurer to send a plumber.' : '',
     f.contractor === 'own' ? OWN_PLUMBER_NOTE : '',
     f.contractor === 'not-known' ? "The client didn't say whether the insurer should send a plumber." : ''].filter(Boolean).join(' ');
   const { id, reference } = await ports.createClaim({
     contactId: state.contactId, policyId: policy.id, providerId: policy.providerId,
-    claimType: f.claimType, reportedOn: at, incidentAt: f.incidentAt, place: f.place, description: notes ? `${f.description} (${notes})` : f.description,
+    claimType: f.claimType, reportedOn: at, incidentAt: f.incidentAt, place: f.place, description: notes && f.description ? `${f.description} (${notes})` : f.description,
     thirdParties: f.thirdParties, thirdPartyDetails: f.thirdPartyDetails, saps: f.saps, injuries: f.injuries, injuryDetails: f.injuryDetails,
     channel: 'WhatsApp', status: 'FNOL logged', lastClientMessageOn: at, owner,
   });

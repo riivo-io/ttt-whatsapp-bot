@@ -304,7 +304,8 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
         contactNumber: claimsContactNumber(process.env.CLAIMS_CONTACT_NUMBER),
         lastReminderOn: (claimId) => lastReminderPort(ch.dv).lastReminderOn(claimId),
         lastBrokerStepOn: (claimId, step) => lastReminderPort(ch.dv).lastBrokerStepOn(claimId, step),
-        ...(guidedFormOn(process.env.CLAIMS_GUIDED_FORM, phone) ? { guidedForm: true } : {}),
+        // Without a way to make the link the claim must carry on as chat, walkthrough and all.
+        ...(ch.guidedLink && guidedFormOn(process.env.CLAIMS_GUIDED_FORM, phone) ? { guidedForm: true } : {}),
         ...((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off'
             ? {}
             : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint, log) }),

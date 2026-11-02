@@ -380,6 +380,8 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
  * land where chat's do. A file from the page has no WhatsApp media id: its bytes go to the store under an id of their own.
  * `hear` and `carryOn` are the host's: Tina's transcription and queue, or the rehearsal's.
  */
+const askedOnForm = new Map<string, string | null>();
+
 export function demoClaimFormSession(
     base: DemoChannels, link: GuidedLinkRow,
     o: { hear(bytes: Buffer, mimeType: string, asked: string | null): Promise<{ text: string } | { problem: string }>; carryOn(): Promise<void> },
@@ -405,10 +407,15 @@ export function demoClaimFormSession(
         },
         async hear(bytes, mimeType, questionKey) {
             if ((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off') return { problem: 'unavailable' };
-            const claim = await ports.loadClaim(link.claim_id);
-            const form = claim.claimFormId ? await ports.claimForm(claim.claimFormId) : null;
-            const asked = form?.questionList.find((q) => q.key === questionKey?.replace(/\.\d+$/, ''))?.prompt ?? null;
-            const r = await o.hear(bytes, mimeType, asked);
+            // The page reads what's been said every few seconds while the client talks, so the question is looked up once.
+            const seenKey = `${link.id}:${questionKey ?? ''}`;
+            if (!askedOnForm.has(seenKey)) {
+                const claim = await ports.loadClaim(link.claim_id);
+                const form = claim.claimFormId ? await ports.claimForm(claim.claimFormId) : null;
+                if (askedOnForm.size > 500) askedOnForm.clear();
+                askedOnForm.set(seenKey, form?.questionList.find((q) => q.key === questionKey?.replace(/\.\d+$/, ''))?.prompt ?? null);
+            }
+            const r = await o.hear(bytes, mimeType, askedOnForm.get(seenKey) ?? null);
             return 'problem' in r ? { problem: r.problem } : { text: r.text };
         },
         finish: () => finishGuided(ports, link.claim_id, new Date()),

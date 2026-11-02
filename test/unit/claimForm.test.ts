@@ -62,7 +62,7 @@ test('CLAIMS_GUIDED_FORM is off by default, on for everyone, or on for listed nu
 function fakeSession(calls: string[]): ClaimFormSession {
     return {
         view: async () => ({ reference: 'CLM-1' } as never),
-        save: async (input) => { calls.push(`save:${JSON.stringify(input.answers)}`); return { problems: [], answers: {}, notKnown: [], open: [] }; },
+        save: async (input) => { calls.push(`save:${JSON.stringify(input.answers)}`); if (input.termsAccepted) calls.push('terms:true'); return { problems: [], answers: {}, notKnown: [], open: [] }; },
         file: async (file, bytes, item) => { calls.push(`file:${file.fileName.replace(/\d+/, 'N')}:${file.media}:${bytes.length}:${item}`); return { count: 1 }; },
         hear: async (bytes, mime) => { calls.push(`hear:${mime}:${bytes.length}`); return mime === 'audio/mp4' ? { problem: 'unclear' } : { text: 'I heard you' }; },
         finish: async () => { calls.push('finish'); return { open: calls.includes('ready') ? [] : ['vehicleMake'] }; },
@@ -196,12 +196,28 @@ test('AC 9: nothing on the form says whether the claim is covered', () => {
     }
 });
 
-test('the first page says only what to do, and that a blank is fine', () => {
+test('what the page says it agreed to reaches the claims package, and nothing else does', async () => {
+    const d = deps(() => new Date());
+    const { url } = await createGuidedLink(d, INPUT);
+    const calls: string[] = [];
+    const s = await server(d, calls);
+    try {
+        const r = await fetch(`${url.replace(/^.*\/claim-form/, s.base)}/answers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ termsAccepted: true, somethingElse: 1 }) });
+        assert.equal(r.status, 200);
+        assert.ok(calls.some((c) => c === 'terms:true'));
+    } finally { await s.close(); }
+});
+
+test('no intro page: the page opens on what TTT holds, and never waits for a save', () => {
     const html = claimFormPage();
-    assert.match(html, /Fill out this form to submit your claim as fast as possible\./);
-    assert.match(html, /If you don\\'t know something, just leave it blank\./);
+    assert.doesNotMatch(html, /Fill out this form/);
+    assert.doesNotMatch(html, /id: 'hello'/);
+    assert.match(html, /steps = \[\{ id: 'details' \}\]/);
     assert.doesNotMatch(html, /reply "chat"/i);
     assert.match(html, /Check your claim/);
+    // The script must parse, whatever its text holds: a slip here is a blank page on every phone.
+    const script = /<script>([\s\S]*)<\/script>/.exec(html)![1];
+    assert.doesNotThrow(() => new Function(script));
 });
 
 test('the link goes as a WhatsApp button, in its own message after what comes before it, and the log never keeps the address', () => {

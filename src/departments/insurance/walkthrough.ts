@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -87,6 +87,8 @@ export interface WalkthroughState {
   policyId?: string;
   step: Step;
   facts: Facts;
+  /** TTTFG-5562: the guided form asks everything after the policy and the kind of claim. */
+  guided?: true;
   /**
    * TTTFG-4830: how often each question has been asked (by askedKey), so Tina never sends the same words twice: the
    * second time is worded differently, with an example. The date and time count as one question.
@@ -502,7 +504,7 @@ export function sastParts(iso: string): { date: string; time: string } {
  * too short to keep as the description (WalkthroughState.opening). TTTFG-4830 (28 Oct 2026): when the kind of claim is
  * known, only the policies that fit it are offered.
  */
-export function start(contact: { id: string; firstName: string } | null, policies: Policy[], known: Facts = {}, opening?: string): Turn {
+export function start(contact: { id: string; firstName: string } | null, policies: Policy[], known: Facts = {}, opening?: string, guided?: boolean): Turn {
   if (!contact) return { state: null, say: [{ kind: 'unknown-number' }], effects: [] };
   if (policies.length === 0) {
     return {
@@ -516,6 +518,7 @@ export function start(contact: { id: string; firstName: string } | null, policie
   const state: WalkthroughState = {
     contactId: contact.id, firstName: contact.firstName, policies: offered, step: 'policy', facts,
     ...(opening ? { opening } : {}), ...(offered.length < policies.length ? { allPolicies: policies } : {}),
+    ...(guided ? { guided: true as const } : {}),
   };
   const first = counted(state, ask('policy', {}));
   return { state: first.state, say: [first.say], effects: [] };
@@ -562,6 +565,8 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
       const { policyId: _p, ...rest } = s;
       return askIn({ ...rest, step: 'policy', policies: offered, allPolicies: all, policyChecked: true }, [...before, { kind: 'policy-mismatch', policyId: chosen.id }]);
     }
+    // TTTFG-5562: the guided form asks the rest, so the claim opens now and the link goes out.
+    if (s.guided) return { state: s, say: before, effects: [{ kind: 'open-claim' }] };
     if (s.onSceneSent) return askIn({ ...s, step: nextFactStep(s.facts, s.opening) }, before);
     const assist = isGeyser(s.facts, s.opening) ? { assistSent: true as const } : {};
     return { state: { ...s, step: 'ready', onSceneSent: true, ...assist }, say: [...before, { kind: 'on-scene' }], effects: [] };

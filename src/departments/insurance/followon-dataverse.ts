@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the follow-on's ports (followon.ts FollowOnPorts) against Dataverse, in the style of TTTFG-5168's
 // dataverse.ts: the host passes its Dataverse call (`Dv`), its WhatsApp send and where files go, so this file runs
@@ -200,7 +200,6 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
       const sent = (name: string) => marks.value.some((a) => a.riivo_subject?.startsWith(name));
       const claimType = r.riivo_claimtype == null ? 'Other' : CLAIM_TYPE_VALUES[r.riivo_claimtype] ?? 'Other';
       if (!r.riivo_Provider) throw new Error(`Claim ${r.riivo_name} has no insurer`);
-      if (!r.riivo_incidentdate) throw new Error(`Claim ${r.riivo_name} has no incident date`);
       const claim: FollowOnClaim = {
         id: r.riivo_claimid,
         reference: r.riivo_name,
@@ -209,7 +208,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
         insurer: r.riivo_Provider.riivo_providername ?? 'your insurer',
         claimType,
         facts: {
-          claimType, incidentAt: r.riivo_incidentdate,
+          claimType, incidentAt: r.riivo_incidentdate ?? undefined,
           description: r.riivo_description ?? undefined, place: r.riivo_incidentplace ?? undefined,
           thirdParties: r.riivo_thirdpartiesinvolved ?? undefined, thirdPartyDetails: r.riivo_thirdpartydetails ?? undefined,
           saps: r.riivo_sapsinvolved ?? undefined, injuries: r.riivo_injuries ?? undefined, injuryDetails: r.riivo_injurydetails ?? undefined,
@@ -253,6 +252,20 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
       await patch(claimId, {
         ...(v.caseNumber ? { riivo_sapscasenumber: v.caseNumber.slice(0, 50), riivo_sapsinvolved: true } : {}),
         ...(v.station ? { riivo_sapsstation: v.station.slice(0, 100) } : {}),
+      });
+    },
+
+    // TTTFG-5562: what the guided form asks instead of the walkthrough. Only what was given is written.
+    async saveFacts(claimId, v) {
+      await patch(claimId, {
+        ...(v.incidentAt ? { riivo_incidentdate: v.incidentAt } : {}),
+        ...(v.place ? { riivo_incidentplace: v.place.slice(0, 200) } : {}),
+        ...(v.description ? { riivo_description: v.description.slice(0, 10000) } : {}),
+        ...(v.thirdParties !== undefined ? { riivo_thirdpartiesinvolved: v.thirdParties } : {}),
+        ...(v.thirdPartyDetails !== undefined ? { riivo_thirdpartydetails: v.thirdPartyDetails.slice(0, 2000) || null } : {}),
+        ...(v.saps !== undefined ? { riivo_sapsinvolved: v.saps } : {}),
+        ...(v.injuries !== undefined ? { riivo_injuries: v.injuries } : {}),
+        ...(v.injuryDetails !== undefined ? { riivo_injurydetails: v.injuryDetails.slice(0, 2000) || null } : {}),
       });
     },
 

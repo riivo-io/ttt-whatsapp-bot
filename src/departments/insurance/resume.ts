@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit d9e4ce7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit e7d5b7b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -638,7 +638,7 @@ export async function resumeTurn(
   }
 }
 
-const labelOf = (c: FollowOnClaim): ClaimLabel => ({ reference: c.reference, claimType: c.claimType, incidentAt: c.facts.incidentAt });
+const labelOf = (c: FollowOnClaim): ClaimLabel => ({ reference: c.reference, claimType: c.claimType, incidentAt: c.facts.incidentAt ?? new Date().toISOString() });
 
 /** TTTFG-4830: the broker's urgent Follow-up for a claim the client says isn't theirs. */
 const notTheirsRow = (claim: FollowOnClaim, said: string, at: string): AgentActionRow => ({

@@ -83,7 +83,7 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
             return { id, reference };
         },
         openClaimsForClient: async (contactId): Promise<OpenClaim[]> => rows.filter((r) => r.contactId === contactId && isOpenClaim(r.status))
-            .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt, status: r.status, lastClientMessageOn: r.lastClientMessageOn })),
+            .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt ?? '2026-11-02T08:00:00Z', status: r.status, lastClientMessageOn: r.lastClientMessageOn })),
         loadClaim: async (id) => structuredClone(row(id)),
         activeClaimForm: async (provider, type) => (provider === form.provider && type === form.claimType ? form : null),
         genericClaimForm: async () => GENERIC,
@@ -722,14 +722,19 @@ async function openClaim(w: ReturnType<typeof world>) {
     return t;
 }
 
-test('TTTFG-5562 AC 1: with the setting on, a new claim gets the link after the duty of disclosure, instead of the first question', async () => {
+test('TTTFG-5562 AC 1: with the setting on, the link goes straight after the policy and the kind of claim: the form asks the rest', async () => {
     const w = guidedWorld();
     await openClaim(w);
     const followOn = w.store.get(PHONE)?.resume.followOn;
     assert.equal(followOn?.phase, 'form');
     assert.match(w.sent.at(-1)!, /tap below to fill in your claim form/);
-    assert.match(w.sent.join("\n"), /all the facts that matter/);
-    assert.ok(w.sent.findIndex((t) => /all the facts that matter/.test(t)) >= 0);
+    const all = w.sent.join('\n');
+    // The reference message says it; the rest is on the form.
+    assert.match(all, /Your claim reference is/);
+    assert.match(all, /TTT uses AI tools to enhance your experience/);
+    assert.doesNotMatch(all, /all the facts that matter/);
+    assert.doesNotMatch(all, /Tap \*Ready\*/);
+    assert.doesNotMatch(all, /Please tell me in your own words/);
     assert.ok(w.actions.some((a) => /Guided claim form link sent/.test(a.detail)));
 });
 
