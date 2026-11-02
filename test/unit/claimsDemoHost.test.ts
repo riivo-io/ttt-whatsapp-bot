@@ -414,18 +414,23 @@ test('TTTFG-4830: the end of the questions lists what the client still has to se
     assert.deepEqual(w.signatureCalls, ['claim-1']);
     assert.match(w.actions.at(-1)!.detail, /is ready to register with the insurer.*Still to come from the client: the photos of the damage/);
 
-    // 08:00 the next day: the reminder, as a message (the client wrote less than 24 hours ago).
+    // 08:00 the next day. The link went out, so the claim is at Form sent: no reminder (TTTFG-5212 AC 8, only Awaiting
+    // client docs and Additional info requested). At Awaiting client docs it goes, as the approved template although
+    // the client wrote less than 24 hours ago (AC 2).
     const morning = new Date('2026-10-24T06:00:00Z');
-    const outcomes = await claimsDemoReminder(w.deps, PHONE, CONTACT, morning);
-    assert.deepEqual(outcomes, [{ reference: 'CLM-000001', sent: 'text', lines: ['Photos of the damage'] }]);
+    assert.equal(w.rows[0].status, 'Form sent');
+    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, morning, { template: true }), [{ reference: 'CLM-000001', skipped: 'status' }]);
+    w.rows[0].status = 'Awaiting client docs';
+    const outcomes = await claimsDemoReminder(w.deps, PHONE, CONTACT, morning, { template: true });
+    assert.deepEqual(outcomes, [{ reference: 'CLM-000001', sent: 'template', lines: ['Photos of the damage'] }]);
     const reminder = w.since();
-    assert.deepEqual(reminder, ["Good morning Adriaan, it's Tina from TTT. Things we still need from you for your motor accident claim (CLM-000001):\n"
-        + '- Photos of the damage\nPlease send them here when you have them.']);
+    assert.deepEqual(reminder, ["Good morning Adriaan, it's Tina from TTT. For your motor accident claim (CLM-000001) we still need the photos of the "
+        + 'damage. Please send them here when you have them.']);
     assert.equal(w.store.get(PHONE)?.lastSent, reminder[0]);
     assert.match(w.actions.at(-1)!.detail, /^Morning reminder sent on WhatsApp for claim CLM-000001: Photos of the damage\.$/);
     // A second run the same morning sends nothing (the agent action says it went out today).
     w.deps.lastReminderOn = async () => morning.toISOString();
-    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, tick(morning, 5)), [{ reference: 'CLM-000001', skipped: 'reminded-today' }]);
+    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, tick(morning, 5), { template: true }), [{ reference: 'CLM-000001', skipped: 'reminded-today' }]);
     assert.deepEqual(w.since(), []);
 
     // The photo half an hour later goes on the list: filed as the photos of the damage, and that's everything.

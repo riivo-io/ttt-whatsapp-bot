@@ -15,13 +15,15 @@
  *                                  about all of them (the front and back, photos of the scene; default 15000)
  *   CLAIMS_REMINDERS               TTTFG-5212: "off" stops the 08:00 reminder of what each demo client still has to
  *                                  send (on by default; the cron is GET /api/cron/claims-reminders)
- *   CLAIMS_REMINDER_TEMPLATE       TTTFG-5212: the approved WhatsApp template for a reminder outside the 24-hour window
- *                                  (body: REMINDER_TEMPLATE.whatsappBody, 3 variables). Unset: those clients are skipped
+ *   CLAIMS_REMINDER_TEMPLATE       TTTFG-5212: the approved WhatsApp template every reminder goes as (body:
+ *                                  REMINDER_TEMPLATE.whatsappBody, 3 variables). Unset: no reminder goes (the claim
+ *                                  owner's Follow-ups still do)
  *   CLAIMS_REMINDER_TEMPLATE_LANG  its language code (default en)
- *   CLAIMS_BROKER_ALERT_DAYS       TTTFG-5212: after this many days without a message from the client, the claim owner
- *                                  gets a Follow-up that the missing items haven't come (default 5)
- *   CLAIMS_STOP_AFTER_DAYS         TTTFG-5212: after this many, the reminders stop and the owner gets a Follow-up to
- *                                  phone the client (default 10; TTTFG-5289 may move it)
+ *   CLAIMS_BROKER_ALERT_DAYS       TTTFG-5212: only when the demo CRM's riivo_ClaimReminderBrokerAlertDay can't be read
+ *                                  (TTT sets the day there): the day the claim owner gets a Follow-up that the missing
+ *                                  items haven't come (default 5)
+ *   CLAIMS_STOP_AFTER_DAYS         TTTFG-5212: the same for riivo_ClaimReminderStopDay: the day the reminders stop and
+ *                                  the owner gets a Follow-up to phone the client (default 10)
  *   CLAIMS_VOICE_NOTES             TTTFG-4830: "off" stops voice notes being transcribed (Tina asks the client to type).
  *                                  On by default; needs OPENAI_API_KEY. CLAIMS_TRANSCRIBE_MODEL, CLAIMS_TRANSCRIBE_LANGUAGE
  *                                  and CLAIMS_VOICE_MAX_SECONDS: see transcribe.service.ts
@@ -48,7 +50,7 @@ import type { ClientFile, ResumeFile } from '../departments/insurance/followon';
 import type { IntentModel } from '../departments/insurance/intent';
 import type { ReplyModel, ReportedModel } from '../departments/insurance/reply';
 import { NO_RESUME_STATE, type ResumeState } from '../departments/insurance/resume';
-import { lastReminderPort } from '../departments/insurance/resume-dataverse';
+import { lastReminderPort, reminderSettingsFromDataverse } from '../departments/insurance/resume-dataverse';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
@@ -334,7 +336,7 @@ export async function handleClaimsDemoBatchCheck(phone: string, token: string): 
 /**
  * TTTFG-5212 (first cut): the 08:00 cron queues one reminder per demo number on its own session (the worker runs
  * handleClaimsDemoReminder). Returns how many were queued; none when CLAIMS_REMINDERS is "off".
- * `testPhone`: a test by hand: only that demo number (any SA format), now, even if the client wrote in the last 12 hours.
+ * `testPhone`: a test by hand: only that demo number (any SA format), now, even if the client wrote today.
  */
 export async function enqueueClaimsDemoReminders(now: Date = new Date(), testPhone?: string): Promise<number> {
     if ((process.env.CLAIMS_REMINDERS || '').trim().toLowerCase() === 'off') return 0;
@@ -345,6 +347,20 @@ export async function enqueueClaimsDemoReminders(now: Date = new Date(), testPho
     return phones.length;
 }
 
+/**
+ * TTTFG-5212 AC 6: the broker alert day and the stop day, as TTT sets them in the demo CRM's environment variables; the
+ * app settings stand in for one that can't be read.
+ */
+async function reminderDaysFromCrm(dv: Dv) {
+    const fallback = reminderDays(process.env.CLAIMS_BROKER_ALERT_DAYS, process.env.CLAIMS_STOP_AFTER_DAYS);
+    try {
+        return { ...fallback, ...(await reminderSettingsFromDataverse(dv)) };
+    } catch (e) {
+        console.warn('[ClaimsDemo] reminder days not read from the CRM, the app settings apply:', (e as Error).message);
+        return fallback;
+    }
+}
+
 /** TTTFG-5212: one demo number's morning reminder (whatsappProcessor routes it here). Never throws. */
 export async function handleClaimsDemoReminder(phone: string, o: { test?: boolean } = {}): Promise<void> {
     const contactId = claimsDemoContact(phone);
@@ -353,10 +369,10 @@ export async function handleClaimsDemoReminder(phone: string, o: { test?: boolea
     const log = newDemoLog();
     const ch = channels(stats, log);
     try {
-        // A test by hand goes out even if the client wrote in the last 12 hours (still once per claim per day).
+        // A test by hand goes out even if the client wrote today (still once per claim per day).
         const r = await claimsDemoReminder(deps(phone, contactId, ch, log), phone, contactId, new Date(), {
-            template: !!process.env.CLAIMS_REMINDER_TEMPLATE, ...(o.test ? { quietHours: 0 } : {}),
-            ...reminderDays(process.env.CLAIMS_BROKER_ALERT_DAYS, process.env.CLAIMS_STOP_AFTER_DAYS),
+            template: !!process.env.CLAIMS_REMINDER_TEMPLATE, ...(o.test ? { fromDay: 0 } : {}),
+            ...(await reminderDaysFromCrm(ch.dv)),
         });
         const said = r === 'walkthrough' ? 'reporting a claim, no reminder' : r.map((o) => `${o.reference} ${'sent' in o ? `sent (${o.sent})` : o.skipped}`
             + (o.broker ? `, owner's ${o.broker} Follow-up` : '')).join(', ') || 'no open claims';

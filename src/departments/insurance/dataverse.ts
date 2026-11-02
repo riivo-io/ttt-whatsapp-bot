@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit f7e99c4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit bec6d7f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: ClaimPorts against Dataverse (the riivo_claim table from TTTFG-4885). The host passes in its own
 // Dataverse call (`Dv`, the same signature as the email agent's adapters/dataverse.ts `dv`) and its WhatsApp send, so
@@ -28,7 +28,7 @@ const POLICY_ACTIVE = 463630000;
 const KIND = { 'Follow-up': 463630006, 'Created': 463630007 } as const;
 const STATUS_OPEN = 463630000;
 const STATUS_DONE = 463630006;
-const ACTION_CHANNEL_WHATSAPP = 463630001;
+const ACTION_CHANNEL = { Email: 463630000, WhatsApp: 463630001 } as const;
 const DEPARTMENT_INSURANCE = 463630002;
 const URGENCY = { Urgent: 463630000, High: 463630001, Normal: 463630002 } as const;
 
@@ -188,7 +188,7 @@ export function dataverseClaimPorts(o: ClaimsDataverseOptions): ClaimPorts {
         riivo_kind: KIND[row.kind],
         // A Created row records something already done; a Follow-up is open work for a person.
         riivo_status: followUp ? STATUS_OPEN : STATUS_DONE,
-        riivo_channel: ACTION_CHANNEL_WHATSAPP,
+        riivo_channel: ACTION_CHANNEL[row.channel ?? 'WhatsApp'],
         riivo_department: DEPARTMENT_INSURANCE,
         riivo_promise: followUp ? row.detail.slice(0, 2000) : null,
         riivo_duedate: dueOn ?? null,

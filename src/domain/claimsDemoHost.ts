@@ -80,9 +80,9 @@ export function demoPhones(raw: string | undefined): { phone: string; contactId:
 }
 
 /**
- * TTTFG-5212: CLAIMS_BROKER_ALERT_DAYS and CLAIMS_STOP_AFTER_DAYS, how many quiet days before the claim owner's alert,
- * and before the reminders stop and the owner gets a Follow-up to phone the client. Unset or not above 0: the package's
- * 5 and 10. Read at every run, so TTTFG-5289 can move the stop day without a deploy.
+ * TTTFG-5212: CLAIMS_BROKER_ALERT_DAYS and CLAIMS_STOP_AFTER_DAYS, the day of the claim owner's alert, and the day the
+ * reminders stop and the owner gets a Follow-up to phone the client. Unset or not above 0: the package's 5 and 10. The
+ * fallback for the CRM's own variables (riivo_ClaimReminderBrokerAlertDay, riivo_ClaimReminderStopDay), which TTT sets.
  */
 export function reminderDays(alert: string | undefined, stop: string | undefined): Pick<ReminderSettings, 'brokerAlertDays' | 'stopAfterDays'> {
     const days = (raw: string | undefined) => (raw?.trim() && Number(raw) > 0 ? Number(raw) : undefined);

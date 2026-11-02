@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/flags-dataverse.ts (commit f7e99c4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/flags-dataverse.ts (commit bec6d7f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5263: the flag ports (flags.ts) against Dataverse: riivo_claimflag from TTTFG-4885 step 7, the claim with its form
 // and policy, and the claim's riivo_clientdocument rows. Like dataverse.ts, it takes the host's Dataverse call and imports

@@ -339,9 +339,9 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
         },
         send: async (to, m) => {
             // Templates (the duty of disclosure, the deadline note) go as text: the client is inside the 24-hour window.
-            // TTTFG-5212: one with params (the morning reminder, outside the window) goes as the approved template.
+            // TTTFG-5212: one with params (the morning reminder, always) goes as the approved template.
             if (m.kind === 'template' && m.params) {
-                if (!ch.sendTemplate) throw new Error(`No WhatsApp template set up for "${m.name}" outside the 24-hour window`);
+                if (!ch.sendTemplate) throw new Error(`No WhatsApp template set up for "${m.name}"`);
                 await ch.sendTemplate(to, m.params);
             } else await ch.sendText(to, m.text, m.kind === 'text' ? m.choices : undefined);
             sent(m.text);
