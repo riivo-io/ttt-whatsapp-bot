@@ -144,7 +144,7 @@ export interface DemoChannels {
     /** The SharePoint site with the client folders, as Graph names it: 'host:/sites/Name'. */
     site: string;
     /** `choices` (TTTFG-4830): the text asks one closed question, and the client can tap one of these to answer. */
-    sendText(to: string, text: string, choices?: Choice[]): Promise<void>;
+    sendText(to: string, text: string, choices?: Choice[], link?: { url: string; label: string }): Promise<void>;
     sendDocument(to: string, bytes: Buffer, fileName: string, caption: string): Promise<void>;
     /**
      * TTTFG-5212: the morning reminder as Tina's approved WhatsApp template (outside the 24-hour window), its variables
@@ -162,6 +162,8 @@ export interface DemoChannels {
      * (the demo runs on draft wording, like its other claims messages, once this is switched on).
      */
     signing?: DemoSigning;
+    /** TTTFG-5562: makes a link to the claim's guided form, when the page is set up. */
+    guidedLink?(input: { claimId: string; phone: string; contactId: string }): Promise<{ url: string }>;
 }
 
 export interface DemoSigning {
@@ -343,7 +345,7 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
             if (m.kind === 'template' && m.params) {
                 if (!ch.sendTemplate) throw new Error(`No WhatsApp template set up for "${m.name}"`);
                 await ch.sendTemplate(to, m.params);
-            } else await ch.sendText(to, m.text, m.kind === 'text' ? m.choices : undefined);
+            } else await ch.sendText(to, m.text, m.kind === 'text' ? m.choices : undefined, m.kind === 'text' ? m.link : undefined);
             sent(m.text);
         },
     });
@@ -352,6 +354,14 @@ export function demoPorts(ch: DemoChannels, phone: string, contactId: string, se
         ...base,
         contactByWhatsApp: () => (contact ??= ch.dv<{ firstname?: string; fullname?: string }>('GET', `contacts(${guid(contactId)})?$select=firstname,fullname`)
             .then((c) => ({ id: contactId, firstName: (c.firstname || c.fullname || '').trim().split(/\s+/)[0] || 'there' }))),
+        ...(ch.guidedLink ? {
+            // TTTFG-5562: the link to the guided form, with the client's first name for Tina's message.
+            guidedFormLink: async (claimId: string) => {
+                const first = await ch.dv<{ firstname?: string; fullname?: string }>('GET', `contacts(${guid(contactId)})?$select=firstname,fullname`)
+                    .then((c) => (c.firstname || c.fullname || '').trim().split(/\s+/)[0] || undefined).catch(() => undefined);
+                return { url: (await ch.guidedLink!({ claimId, phone, contactId })).url, firstName: first };
+            },
+        } : {}),
         // AC 6 (TTTFG-5192): a form answer that changes after the form was filled, before signing, fills it again.
         async saveAnswers(claimId, answers) {
             const before = (await base.loadClaim(claimId)).answers;

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 6debe61). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -63,7 +63,12 @@ import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrou
  * `waitForMore` (TTTFG-4830): the host calls back with { kind: 'nudge' } after a quiet spell, so when a message answers
  * part of a batch Tina waits for the rest instead of listing what's open straight away.
  */
-export interface ClaimSettings { notificationWarningDays?: number; waitForMore?: boolean }
+export interface ClaimSettings {
+  notificationWarningDays?: number;
+  waitForMore?: boolean;
+  /** TTTFG-5562: a new claim gets one link to the guided form instead of the first question (ports.guidedFormLink). */
+  guidedForm?: boolean;
+}
 export const CLAIM_SETTINGS_DEFAULTS = { notificationWarningDays: 7 } as const;
 
 /** riivo_claim.riivo_claimstatus (TTTFG-4885). */
@@ -161,6 +166,8 @@ export interface FollowOnPorts {
    * score is worked out again (claimpack.ts updateClaimPack). Absent: no score, as before.
    */
   claimEvidence?(claimId: string): Promise<unknown>;
+  /** TTTFG-5562: a new link to the claim's guided form, and the client's first name for the message. Absent: chat only. */
+  guidedFormLink?(claimId: string): Promise<{ url: string; firstName?: string }>;
 }
 
 /** Stored on the Tina conversation, keyed by claim id. Where the conversation is, not what the claim holds. */
@@ -170,8 +177,9 @@ export interface FollowOnState {
    * `address` (TTTFG-4830): Tina is confirming the client's home address, between the duty of disclosure and the form.
    * `still-need` (TTTFG-4830): everything has been asked and Tina listed what the client still has to send; each message
    * is read for any of it. `asking` is empty.
+   * `form` (TTTFG-5562): the client has the link to the guided form, and the answers come in there. `asking` is empty.
    */
-  phase: 'saps' | 'address' | 'items' | 'still-need';
+  phase: 'saps' | 'address' | 'items' | 'still-need' | 'form';
   /** The key Tina asked last. */
   asking: string;
   /** Unreadable replies to `asking` in a row. */
@@ -294,7 +302,11 @@ export type FollowOnInput =
     lead?: string;
     /** Items the client said "not yet" to earlier in this same conversation: not asked again. */
     skipped?: string[];
-  };
+  }
+  /** TTTFG-5562: the client would rather answer on WhatsApp: the questions start at the first unanswered key (AC 8). */
+  | { kind: 'form-chat'; wamid: string }
+  /** TTTFG-5562: from the host: the client submitted the guided form, so the claim carries on as a chat-answered one does (AC 6). */
+  | { kind: 'form-done'; wamid: string };
 
 /** A file for a resumed claim, with Claude's reading of which missing item it is. */
 export interface ResumeFile { file: ClientFile; forItem?: string }
@@ -362,6 +374,8 @@ export function notificationDeadline(
 /** Something Tina says or does, in order. */
 type Out =
   | { kind: 'saps-instruction' }
+  /** TTTFG-5562: the link to the guided form, as its own message. */
+  | { kind: 'guided-link' }
   /**
    * `again`: the client said "not yet" to it in an earlier conversation, so it is asked as "Have you got … yet?", not
    * in the same words. `lead`: words in front of the question, in the same message.
@@ -397,7 +411,7 @@ type Out =
   | { kind: 'follow-up'; detail: string; template?: { name: string; version: string }; withoutLink?: string };
 
 /** `waitForMore`: ClaimSettings.waitForMore. */
-export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean }
+export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean; guided?: boolean }
 /** The claim as it stands within this turn. */
 interface Work { answers: ClaimAnswers; evidence: { key: string }[]; facts: ClaimFacts }
 
@@ -607,6 +621,11 @@ function intro(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | 
     out.push({ kind: 'template', template, text: template.render(vars) });
   }
   out.push({ kind: 'template', template: DISCLOSURE_TEMPLATE, text: DISCLOSURE_TEMPLATE.render() });
+  // TTTFG-5562: one link instead of the first question (AC 1). The address is on the form's first screen.
+  if (c.guided) {
+    out.push({ kind: 'guided-link' });
+    return { ...st, phase: 'form', asking: '', misses: 0 };
+  }
   // TTTFG-4830: the client's home address goes on every form; confirmed first when it's missing or looks out of date.
   const check = addressAsk(c.claim, w.answers);
   if (check) {
@@ -768,6 +787,8 @@ export function startFollowOn(c: Ctx, describedAsTheft: boolean, files: readonly
     // The report's answers that hang on it ("they stole my phone": "Was a cellphone or tablet stolen?") apply now.
     applyOthers(c, w, st.sapsRequired, reported, report, out);
   }
+  // TTTFG-5562: the SAPS questions are on the form, with the rest of the list.
+  if (c.guided) return { state: intro(c, w, st, out), out };
   if (st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation)) {
     // TTTFG-4830: "please report it" only to a client who didn't say they had.
     if (!w.facts.sapsCaseNumber && !c.claim.facts.saps) out.push({ kind: 'saps-instruction' });
@@ -992,7 +1013,7 @@ export function resumeStep(c: Ctx, files: readonly ResumeFile[] = [], introSent 
 }
 
 /** A client message, as the follow-on reads it (not the start, a resume or the host's nudge). */
-export type ClientReply = Exclude<FollowOnInput, { kind: 'start' | 'resume' | 'nudge' }>;
+export type ClientReply = Exclude<FollowOnInput, { kind: 'start' | 'resume' | 'nudge' | 'form-chat' | 'form-done' }>;
 
 /**
  * TTTFG-4830: a reply read for one question while Tina asked a batch, or for a batch while she asked one question
@@ -1052,6 +1073,8 @@ function lateAnswers(c: Ctx, st: FollowOnState, step: Step): Step {
 
 function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { kind: 'start' | 'resume' }>): Step {
   if (raw.kind === 'nudge') return nudged(c, st, raw.wamid);
+  if (raw.kind === 'form-chat') return formChat(c, st);
+  if (raw.kind === 'form-done') return formDone(c, st);
   const input = fitted(st, raw);
   const w = work(c.claim);
   const out: Out[] = [];
@@ -1065,6 +1088,7 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
 
   if (input.kind === 'question') return { state: answerQuestion(c, w, st, input, out, at), out };
   if (st.phase === 'address') return { state: advanceAddress(c, w, st, input, out, at), out };
+  if (st.phase === 'form') return { state: advanceForm(c, w, st, input, out), out };
   if (st.phase === 'still-need') return { state: advanceStillNeed(c, w, st, input, out, { corrected, flagged, ownReading, noted }), out };
 
   if (st.phase === 'saps') {
@@ -1236,6 +1260,86 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
  * short answer; anything else (cover, payment, advice) goes to the claim's owner as a Follow-up, and Tina says so. Then
  * she asks what she was asking, again: a question isn't a miss, and the state stays where it was.
  */
+// ---------------------------------------------------------------------------------- TTTFG-5562: the guided form
+
+export const GUIDED_LINK_LABEL = 'Open claim form';
+/** The link's message. It says the client can stop and come back, and how to answer on WhatsApp instead. */
+export const guidedLinkText = (first: string | undefined, minutes: number) =>
+  `Thanks${first ? `, ${first}` : ''}. Please tap below to fill in your claim form. Most answers are a tap, I've filled in what we already know, and it takes about ${minutes} minutes. `
+  + 'You can stop and come back with the same link.\n\nIf you\'d rather answer here on WhatsApp, just say "chat".';
+export const FORM_OPEN = 'Your claim form is in the link I sent you. You can stop and come back to it with the same link. If you\'d rather answer here on WhatsApp, just say "chat".';
+export const CHAT_INSTEAD = "No problem, let's do it here.";
+export const FORM_UNAVAILABLE = "I can't open the form just now, so let's do it here.";
+
+/** About how long the form takes: most answers are a tap, so about eight a minute. */
+export function guidedMinutes(form: ClaimForm, claim: FollowOnClaim, sapsRequired: boolean): number {
+  const facts = { ...claim.facts, claimType: claim.claimType };
+  const n = formItems(form, claim.answers, facts, sapsRequired).filter((i) => i.kind === 'question' && applies(i, claim.answers, facts)).length;
+  return Math.max(2, Math.min(15, Math.ceil(n / 8)));
+}
+
+/** A message while the client has the link: a file goes on the claim, anything else gets a reminder of the link. */
+function advanceForm(c: Ctx, w: Work, st: FollowOnState, input: ClientReply, out: Out[]): FollowOnState {
+  if (input.kind === 'file') {
+    const item = namedEvidence(c, w, st.sapsRequired, input.forItem);
+    out.push({ kind: 'file', file: input.file, itemKey: item?.key }, { kind: 'text', text: FILE_SAVED });
+    return st;
+  }
+  out.push({ kind: 'text', text: FORM_OPEN });
+  return st;
+}
+
+/** What the client said "not yet" to on the form: as for a "not yet" on WhatsApp, not asked again in this conversation. */
+const notYetOnForm = (st: FollowOnState, w: Work) =>
+  [...new Set([...st.skipped, ...Object.keys(w.answers).filter((k) => deferred(k, w.answers))])];
+
+/** AC 8: on WhatsApp from the first unanswered question, the SAPS step and the address check first, as on any claim. */
+function formChat(c: Ctx, st: FollowOnState, lead: string = CHAT_INSTEAD): Step {
+  const w = work(c.claim);
+  const out: Out[] = [{ kind: 'text', text: lead }];
+  const base: FollowOnState = { ...st, phase: 'items', asking: '', misses: 0, skipped: notYetOnForm(st, w) };
+  const sapsOpen = st.sapsRequired && (!w.facts.sapsCaseNumber || !w.facts.sapsStation) && !deferred(SAPS_CASE_KEY, w.answers);
+  if (sapsOpen) {
+    if (!w.facts.sapsCaseNumber && !c.claim.facts.saps) out.push({ kind: 'saps-instruction' });
+    const item = sapsAsk(w.facts);
+    out.push({ kind: 'ask', item, simpler: false });
+    return { state: { ...base, phase: 'saps', asking: item.key }, out };
+  }
+  const check = addressAsk(c.claim, w.answers);
+  if (check) {
+    out.push({ kind: 'ask', item: check, simpler: false });
+    return { state: { ...base, phase: 'address', asking: check.key }, out };
+  }
+  return { state: proceed(c, w, base, out), out };
+}
+
+/** The labels of what TTT holds, as the broker reads them in the Follow-up. */
+const DETAIL_NAMES: Record<string, string> = {
+  'crm:contact.fullname': 'full name', 'crm:contact.firstname': 'first name', 'crm:contact.lastname': 'surname', 'crm:contact.mobilephone': 'cellphone',
+  'crm:contact.telephone1': 'other number', 'crm:contact.emailaddress1': 'email', 'crm:riivo_policy.riivo_policy_no': 'policy number', [ADDRESS_KEY]: 'home address',
+};
+
+/**
+ * AC 6: the client submitted the form. Whatever is still missing is asked on WhatsApp, the form is filled and the signing
+ * link goes out, by the same end as a chat-answered claim. The broker hears of any detail the client changed: Tina uses
+ * the new value on the form and never changes the CRM herself.
+ */
+function formDone(c: Ctx, st: FollowOnState): Step {
+  const w = work(c.claim);
+  const out: Out[] = [];
+  const changed = Object.entries(DETAIL_NAMES).flatMap(([key, name]) => {
+    const a = w.answers[key];
+    return a?.status === 'answered' && a.source === 'form' && typeof a.value === 'string' ? [`${name}: ${a.value}`] : [];
+  });
+  if (changed.length) {
+    out.push({
+      kind: 'follow-up',
+      detail: `The client changed details on the claim form for ${c.claim.reference}. ${changed.join('; ')}. The new values are on the form. Please update the CRM, and check the policy still fits.`,
+    });
+  }
+  return { state: proceed(c, w, { ...st, phase: 'items', asking: '', misses: 0, skipped: notYetOnForm(st, w) }, out, 'Thanks.'), out };
+}
+
 function answerQuestion(c: Ctx, w: Work, st: FollowOnState, input: Extract<ClientReply, { kind: 'question' }>, out: Out[], at: string): FollowOnState | null {
   if (input.help) out.push({ kind: 'text', text: input.help });
   else {
@@ -1880,6 +1984,7 @@ export async function followOnTurn(
   const ctx: Ctx = {
     claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays,
     ...(settings.waitForMore ? { waitForMore: true } : {}),
+    ...(input.kind === 'start' && settings.guidedForm && ports.guidedFormLink ? { guided: true } : {}),
   };
   // TTTFG-5196: a message from the client ends the quiet spell on an optional item; the turn sets a new one if it ends
   // on one again.
@@ -1904,6 +2009,7 @@ export async function followOnTurn(
       kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, detail, at, template,
     });
   const say = (text: string, choices?: Choice[]) => sendClaimText(ports, conv, text, claim, at, choices);
+  let noForm = false;
   const setStatus = async (to: ClaimStatus) => {
     if (status === to) return;
     await ports.setStatus(claimId, to);
@@ -1915,6 +2021,18 @@ export async function followOnTurn(
     switch (o.kind) {
       case 'saps-instruction':
         await say(SAPS_INSTRUCTION);
+        break;
+      case 'guided-link':
+        try {
+          const link = await ports.guidedFormLink!(claimId);
+          const text = guidedLinkText(link.firstName, guidedMinutes(form, claim, !!step.state?.sapsRequired));
+          await ports.send(conv.phone, { kind: 'text', text, link: { url: link.url, label: GUIDED_LINK_LABEL } });
+          await action(`Guided claim form link sent on WhatsApp for claim ${claim.reference}.`);
+        } catch (e) {
+          // A link that can't be made never stops a claim: the questions go on WhatsApp instead (below).
+          console.error(`TTTFG-5562: no guided form link for claim ${claim.reference}: ${e}`);
+          noForm = true;
+        }
         break;
       case 'ask': {
         const text = askText(o.item, o.simpler, o.again);
@@ -2014,6 +2132,17 @@ export async function followOnTurn(
     } catch (e) {
       console.error(`TTTFG-5263: risk flags for claim ${claim.reference} failed: ${e}`);
     }
+  }
+  if (noForm && step.state) {
+    const fresh = await ports.loadClaim(claimId);
+    const chat = formChat({ ...ctx, claim: fresh, guided: false }, step.state, FORM_UNAVAILABLE);
+    for (const o of chat.out) {
+      if (o.kind === 'text') await say(o.text);
+      else if (o.kind === 'saps-instruction') await say(SAPS_INSTRUCTION);
+      else if (o.kind === 'ask') await say(askText(o.item, o.simpler, o.again), itemChoices(o.item, o.again));
+      else if (o.kind === 'ask-batch') await say(batchText(o.items, o));
+    }
+    return { state: chat.state };
   }
   return { state: step.state };
 }
