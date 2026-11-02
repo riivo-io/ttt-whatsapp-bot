@@ -4,12 +4,14 @@
  * call that isn't a read is refused, and the WhatsApp send and the agent actions only print. Run it the evening before,
  * or after changing a claim, to see the morning.
  *
- *   npx tsx src/scripts/claims-reminder-preview.ts [--at 2026-10-27T06:00:00Z] [--template]
+ *   npx tsx src/scripts/claims-reminder-preview.ts [--at 2026-10-27T06:00:00Z] [--no-template]
  *
  * The numbers come from CLAIMS_DEMO_NUMBERS (as on Tina). `--at`: when the reminder runs (default: the next 08:00 South
- * African time). `--template`: as if CLAIMS_REMINDER_TEMPLATE were set (clients quiet for over 24 hours get the
- * template). CLAIMS_BROKER_ALERT_DAYS and CLAIMS_STOP_AFTER_DAYS as on Tina. Tina's conversation state isn't read
- * here: a client mid-way through "which claim?" would get no reminder there (the Follow-ups still go).
+ * African time). Every reminder goes as the approved template, as on Tina with CLAIMS_REMINDER_TEMPLATE set;
+ * `--no-template`: as if it weren't (no reminder, the Follow-ups still go). The two days come from the CRM's
+ * riivo_ClaimReminderBrokerAlertDay and riivo_ClaimReminderStopDay, as on Tina; CLAIMS_BROKER_ALERT_DAYS and
+ * CLAIMS_STOP_AFTER_DAYS override them here, to try other days. Tina's conversation state isn't read here: a client
+ * mid-way through "which claim?" would get no reminder there (the Follow-ups still go).
  * Sign-in: `az login` to TTT's tenant.
  */
 import { execFileSync } from 'child_process';
@@ -17,7 +19,7 @@ import type { AgentActionRow } from '../departments/insurance/claim';
 import type { Dv } from '../departments/insurance/dataverse';
 import { remindTurn } from '../departments/insurance/reminder';
 import { NO_RESUME_STATE } from '../departments/insurance/resume';
-import { dataverseReminderPorts } from '../departments/insurance/resume-dataverse';
+import { dataverseReminderPorts, reminderSettingsFromDataverse } from '../departments/insurance/resume-dataverse';
 import { demoPhones, reminderDays } from '../domain/claimsDemoHost';
 import { dataverseCall } from '../services/claimsDemoWiring';
 
@@ -51,7 +53,8 @@ const dv: Dv = (async (method: string, ...rest: unknown[]) => {
 async function main() {
     const phones = demoPhones(process.env.CLAIMS_DEMO_NUMBERS);
     if (!phones.length) throw new Error('Set CLAIMS_DEMO_NUMBERS (27XXXXXXXXX:<contact id>, comma separated), as on Tina');
-    console.log(`Morning reminders at ${at.toISOString()} (${phones.length} demo numbers, ${DEV})\n`);
+    const days = { ...(await reminderSettingsFromDataverse(dv)), ...reminderDays(process.env.CLAIMS_BROKER_ALERT_DAYS, process.env.CLAIMS_STOP_AFTER_DAYS) };
+    console.log(`Morning reminders at ${at.toISOString()} (${phones.length} demo numbers, ${DEV}; days ${JSON.stringify(days)})\n`);
     for (const { phone, contactId } of phones) {
         const base = dataverseReminderPorts({
             dv,
@@ -73,7 +76,7 @@ async function main() {
         };
         console.log(`${phone} ${firstName} (${contactId})`);
         const r = await remindTurn(ports, { phone, requestId: '', signUpLink: '' }, NO_RESUME_STATE, contactId, at, {
-            template: args.includes('--template'), ...reminderDays(process.env.CLAIMS_BROKER_ALERT_DAYS, process.env.CLAIMS_STOP_AFTER_DAYS),
+            template: !args.includes('--no-template'), ...days,
         });
         for (const o of r.outcomes) {
             console.log(`  ${o.reference}: ${'sent' in o ? `sent as ${o.sent}` : `no reminder (${o.skipped})`}${o.broker ? `; owner's ${o.broker} Follow-up` : ''}`);

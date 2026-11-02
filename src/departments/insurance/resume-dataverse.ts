@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit f7e99c4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit bec6d7f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
@@ -6,9 +6,9 @@
 // email agent.
 import { dataverseClaimPorts } from './dataverse';
 import { CLAIM_STATUSES, CLAIM_TYPE_VALUES, dataverseFollowOnPorts, type FollowOnDataverseOptions } from './followon-dataverse';
-import { BROKER_STEPS, type ReminderPorts } from './reminder';
+import { BROKER_STEPS, REMINDER_SETTING_VARIABLES, type ReminderPorts, type ReminderSettings } from './reminder';
 import { CANCEL_REQUEST, CANCEL_WITHDRAWN, NOT_THEIRS, OPEN_CLAIM_STATUSES, THEIRS, type OpenClaim, type OpenClaimsPort, type ResumePorts } from './resume';
-import { REMINDER_TEMPLATE } from './templates';
+import { REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 const OPT = 463630000;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -20,7 +20,11 @@ interface OpenClaimRow {
   riivo_claimstatus: number;
   riivo_incidentdate: string | null;
   riivo_lastclientmessageon: string | null;
+  riivo_channel?: number | null;
 }
+
+/** riivo_claim.riivo_channel. */
+const CLAIM_CHANNEL_EMAIL = 463630000;
 
 /** The OData filter for an open claim status: riivo_claimstatus is one of OPEN_CLAIM_STATUSES. */
 export const OPEN_STATUS_FILTER = `(${OPEN_CLAIM_STATUSES.map((s) => `riivo_claimstatus eq ${OPT + CLAIM_STATUSES.indexOf(s)}`).join(' or ')})`;
@@ -30,7 +34,7 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
     async openClaimsForClient(contactId): Promise<OpenClaim[]> {
       if (!GUID.test(contactId)) throw new Error(`Not a Dataverse id: ${contactId}`);
       const r = await dv<{ value: OpenClaimRow[] }>('GET',
-        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,riivo_lastclientmessageon'
+        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,riivo_lastclientmessageon,riivo_channel'
         + `&$filter=_riivo_contact_value eq ${contactId} and statecode eq 0 and ${OPEN_STATUS_FILTER}&$orderby=riivo_incidentdate asc`);
       const disputed = await disputedClaims(dv, r.value.map((c) => c.riivo_claimid));
       return r.value.map((c) => ({
@@ -41,6 +45,7 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
         incidentAt: c.riivo_incidentdate ?? new Date(0).toISOString(),
         status: CLAIM_STATUSES[c.riivo_claimstatus - OPT],
         lastClientMessageOn: c.riivo_lastclientmessageon ?? undefined,
+        ...(c.riivo_channel === CLAIM_CHANNEL_EMAIL ? { channel: 'Email' as const } : {}),
         ...(disputed.has(c.riivo_claimid) ? { disputed: true as const } : {}),
         ...(disputed.get(c.riivo_claimid) === 'cancel' ? { cancelling: true as const } : {}),
       }));
@@ -91,16 +96,43 @@ export function dataverseResumePorts(o: FollowOnDataverseOptions): ResumePorts {
  * Regarding lookup, as the duty of disclosure's.
  */
 export function lastReminderPort(dv: FollowOnDataverseOptions['dv']): Pick<ReminderPorts, 'lastReminderOn' | 'lastBrokerStepOn'> {
-  const lastNamed = async (claimId: string, name: string) => {
+  const lastNamed = async (claimId: string, ...names: string[]) => {
     if (!GUID.test(claimId)) throw new Error(`Not a Dataverse id: ${claimId}`);
+    const named = names.map((n) => `startswith(riivo_subject,'${encodeURIComponent(n)}')`).join(' or ');
     const r = await dv<{ value: { createdon: string }[] }>('GET', 'riivo_agentactions?$select=createdon&$top=1&$orderby=createdon desc&$filter='
-      + `riivo_sourcemessageid eq 'riivo_claim:${claimId}' and startswith(riivo_subject,'${encodeURIComponent(name)}')`);
+      + `riivo_sourcemessageid eq 'riivo_claim:${claimId}' and (${named})`);
     return r.value[0]?.createdon ?? null;
   };
   return {
-    lastReminderOn: (claimId) => lastNamed(claimId, REMINDER_TEMPLATE.name),
+    lastReminderOn: (claimId) => lastNamed(claimId, REMINDER_TEMPLATE.name, REMINDER_EMAIL_TEMPLATE.name),
     lastBrokerStepOn: (claimId, step) => lastNamed(claimId, BROKER_STEPS[step].name),
   };
+}
+
+interface EnvironmentVariableRow {
+  schemaname: string;
+  defaultvalue: string | null;
+  environmentvariabledefinition_environmentvariablevalue?: { value: string | null }[];
+}
+
+/**
+ * TTTFG-5212 AC 6: the broker alert day and the stop day as TTT sets them, in the Dataverse environment variables
+ * REMINDER_SETTING_VARIABLES: the current value, else the default value. One that is missing, or not a number above 0,
+ * is left out, so the code's default applies.
+ */
+export async function reminderSettingsFromDataverse(dv: FollowOnDataverseOptions['dv']): Promise<Pick<ReminderSettings, 'brokerAlertDays' | 'stopAfterDays'>> {
+  const vars = Object.entries(REMINDER_SETTING_VARIABLES) as Array<[keyof typeof REMINDER_SETTING_VARIABLES, string]>;
+  const r = await dv<{ value: EnvironmentVariableRow[] }>('GET', 'environmentvariabledefinitions?$select=schemaname,defaultvalue'
+    + '&$expand=environmentvariabledefinition_environmentvariablevalue($select=value)'
+    + `&$filter=${vars.map(([, name]) => `schemaname eq '${name}'`).join(' or ')}`);
+  const out: Pick<ReminderSettings, 'brokerAlertDays' | 'stopAfterDays'> = {};
+  for (const [setting, name] of vars) {
+    const row = r.value.find((v) => v.schemaname.toLowerCase() === name.toLowerCase());
+    const raw = row?.environmentvariabledefinition_environmentvariablevalue?.[0]?.value ?? row?.defaultvalue;
+    const days = Number(raw?.trim() || NaN);
+    if (days > 0) out[setting] = days;
+  }
+  return out;
 }
 
 /** Everything remindTurn() needs, on Dataverse. */

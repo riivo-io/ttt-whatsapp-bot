@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit f7e99c4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit bec6d7f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -1810,13 +1810,27 @@ export const lineName = (item: QuestionItem) => {
  * The SAPS items, the documents and anything the client said "not yet" to are named there too.
  */
 export function stillNeedLines(items: readonly QuestionItem[], answers: ClaimAnswers = {}): string[] {
+  return stillNeed(items, answers, lineName, (n) => (n === 1 ? 'The answer to 1 more question' : `The answers to ${n} more questions`));
+}
+
+/**
+ * TTTFG-5212: the same items as stillNeedLines, worded for one line of text ("the vehicle registration number"), for
+ * the WhatsApp template's list variable, which can't hold line breaks. One rule picks the items, so the two never count
+ * differently (CLM-000096, 28 Oct 2026: "16 more questions" in the template, 17 in the list).
+ */
+export function stillNeedNames(items: readonly QuestionItem[], answers: ClaimAnswers = {}): string[] {
+  return stillNeed(items, answers, itemName, (n) => (n === 1 ? 'the answer to 1 more question' : `the answers to ${n} more questions`));
+}
+
+function stillNeed(
+  items: readonly QuestionItem[], answers: ClaimAnswers, name: (i: QuestionItem) => string, counted: (n: number) => string,
+): string[] {
   const halfWay = items.some((i) => !chased(i));
   const named = (i: QuestionItem) => chased(i) && (!halfWay || i.kind === 'evidence' || isSaps(i.key) || deferred(i.key, answers));
-  const questions = [...new Set(items.filter((i) => i.kind === 'question' && named(i)).map(lineName))];
+  const questions = [...new Set(items.filter((i) => i.kind === 'question' && named(i)).map(name))];
   const others = items.filter((i) => !named(i)).length;
-  const counted = others ? [others === 1 ? 'The answer to 1 more question' : `The answers to ${others} more questions`] : [];
-  const evidence = [...new Set(items.filter((i) => i.kind === 'evidence' && named(i)).map(lineName))];
-  return [...questions, ...counted, ...evidence];
+  const evidence = [...new Set(items.filter((i) => i.kind === 'evidence' && named(i)).map(name))];
+  return [...questions, ...(others ? [counted(others)] : []), ...evidence];
 }
 
 /**

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit f7e99c4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit bec6d7f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -73,28 +73,60 @@ export interface ReminderVars {
   firstName: string;
   /** "motor theft claim (CLM-000301)". */
   claim: string;
-  /** The list's lines (followon.ts stillNeedLines), or for the WhatsApp template the same in one line. */
+  /** The list's lines (followon.ts stillNeedLines). */
   lines: readonly string[];
   /** Some of it is questions Tina asks one by one (a claim the client left half way), not things to send. */
   questionsLeft?: boolean;
 }
 
+export interface ReminderTemplateVars {
+  firstName: string;
+  claim: string;
+  /** The same items in one line (stillNeedNames joined by list()): "the SAPS case number and the quotes". */
+  list: string;
+}
+
+/** Fills a WhatsApp template body's {{1}}, {{2}}, … with `params`, in order: the text the client sees. */
+export const fillTemplate = (body: string, params: readonly string[]) => body.replace(/\{\{(\d+)\}\}/g, (m, n: string) => params[Number(n) - 1] ?? m);
+
 /**
- * TTTFG-5212 (first cut, for the TTTFG-4830 demo): the morning reminder of what the client still has to send
- * (reminder.ts). Never says what happens if they don't. Inside WhatsApp's 24-hour window it goes as this text; outside
- * it, as the approved WhatsApp template whose body is `whatsappBody`, with the list in one line ({{3}}).
+ * TTTFG-5212: the morning reminder on WhatsApp, of what the client still has to send (reminder.ts). Never says what
+ * happens if they don't. It always goes as the approved WhatsApp template, `whatsappBody` (AC 2), with the list in one
+ * line ({{3}}); `render` is that body filled in, the text the client sees and the agent action keeps.
+ * draft-2 (2 Nov 2026): always the template. draft-1 sent a bulleted text inside the 24-hour window.
  */
 export const REMINDER_TEMPLATE = {
   name: 'Claim - still needed (morning reminder)',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
-  render: (v: ReminderVars) => [
-    `Good morning ${v.firstName}, it's Tina from TTT. Things we still need from you for your ${v.claim}:`,
-    ...v.lines.map((l) => `- ${l}`),
-    v.questionsLeft ? "Reply here when you're ready and I'll take you through them." : `Please send ${itOrThem(v.lines)} here when you have ${itOrThem(v.lines)}.`,
-  ].join('\n'),
+  /** The template's variables, in order. */
+  params: (v: ReminderTemplateVars) => [v.firstName, v.claim, v.list],
+  render: (v: ReminderTemplateVars): string => fillTemplate(REMINDER_TEMPLATE.whatsappBody, REMINDER_TEMPLATE.params(v)),
   /** For Meta: {{1}} first name, {{2}} the claim, {{3}} the list in one line ("the SAPS case number and the quotes"). */
   whatsappBody: "Good morning {{1}}, it's Tina from TTT. For your {{2}} we still need {{3}}. Please send them here when you have them.",
+} as const;
+
+/**
+ * TTTFG-5212 AC 2: the reminder for a claim that came in by email, by email (never on WhatsApp too). The same rules as
+ * the WhatsApp one; how to send is a reply to the email. Sent by the host's email sender (TTTFG-4973's templated
+ * sends).
+ */
+export const REMINDER_EMAIL_TEMPLATE = {
+  name: 'Claim - still needed (reminder email)',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<ReminderVars, 'claim'>) => `Your ${v.claim}: what we still need`,
+  render: (v: ReminderVars) => {
+    const them = itOrThem(v.lines);
+    return [
+      `Good morning ${v.firstName},`,
+      `Things we still need from you for your ${v.claim}:\n${v.lines.map((l) => `- ${l}`).join('\n')}`,
+      v.questionsLeft
+        ? 'Please reply to this email with the answers, and attach any photos or documents to your reply.'
+        : `Please reply to this email with ${them} when you have ${them}. You can attach photos and documents to your reply.`,
+      'Kind regards,\nTTT',
+    ].join('\n\n');
+  },
 } as const;
 
 export interface SignFormVars {

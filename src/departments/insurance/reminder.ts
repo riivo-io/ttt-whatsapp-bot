@@ -1,76 +1,106 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit f7e99c4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit bec6d7f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
-// TTTFG-5212 (first cut, built for the TTTFG-4830 WhatsApp demo): every morning, a client whose claim still needs
-// something is sent the list again ("Things we still need from you"), so the claim doesn't stall on the client's side.
-// The host calls remindTurn() once per client, at 08:00 South African time. What's needed is worked out from the claim
-// record (progress.ts), never remembered.
+// TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
+// stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
+// is worked out from the claim record (progress.ts), never remembered.
 //
-// Per open claim of the client (OPEN_CLAIM_STATUSES), a reminder goes out when:
+// The clock is the client's last message about an open claim (the latest riivo_lastclientmessageon): anything the
+// client sends resets it (AC 7). Days are calendar days in South Africa: the day they wrote is day 0, the next day 1.
+//
+// Per open claim of the client, a reminder goes out when (AC 1, 8):
+// - the claim is at Awaiting client docs or Additional info requested (REMINDED_STATUSES). Tina sets Awaiting client
+//   docs when she starts on the evidence, so a client who stopped part way through the form's questions (FNOL logged)
+//   isn't reminded;
 // - something is still needed (missingItems): the items the client can get, by name; on a claim the client left half
 //   way, the questions still open, counted;
-// - the client hasn't written for `quietHours` (default 12). 5212: anything the client sends resets the clock;
-// - the client's last message is less than `stopAfterDays` old (default 10). 5212 stops the reminders there and hands
-//   the claim to the broker as a call to make (below; TTTFG-5289 may move the day);
-// - it isn't Sunday in South Africa (5212 AC 1);
+// - it is day `fromDay` (1) or later, and before `stopAfterDays` (10). The reminders stop there and the claim goes to
+//   the broker as a call to make (below; TTTFG-5289 may move the day);
+// - it isn't Sunday in South Africa;
 // - the client hasn't said the claim isn't theirs (TTTFG-4830: OpenClaim.disputed, while the broker checks it). Such a
 //   claim gets no reminder and no broker step: the broker already has an urgent Follow-up on it;
-// - the claim wasn't reminded already today (its Created agent action), so a second run the same day sends nothing;
-// - WhatsApp allows it: a client who last wrote more than 24 hours ago can only be sent an approved template. With
-//   `template: true` (the host has one) the reminder goes as REMINDER_TEMPLATE's WhatsApp body, the list in one line,
-//   because a template variable can't hold line breaks. Without it the claim is passed over.
+// - the claim wasn't reminded already today (its Created agent action), so a second run the same day sends nothing.
 //
-// The broker (the claim's owner) gets a Follow-up, from the same clock, per open claim that still needs something:
-// - when the client's last message is `brokerAlertDays` old (default 5): the client hasn't sent the missing items
-//   (BROKER_STEPS.alert). Once per quiet spell: a client who writes, then goes quiet again, gets there again (28 Oct);
-// - when it is `stopAfterDays` old, the day the reminders stop: phone the client (BROKER_STEPS.call). Once per claim.
+// On the claim's own channel only (AC 2), as a fixed template filled with CRM values (AC 9):
+// - a WhatsApp claim: the approved WhatsApp template (REMINDER_TEMPLATE), whatever the 24-hour window, the list in one
+//   line because a template variable can't hold line breaks. The host must have it (`template: true`), and Tina must
+//   not be waiting on "which claim?";
+// - an email claim: an email (REMINDER_EMAIL_TEMPLATE) through the host's `email` port (TTTFG-4973's templated sends).
+//   Tina has none, so an email claim gets no reminder from her, and never a WhatsApp one.
+// Each reminder writes a Created agent action with the time, the template's name and version and the text as sent.
+//
+// The broker (the claim's owner) gets a Follow-up, from the same clock, per claim that would be reminded (AC 4, 5):
+// - on day `brokerAlertDays` (5): the client hasn't sent the missing items (BROKER_STEPS.alert). Once per quiet spell:
+//   a client who writes, then goes quiet again, gets there again (28 Oct);
+// - on day `stopAfterDays`, the day the reminders stop: phone the client (BROKER_STEPS.call). Once per claim.
 // Each is found again by its wording's name, as the reminder is. They don't wait on the reminder: they go on Sunday,
-// outside the 24-hour window, and while Tina waits on "which claim?".
-// Not built from 5212 yet: email claims reminded by email (TTTFG-4973's templated sends), and AC 8's two statuses
-// (every open status is reminded until TTTFG-5208 moves claims to Awaiting client docs or Additional info requested).
+// without a template or an email sender, and while Tina waits on "which claim?". Both days are settings (AC 6): the
+// host reads TTT's Dataverse environment variables (REMINDER_SETTING_VARIABLES, resume-dataverse.ts).
 //
-// The conversation: a claim whose questions are all asked goes back on its list (FollowOnState phase `still-need`), so
-// a reply ("the case number is CAS 123/10/2026") is read against it. A claim the client left half way keeps its state:
-// the reply resumes the questions, as it would without a reminder. When two claims are reminded, the state is left
-// alone and a reply goes through "which claim?".
+// The conversation: a WhatsApp claim whose questions are all asked goes back on its list (FollowOnState phase
+// `still-need`), so a reply ("the case number is CAS 123/10/2026") is read against it. A claim the client left half way
+// keeps its state: the reply resumes the questions, as it would without a reminder. When two claims are reminded, the
+// state is left alone and a reply goes through "which claim?".
 import { DEPARTMENT, type Conversation } from './claim';
-import { CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedState, type ClaimSettings, type StoredClaimForm } from './followon';
+import {
+  CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
+  type StoredClaimForm,
+} from './followon';
 import { chased } from './progress';
-import { claimWords, missingNames, isOpenClaim, type ResumePorts, type ResumeState } from './resume';
-import { REMINDER_TEMPLATE } from './templates';
+import { claimWords, isOpenClaim, type ResumePorts, type ResumeState } from './resume';
+import { REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 export interface ReminderSettings extends ClaimSettings {
-  /** No reminder when the client wrote less than this many hours ago. */
-  quietHours?: number;
-  /** The broker's alert (BROKER_STEPS.alert) when the client's last message is this many days old. */
+  /** The first reminder goes on this calendar day after the client's last message (a test by hand: 0, today). */
+  fromDay?: number;
+  /** The broker's alert (BROKER_STEPS.alert) on this calendar day after the client's last message. */
   brokerAlertDays?: number;
-  /** No reminder when the client's last message is this many days old or more; the broker phones (BROKER_STEPS.call). */
+  /** No reminder from this calendar day after the client's last message; the broker phones (BROKER_STEPS.call). */
   stopAfterDays?: number;
-  /** The host can send REMINDER_TEMPLATE as an approved WhatsApp template (outside the 24-hour window). */
+  /** The host can send REMINDER_TEMPLATE as an approved WhatsApp template. Without it no WhatsApp reminder goes. */
   template?: boolean;
 }
-export const REMINDER_SETTINGS_DEFAULTS = { quietHours: 12, brokerAlertDays: 5, stopAfterDays: 10 } as const;
+export const REMINDER_SETTINGS_DEFAULTS = { fromDay: 1, brokerAlertDays: 5, stopAfterDays: 10 } as const;
+
+/** AC 6: the Dataverse environment variables TTT sets the two days in (resume-dataverse.ts reads them). */
+export const REMINDER_SETTING_VARIABLES = {
+  brokerAlertDays: 'riivo_ClaimReminderBrokerAlertDay',
+  stopAfterDays: 'riivo_ClaimReminderStopDay',
+} as const;
+
+/** AC 1, 8: the claims waiting on the client. Any other status gets no reminder and no broker step. */
+export const REMINDED_STATUSES = ['Awaiting client docs', 'Additional info requested'] as const satisfies readonly ClaimStatus[];
+const isReminded = (status: ClaimStatus) => (REMINDED_STATUSES as readonly string[]).includes(status);
 
 /** The broker's two Follow-ups: `alert` on day 5, `call` on the stop day. */
 export type BrokerStep = 'alert' | 'call';
 
+/** AC 2: the host's email sender, for a claim that came in by email. */
+export interface ReminderEmailPort {
+  /** The client's first name, or null when they can't be emailed (no address, Do Not Email). */
+  contact(contactId: string): Promise<{ firstName: string } | null>;
+  send(contactId: string, message: { subject: string; text: string }): Promise<void>;
+}
+
 export interface ReminderPorts extends ResumePorts {
-  /** When the claim's last morning reminder went out (its Created agent action), or null. */
+  /** When the claim's last reminder went out (its Created agent action, WhatsApp or email), or null. */
   lastReminderOn(claimId: string): Promise<string | null>;
   /** When the claim's last Follow-up for this broker step was written, or null. */
   lastBrokerStepOn(claimId: string, step: BrokerStep): Promise<string | null>;
+  /** Absent (Tina): an email claim gets no reminder ('no-email-sender'). The broker steps still go. */
+  email?: ReminderEmailPort;
 }
 
 export type ReminderSkip =
-  | 'nothing-needed' | 'wrote-recently' | 'quiet-too-long' | 'no-message-yet' | 'reminded-today' | 'outside-24h' | 'question-open'
-  | 'sunday' | 'disputed';
+  | 'nothing-needed' | 'wrote-today' | 'quiet-too-long' | 'no-message-yet' | 'reminded-today' | 'no-template' | 'question-open'
+  | 'sunday' | 'disputed' | 'status' | 'no-email-sender' | 'no-email-address';
 /** `broker`: the claim's owner got that step's Follow-up this run. */
 export type ReminderOutcome =
-  | { reference: string; sent: 'text' | 'template'; lines: string[]; broker?: BrokerStep }
+  | { reference: string; sent: 'template' | 'email'; lines: string[]; broker?: BrokerStep }
   | { reference: string; skipped: ReminderSkip; broker?: BrokerStep };
 
 export interface BrokerVars {
   reference: string;
-  /** Whole days since the client's last message. */
+  /** Calendar days since the client's last message. */
   days: number;
   /** What's still needed (followon.ts stillNeedLines). */
   lines: readonly string[];
@@ -102,28 +132,27 @@ const DAY = 24 * HOUR;
 const sastDate = (iso: string) => new Date(Date.parse(iso) + 2 * HOUR).toISOString().slice(0, 10);
 const sastSunday = (now: Date) => new Date(now.getTime() + 2 * HOUR).getUTCDay() === 0;
 
-/**
- * Whether the client gets reminders at all this morning, from when they last wrote about an open claim. Pure. `window`:
- * inside WhatsApp's 24-hour window, so the reminder can go as a plain message.
- */
-export function reminderWindow(lastHeard: string | undefined, now: Date, settings: ReminderSettings = {}):
-  { ok: true; window: boolean } | { ok: false; skipped: ReminderSkip } {
+/** Calendar days in South Africa from the client's last message to `now`: 0 the day they wrote, 1 the next day. */
+export const quietDays = (lastHeard: string, now: Date) =>
+  Math.round((Date.parse(sastDate(now.toISOString())) - Date.parse(sastDate(lastHeard))) / DAY);
+
+/** Whether this morning is a reminder day, from when the client last wrote about an open claim. Pure. */
+export function reminderToday(lastHeard: string | undefined, now: Date, settings: ReminderSettings = {}):
+  { ok: true } | { ok: false; skipped: ReminderSkip } {
   if (!lastHeard) return { ok: false, skipped: 'no-message-yet' };
-  const quiet = now.getTime() - Date.parse(lastHeard);
-  if (quiet < (settings.quietHours ?? REMINDER_SETTINGS_DEFAULTS.quietHours) * HOUR) return { ok: false, skipped: 'wrote-recently' };
-  if (quiet >= (settings.stopAfterDays ?? REMINDER_SETTINGS_DEFAULTS.stopAfterDays) * DAY) return { ok: false, skipped: 'quiet-too-long' };
+  const days = quietDays(lastHeard, now);
+  if (days < (settings.fromDay ?? REMINDER_SETTINGS_DEFAULTS.fromDay)) return { ok: false, skipped: 'wrote-today' };
+  if (days >= (settings.stopAfterDays ?? REMINDER_SETTINGS_DEFAULTS.stopAfterDays)) return { ok: false, skipped: 'quiet-too-long' };
   if (sastSunday(now)) return { ok: false, skipped: 'sunday' };
-  const window = quiet < DAY;
-  if (!window && !settings.template) return { ok: false, skipped: 'outside-24h' };
-  return { ok: true, window };
+  return { ok: true };
 }
 
 /** Which broker step the client's silence has reached, from when they last wrote about an open claim, or null. Pure. */
 export function brokerStep(lastHeard: string | undefined, now: Date, settings: ReminderSettings = {}): BrokerStep | null {
   if (!lastHeard) return null;
-  const quiet = now.getTime() - Date.parse(lastHeard);
-  if (quiet >= (settings.stopAfterDays ?? REMINDER_SETTINGS_DEFAULTS.stopAfterDays) * DAY) return 'call';
-  if (quiet >= (settings.brokerAlertDays ?? REMINDER_SETTINGS_DEFAULTS.brokerAlertDays) * DAY) return 'alert';
+  const days = quietDays(lastHeard, now);
+  if (days >= (settings.stopAfterDays ?? REMINDER_SETTINGS_DEFAULTS.stopAfterDays)) return 'call';
+  if (days >= (settings.brokerAlertDays ?? REMINDER_SETTINGS_DEFAULTS.brokerAlertDays)) return 'alert';
   return null;
 }
 
@@ -133,10 +162,13 @@ async function brokerDue(ports: ReminderPorts, claimId: string, step: BrokerStep
   return !last || (step === 'alert' && Date.parse(last) < Date.parse(heard));
 }
 
+type Today = { ok: true } | { ok: false; skipped: ReminderSkip };
+
 /**
- * One client's morning reminders: one message per open claim that still needs something, and the broker's Follow-ups,
- * as the rules at the top of this file say. Returns the conversation state to keep (see above), what happened per claim,
- * and the last text sent (the host keeps it as Tina's last message, so the reply is read against it).
+ * One client's morning reminders: one per reminded claim that still needs something, on the claim's channel, and the
+ * broker's Follow-ups, as the rules at the top of this file say. Returns the conversation state to keep (see above),
+ * what happened per claim, and the last WhatsApp text sent (the host keeps it as Tina's last message, so the reply is
+ * read against it).
  */
 export async function remindTurn(
   ports: ReminderPorts, conv: Conversation, state: ResumeState, contactId: string, now: Date, settings: ReminderSettings = {},
@@ -144,19 +176,26 @@ export async function remindTurn(
   const at = now.toISOString();
   const open = (await ports.openClaimsForClient(contactId)).filter((c) => isOpenClaim(c.status));
   const heard = open.map((c) => c.lastClientMessageOn).filter((d): d is string => !!d).sort().at(-1);
-  // Tina asked "which claim?" or "is this a new claim?" and is waiting: a reminder now would cross it.
-  const when = state.pending ? { ok: false as const, skipped: 'question-open' as const } : reminderWindow(heard, now, settings);
+  const today = reminderToday(heard, now, settings);
   const step = brokerStep(heard, now, settings);
-  if (!when.ok && !step) return { state, outcomes: open.map((c) => ({ reference: c.reference, skipped: when.skipped })) };
 
-  const firstName = when.ok ? (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there' : 'there';
   const outcomes: ReminderOutcome[] = [];
   const reminded: Array<{ ctx: Parameters<typeof resumeMissing>[0]; missing: ReturnType<typeof resumeMissing> }> = [];
+  let firstName: string | undefined;
   let lastSent: string | undefined;
   for (const o of open) {
     if (o.disputed) { outcomes.push({ reference: o.reference, skipped: 'disputed' }); continue; }
+    if (!isReminded(o.status)) { outcomes.push({ reference: o.reference, skipped: 'status' }); continue; }
+    const email = o.channel === 'Email';
+    const when: Today = !today.ok ? today
+      : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
+      // Tina asked "which claim?" or "is this a new claim?" and is waiting: a reminder now would cross it.
+      : state.pending ? { ok: false, skipped: 'question-open' }
+      : !settings.template ? { ok: false, skipped: 'no-template' }
+      : today;
     const due = step && (await brokerDue(ports, o.id, step, heard!)) ? step : undefined;
     if (!when.ok && !due) { outcomes.push({ reference: o.reference, skipped: when.skipped }); continue; }
+
     const claim = await ports.loadClaim(o.id);
     const form: StoredClaimForm = claim.claimFormId
       ? await ports.claimForm(claim.claimFormId)
@@ -165,13 +204,15 @@ export async function remindTurn(
     const missing = resumeMissing(ctx);
     if (!missing.length) { outcomes.push({ reference: o.reference, skipped: 'nothing-needed' }); continue; }
     const lines = stillNeedLines(missing, claim.answers);
+    const channel = email ? 'Email' as const : 'WhatsApp' as const;
 
     if (due) {
       const wording = BROKER_STEPS[due];
       await ports.createAgentAction({
-        kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
+        kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId,
+        channel, at,
         detail: wording.render({
-          reference: claim.reference, days: Math.floor((now.getTime() - Date.parse(heard!)) / DAY), lines,
+          reference: claim.reference, days: quietDays(heard!, now), lines,
           stopAfterDays: settings.stopAfterDays ?? REMINDER_SETTINGS_DEFAULTS.stopAfterDays,
         }),
         template: { name: wording.name, version: wording.version },
@@ -184,22 +225,35 @@ export async function remindTurn(
 
     // TTTFG-4830 (29 Oct 2026): named as Tina names it back on the claim ("your all risk claim", A6).
     const label = `${claimWords(claim.claimType)} claim (${claim.reference})`;
-    const text = REMINDER_TEMPLATE.render({ firstName, claim: label, lines, questionsLeft: missing.some((i) => !chased(i)) });
-    await ports.send(conv.phone, {
-      kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text,
-      ...(when.window ? {} : { params: [firstName, label, list(missingNames(missing))] }),
-    });
+    const row = { kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, channel, at } as const;
+    if (email) {
+      const contact = await ports.email!.contact(contactId);
+      if (!contact) { outcomes.push({ reference: o.reference, skipped: 'no-email-address', ...broker }); continue; }
+      const vars = { firstName: contact.firstName, claim: label, lines, questionsLeft: missing.some((i) => !chased(i)) };
+      const message = { subject: REMINDER_EMAIL_TEMPLATE.subject(vars), text: REMINDER_EMAIL_TEMPLATE.render(vars) };
+      await ports.email!.send(contactId, message);
+      await ports.createAgentAction({
+        ...row, detail: `Reminder email sent for claim ${claim.reference}: ${lines.join('; ')}.`,
+        template: { name: REMINDER_EMAIL_TEMPLATE.name, version: REMINDER_EMAIL_TEMPLATE.version, text: `${message.subject}\n\n${message.text}` },
+      });
+      outcomes.push({ reference: o.reference, sent: 'email', lines, ...broker });
+      continue;
+    }
+
+    firstName ??= (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there';
+    const vars = { firstName, claim: label, list: list(stillNeedNames(missing, claim.answers)) };
+    const text = REMINDER_TEMPLATE.render(vars);
+    await ports.send(conv.phone, { kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text, params: REMINDER_TEMPLATE.params(vars) });
     await ports.createAgentAction({
-      kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id },
-      contactId: claim.contactId, at, detail: `Morning reminder sent on WhatsApp for claim ${claim.reference}: ${lines.join('; ')}.`,
+      ...row, detail: `Morning reminder sent on WhatsApp for claim ${claim.reference}: ${lines.join('; ')}.`,
       template: { name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text },
     });
-    outcomes.push({ reference: o.reference, sent: when.window ? 'text' : 'template', lines, ...broker });
+    outcomes.push({ reference: o.reference, sent: 'template', lines, ...broker });
     reminded.push({ ctx, missing });
     lastSent = text;
   }
 
-  // One claim reminded, and all its questions asked: the conversation goes back on its list.
+  // One claim reminded on WhatsApp, and all its questions asked: the conversation goes back on its list.
   const only = reminded.length === 1 ? reminded[0] : undefined;
   if (only && only.missing.every(chased)) {
     const followOn = stillNeedState({ now }, resumeFollowOn(only.ctx, true), only.missing);
