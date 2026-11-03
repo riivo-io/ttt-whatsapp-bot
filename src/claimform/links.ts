@@ -102,6 +102,21 @@ export async function postFormDone(link: Pick<GuidedLinkRow, 'callback_url' | 'c
     if (!res.ok) throw new Error(`the form's caller answered ${res.status}`);
 }
 
+/**
+ * TTTFG-5188: what the email agent may ask Tina to read: an insurer's blank form, in the one folder they are kept in. The
+ * agent's own login doesn't reach that site, on purpose, so this mustn't become a way to read anything else on it.
+ */
+export function isBlankFormUrl(raw: string): boolean {
+    try {
+        const u = new URL(raw);
+        const path = decodeURIComponent(u.pathname);
+        return u.protocol === 'https:' && u.hostname.endsWith('.sharepoint.com') && !u.search && !path.includes('..')
+            && path.includes('/Shared Documents/Insurance Claims Forms/') && path.toLowerCase().endsWith('.pdf');
+    } catch {
+        return false;
+    }
+}
+
 // ------------------------------------------------------------------------------------------------- in memory
 
 export function memoryLinkStore(): GuidedLinkStore & { rows: Map<string, GuidedLinkRow> } {

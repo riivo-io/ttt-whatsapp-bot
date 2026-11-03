@@ -57,7 +57,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { claimsContactNumber } from '../domain/claimsHost';
 import { interactiveFor, LINK_LOGGED, linkInteractive, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, withLinkLine, type OutPart } from '../domain/claimsOutbox';
 import {
-    cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
+    blankForm, cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
     type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
 } from './claimsDemoWiring';
 import type { SignedCallback } from '../departments/insurance/signing';
@@ -363,7 +363,8 @@ function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
 /** TTTFG-5562: the guided form's route, when the page is set up. */
 export function claimFormDeps(): ClaimFormDeps | null {
     const d = guidedLinksFromEnv();
-    return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null, apiKey: process.env.SIGNING_API_KEY || undefined } : null;
+    return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null, apiKey: process.env.SIGNING_API_KEY || undefined,
+        blankForm: (url) => blankForm(channels(newCrmStats(), newDemoLog()), url) } : null;
 }
 
 export interface DemoInbound {
