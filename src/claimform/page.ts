@@ -643,7 +643,7 @@ const SCRIPT = String.raw`
   }
   /** The summary: the one step that may scroll. */
   function reviewHtml() {
-    var html = '<p class="help">Tap Change to fix anything. Next, Tina sends your form to sign on WhatsApp.</p>';
+    var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
     var missing = V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && u.state === 'up'; }); }).map(function (e) { return e.prompt; });
     visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper') missing.push(promptOf(f)); }); });
     if (missing.length) html += '<div class="need-box"><b>Still required</b><ul>' + missing.map(function (m) { return '<li>' + esc(m) + '</li>'; }).join('') + '</ul><span>You can submit now and send these later. Tina or your broker will follow up.</span></div>';
@@ -922,7 +922,7 @@ const SCRIPT = String.raw`
         $('foot').hidden = true; $('notice').hidden = true;
         $('sec').textContent = '';
         $('prog').style.width = '100%';
-        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your answers. Tina will message you on WhatsApp with anything still needed and your form to sign.</p></div>';
+        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your answers. ' + (V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
       }).catch(function (e) {
         busy = false; submitting = false;
         if (e.message === 'gone') return;
@@ -1348,10 +1348,17 @@ const REFUSED: Record<LinkRefusal, { title: string; text: string; ok?: boolean }
     superseded: { title: 'There is a newer link', text: 'Please open the latest link Tina sent you.' },
 };
 
+/** TTTFG-5188: the same, for a link that went by email. */
+const REFUSED_EMAILED: Partial<Record<LinkRefusal, { title: string; text: string; ok?: boolean }>> = {
+    expired: { title: 'This link has expired', text: 'Links work for 7 days. Reply to our email and we will send you a new one.' },
+    done: { title: 'Claim submitted', text: 'Thank you, we have your answers. We will email you with anything still needed and your form to sign.', ok: true },
+    superseded: { title: 'There is a newer link', text: 'Please open the link in our latest email.' },
+};
+
 /** The page for a link that's done with, or doesn't work. `whatsApp`: Tina's number, for the way back. */
-export function refusedPage(reason: LinkRefusal, whatsApp?: string | null): string {
-    const r = REFUSED[reason];
-    const back = whatsApp ? `<div class="foot"><a class="go" href="https://wa.me/${esc(whatsApp.replace(/\D/g, ''))}">Back to WhatsApp</a></div>` : '';
+export function refusedPage(reason: LinkRefusal, whatsApp?: string | null, emailed?: boolean): string {
+    const r: { title: string; text: string; ok?: boolean } = (emailed && REFUSED_EMAILED[reason]) || REFUSED[reason];
+    const back = whatsApp && !emailed ? `<div class="foot"><a class="go" href="https://wa.me/${esc(whatsApp.replace(/\D/g, ''))}">Back to WhatsApp</a></div>` : '';
     const icon = r.ok ? '<div class="done-ic"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></div>' : '';
     return `${HEAD(r.title)}<body><div class="app">${BRAND()}<main class="body"><div class="center">${icon}<h1>${esc(r.title)}</h1><p class="help">${esc(r.text)}</p></div></main>${back}</div></body></html>`;
 }

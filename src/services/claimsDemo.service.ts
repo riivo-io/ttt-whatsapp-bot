@@ -61,10 +61,10 @@ import {
     type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
 } from './claimsDemoWiring';
 import type { SignedCallback } from '../departments/insurance/signing';
-import { createGuidedLink, guidedFormOn, guidedLinksFromEnv, type GuidedLinkRow } from '../claimform/links';
+import { createGuidedLink, EMAIL_CLAIM_CALLER, guidedFormOn, guidedLinksFromEnv, postFormDone, type GuidedLinkRow } from '../claimform/links';
 import type { ClaimFormDeps, ClaimFormSession } from '../routes/claimForm.route';
-import { signingFromEnv } from '../signing/env';
-import { createSigningRequest } from '../signing/signing';
+import { callbackSecretFromEnv, signingFromEnv } from '../signing/env';
+import { callerCallbackKey, createSigningRequest } from '../signing/signing';
 import { enqueueClaimsBatchCheck, enqueueClaimsFormDone, enqueueClaimsReminder } from '../queue/whatsappQueue';
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
@@ -342,6 +342,13 @@ function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
     return demoClaimFormSession(channels(newCrmStats(), newDemoLog()), link, {
         hear: (bytes, mimeType, hint) => transcribeVoiceNote(bytes, mimeType, voiceHint(hint)),
         async carryOn() {
+            // TTTFG-5188: an email claim's link: the email agent carries on, under the signing callback's key for its caller.
+            if (link.callback_url) {
+                const secret = callbackSecretFromEnv();
+                if (!secret) throw new Error('No callback key');
+                await postFormDone(link, callerCallbackKey(secret, EMAIL_CLAIM_CALLER), EMAIL_CLAIM_CALLER);
+                return;
+            }
             try {
                 await enqueueClaimsFormDone(link.phone, link.claim_id, link.phone_number_id);
             } catch (e) {
@@ -356,7 +363,7 @@ function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
 /** TTTFG-5562: the guided form's route, when the page is set up. */
 export function claimFormDeps(): ClaimFormDeps | null {
     const d = guidedLinksFromEnv();
-    return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null } : null;
+    return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null, apiKey: process.env.SIGNING_API_KEY || undefined } : null;
 }
 
 export interface DemoInbound {

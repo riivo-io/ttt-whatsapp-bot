@@ -2,11 +2,12 @@
  * TTTFG-5562: the guided claim form on Tina: its links (AC 11), the route's checks, the page (AC 9) and the WhatsApp button.
  * The form's logic is tested in the claims package (ttt-preseason-agent test/claims-guided.test.ts).
  */
+import crypto from 'crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { createGuidedLink, guidedFormOn, LINK_DAYS, memoryLinkStore, openGuidedLink, sha256, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
+import { createGuidedLink, guidedFormOn, LINK_DAYS, memoryLinkStore, openGuidedLink, postFormDone, sha256, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../../src/claimform/page';
 import { joinParts, LINK_LOGGED, linkInteractive, withLinkLine } from '../../src/domain/claimsOutbox';
 import { claimFormRouter, type ClaimFormSession } from '../../src/routes/claimForm.route';
@@ -233,4 +234,79 @@ test('the link goes as a WhatsApp button, in its own message after what comes be
     assert.ok(link.label.length <= 20);
     assert.ok(withLinkLine('Tap below.', link).endsWith(link.url));
     assert.ok(!LINK_LOGGED.includes('http'));
+});
+
+// ---- TTTFG-5188: an email claim's link
+
+const CLAIM = '8bd61484-9dd7-f111-a05b-002248a35b45';
+const CONTACT = '3eb789a1-9cd7-f111-a05b-70a8a52b74f1';
+const CALLBACK = 'https://agent.example/api/claim-form-done';
+
+async function emailServer(d: GuidedLinkDeps, apiKey: string | undefined) {
+    const app = express();
+    app.use('/claim-form', claimFormRouter(() => ({ ...d, session: (_l: GuidedLinkRow) => fakeSession([]), whatsApp: '27111111111', apiKey })));
+    const server = app.listen(0);
+    await new Promise((r) => server.once('listening', r));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/claim-form`;
+    return { base, close: () => new Promise((r) => server.close(r)) };
+}
+const makeLink = (base: string, key: string, body: unknown) => fetch(`${base}/api/links`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify(body) });
+
+test('the email agent gets a link only with the key, an https callback that is not Tina, and real ids', async () => {
+    const d = deps();
+    const s = await emailServer(d, 'k');
+    try {
+        assert.equal((await makeLink(s.base, 'wrong', { claimId: CLAIM, contactId: CONTACT, callbackUrl: CALLBACK })).status, 401);
+        assert.equal((await makeLink(s.base, 'k', { claimId: 'x', contactId: CONTACT, callbackUrl: CALLBACK })).status, 400);
+        assert.equal((await makeLink(s.base, 'k', { claimId: CLAIM, contactId: CONTACT, callbackUrl: 'http://agent.example/x' })).status, 400);
+        assert.equal((await makeLink(s.base, 'k', { claimId: CLAIM, contactId: CONTACT, callbackUrl: 'https://tina.example/x' })).status, 400);
+        assert.equal(d.store.rows.size, 0);
+        const r = await makeLink(s.base, 'k', { claimId: CLAIM, contactId: CONTACT, callbackUrl: CALLBACK });
+        assert.equal(r.status, 201);
+        const made = await r.json() as { url: string; expiresAt: string };
+        assert.match(made.url, /^https:\/\/tina\.example\/claim-form\//);
+        const row = [...d.store.rows.values()][0];
+        assert.deepEqual([row.claim_id, row.contact_id, row.phone, row.callback_url], [CLAIM, CONTACT, '', CALLBACK]);
+    } finally { await s.close(); }
+});
+
+test('no key set: nobody can ask for a link', async () => {
+    const s = await emailServer(deps(), undefined);
+    try {
+        assert.equal((await makeLink(s.base, 'undefined', { claimId: CLAIM, contactId: CONTACT, callbackUrl: CALLBACK })).status, 401);
+    } finally { await s.close(); }
+});
+
+test('a WhatsApp link writes no callback column, so it works before the migration runs', async () => {
+    const d = deps();
+    await createGuidedLink(d, INPUT);
+    assert.ok(!('callback_url' in [...d.store.rows.values()][0]));
+});
+
+test('an email claim\'s page says email, not WhatsApp, and offers no way back to WhatsApp', async () => {
+    const d = deps();
+    const s = await emailServer(d, 'k');
+    try {
+        const { url } = await (await makeLink(s.base, 'k', { claimId: CLAIM, contactId: CONTACT, callbackUrl: CALLBACK })).json() as { url: string };
+        const state = await (await fetch(`${s.base}/${tokenOf(url)}/state`)).json() as { emailed?: boolean };
+        assert.equal(state.emailed, true);
+        await d.store.update([...d.store.rows.values()][0].id, { status: 'done' });
+        const done = await (await fetch(`${s.base}/${tokenOf(url)}`)).text();
+        assert.match(done, /We will email you/);
+        assert.doesNotMatch(done, /WhatsApp/);
+    } finally { await s.close(); }
+});
+
+test('Submit tells the email agent, signed under its key, and a refusal is an error so the client can try again', async () => {
+    const calls: { url: string; body: string; sig: string }[] = [];
+    const post = (async (url: string, init: { body: string; headers: Record<string, string> }) => {
+        calls.push({ url, body: init.body, sig: init.headers['x-signing-signature'] });
+        return { ok: calls.length === 1, status: calls.length === 1 ? 200 : 500 };
+    }) as unknown as typeof fetch;
+    const link = { callback_url: CALLBACK, claim_id: CLAIM };
+    await postFormDone(link, 'key', 'claim-email', post);
+    assert.equal(calls[0].url, CALLBACK);
+    assert.deepEqual(JSON.parse(calls[0].body), { caller: 'claim-email', claimId: CLAIM });
+    assert.equal(calls[0].sig, crypto.createHmac('sha256', 'key').update(calls[0].body).digest('hex'));
+    await assert.rejects(postFormDone(link, 'key', 'claim-email', post));
 });

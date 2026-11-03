@@ -5,15 +5,16 @@
  *   POST /claim-form/:token/answers    one screen's answers
  *   POST /claim-form/:token/voice      a recording (raw audio): { text } for the answer box
  *   POST /claim-form/:token/file       one photo or document (raw bytes), ?item=<evidence key>
- *   POST /claim-form/:token/submit     the client is done: Tina carries on on WhatsApp
+ *   POST /claim-form/:token/submit     the client is done: Tina carries on on WhatsApp, or tells the email agent
+ *   POST /claim-form/api/links         TTTFG-5188: a link for an email claim, with the signing API's key
  * The token is the only key: it can't be guessed, and every call checks it again.
  */
 import express, { Router, type Request, type Response } from 'express';
 import type { ClientFile } from '../departments/insurance/followon';
 import type { GuidedSave, GuidedSaved, GuidedView } from '../departments/insurance/guided';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../claimform/page';
-import { finishGuidedLink, openGuidedLink, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
-import { LINK_PREVIEW } from './signing.route';
+import { createGuidedLink, finishGuidedLink, openGuidedLink, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
+import { LINK_PREVIEW, sameKey } from './signing.route';
 
 /** What the route needs for one link's claim. */
 export interface ClaimFormSession {
@@ -32,6 +33,8 @@ export interface ClaimFormDeps extends GuidedLinkDeps {
     session(link: GuidedLinkRow): ClaimFormSession;
     /** Tina's WhatsApp number, for the way back. */
     whatsApp?: string | null;
+    /** The signing API's key: the email agent asks for an email claim's link with it. Absent: nobody can. */
+    apiKey?: string;
 }
 
 const VOICE_MAX = 16 * 1024 * 1024;
@@ -105,6 +108,27 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!res.headersSent) res.status(500).json({ ok: false, message: 'Something went wrong. Please try again.' });
     };
 
+    // TTTFG-5188: an email claim's link. The key is checked before the body is read. An email claim has no WhatsApp number.
+    router.post('/api/links', (req: Request, res: Response, next: () => void) => {
+        const d = getDeps();
+        if (!d) return void off(res);
+        if (!d.apiKey || !sameKey(req.header('authorization') ?? '', `Bearer ${d.apiKey}`)) return void res.status(401).json({ ok: false, message: 'Unauthorised' });
+        next();
+    }, express.json({ limit: '10kb' }), async (req: Request, res: Response) => {
+        const d = getDeps()!;
+        try {
+            const { claimId, contactId, callbackUrl } = (req.body ?? {}) as Record<string, unknown>;
+            const id = /^[0-9a-f-]{36}$/i;
+            if (typeof claimId !== 'string' || !id.test(claimId) || typeof contactId !== 'string' || !id.test(contactId)) return void res.status(400).json({ ok: false, message: 'claimId and contactId are required' });
+            const url = typeof callbackUrl === 'string' ? callbackUrl : '';
+            if (!url.startsWith('https://')) return void res.status(400).json({ ok: false, message: 'callbackUrl must be https' });
+            const own = (() => { try { return new URL(url).host === new URL(d.publicUrl).host; } catch { return true; } })();
+            if (own) return void res.status(400).json({ ok: false, message: 'callbackUrl may not be Tina itself' });
+            const made = await createGuidedLink(d, { claimId, contactId, phone: '', callbackUrl: url });
+            res.status(201).json({ url: made.url, expiresAt: made.expiresAt });
+        } catch (e) { failed('create', res, e); }
+    });
+
     router.get('/:token', async (req: Request, res: Response) => {
         const d = getDeps();
         if (!d) return void off(res);
@@ -112,7 +136,7 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         res.set('Content-Security-Policy', CLAIM_FORM_CSP);
         try {
             const opened = await openGuidedLink(d, req.params.token, { record: !LINK_PREVIEW.test(req.header('user-agent') ?? '') });
-            if (!opened.ok) return void res.status(opened.reason === 'not-found' ? 404 : opened.reason === 'done' ? 200 : 410).type('html').send(refusedPage(opened.reason, d.whatsApp));
+            if (!opened.ok) return void res.status(opened.reason === 'not-found' ? 404 : opened.reason === 'done' ? 200 : 410).type('html').send(refusedPage(opened.reason, d.whatsApp, opened.emailed));
             res.type('html').send(claimFormPage());
         } catch (e) {
             console.error('[ClaimForm] page failed:', (e as Error).message);
@@ -125,7 +149,7 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!d) return void off(res);
         try {
             const link = await linked(d, req, res);
-            if (link) res.json(await d.session(link).view());
+            if (link) res.json({ ...(await d.session(link).view()), ...(link.callback_url ? { emailed: true } : {}) });
         } catch (e) { failed('state', res, e); }
     });
 
