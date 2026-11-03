@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
@@ -22,6 +22,8 @@ interface OpenClaimRow {
   createdon: string;
   riivo_lastclientmessageon: string | null;
   riivo_channel?: number | null;
+  _riivo_policy_value?: string | null;
+  riivo_description?: string | null;
 }
 
 /** riivo_claim.riivo_channel. */
@@ -35,7 +37,7 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
     async openClaimsForClient(contactId): Promise<OpenClaim[]> {
       if (!GUID.test(contactId)) throw new Error(`Not a Dataverse id: ${contactId}`);
       const r = await dv<{ value: OpenClaimRow[] }>('GET',
-        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,createdon,riivo_lastclientmessageon,riivo_channel'
+        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,createdon,riivo_lastclientmessageon,riivo_channel,_riivo_policy_value,riivo_description'
         + `&$filter=_riivo_contact_value eq ${contactId} and statecode eq 0 and ${OPEN_STATUS_FILTER}&$orderby=riivo_incidentdate asc`);
       const disputed = await disputedClaims(dv, r.value.map((c) => c.riivo_claimid));
       return r.value.map((c) => ({
@@ -47,6 +49,9 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
         status: CLAIM_STATUSES[c.riivo_claimstatus - OPT],
         lastClientMessageOn: c.riivo_lastclientmessageon ?? undefined,
         ...(c.riivo_channel === CLAIM_CHANNEL_EMAIL ? { channel: 'Email' as const } : {}),
+        ...(c._riivo_policy_value ? { policyId: c._riivo_policy_value } : {}),
+        ...(c.riivo_description ? { description: c.riivo_description } : {}),
+        ...(c.riivo_incidentdate ? {} : { noIncidentDate: true as const }),
         ...(disputed.has(c.riivo_claimid) ? { disputed: true as const } : {}),
         ...(disputed.get(c.riivo_claimid) === 'cancel' ? { cancelling: true as const } : {}),
       }));

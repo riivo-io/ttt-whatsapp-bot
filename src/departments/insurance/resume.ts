@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -61,6 +61,11 @@ export interface OpenClaim {
   lastClientMessageOn?: string;
   /** TTTFG-5212: riivo_channel, where the claim came in. Absent (not set): WhatsApp. */
   channel?: 'WhatsApp' | 'Email';
+  /** TTTFG-5188: riivo_policy and riivo_description, to tell which claim an email is about. */
+  policyId?: string;
+  description?: string;
+  /** TTTFG-5188: riivo_incidentdate is blank, and incidentAt is when the claim was opened: not the day it happened. */
+  noIncidentDate?: true;
   /**
    * TTTFG-4830: the client said the claim isn't theirs (NOT_THEIRS, a Follow-up the broker hasn't closed) and hasn't
    * said since that it is (THEIRS). Tina asks nothing about it, and the morning reminder passes it over.

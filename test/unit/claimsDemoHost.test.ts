@@ -426,11 +426,12 @@ test('TTTFG-4830: the end of the questions lists what the client still has to se
     assert.deepEqual(w.signatureCalls, ['claim-1']);
     assert.match(w.actions.at(-1)!.detail, /is ready to register with the insurer.*Still to come from the client: the photos of the damage/);
 
-    // 08:00 the next day. The link went out, so the claim is at Form sent: no reminder (TTTFG-5212 AC 8, only Awaiting
-    // client docs and Additional info requested). At Awaiting client docs it goes, as the approved template although
-    // the client wrote less than 24 hours ago (AC 2).
+    // 08:00 the next day. The link went out with the photos still to come, so the claim waits at Awaiting client docs
+    // (TTTFG-5212) and the reminder goes, as the approved template although the client wrote less than 24 hours ago
+    // (AC 2). At Form sent it would not (AC 8, only Awaiting client docs and Additional info requested).
     const morning = new Date('2026-10-24T06:00:00Z');
-    assert.equal(w.rows[0].status, 'Form sent');
+    assert.equal(w.rows[0].status, 'Awaiting client docs');
+    w.rows[0].status = 'Form sent';
     assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, morning, { template: true }), [{ reference: 'CLM-000001', skipped: 'status' }]);
     w.rows[0].status = 'Awaiting client docs';
     const outcomes = await claimsDemoReminder(w.deps, PHONE, CONTACT, morning, { template: true });

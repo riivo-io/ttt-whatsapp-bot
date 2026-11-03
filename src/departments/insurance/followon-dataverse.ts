@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the follow-on's ports (followon.ts FollowOnPorts) against Dataverse, in the style of TTTFG-5168's
 // dataverse.ts: the host passes its Dataverse call (`Dv`), its WhatsApp send and where files go, so this file runs
@@ -208,7 +208,8 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
         insurer: r.riivo_Provider.riivo_providername ?? 'your insurer',
         claimType,
         facts: {
-          claimType, incidentAt: r.riivo_incidentdate ?? undefined,
+          // TTTFG-5188 AC 4: an email claim may not have a type yet. facts.claimType says so; claimType reads Other.
+          ...(r.riivo_claimtype == null ? {} : { claimType }), incidentAt: r.riivo_incidentdate ?? undefined,
           description: r.riivo_description ?? undefined, place: r.riivo_incidentplace ?? undefined,
           thirdParties: r.riivo_thirdpartiesinvolved ?? undefined, thirdPartyDetails: r.riivo_thirdpartydetails ?? undefined,
           saps: r.riivo_sapsinvolved ?? undefined, injuries: r.riivo_injuries ?? undefined, injuryDetails: r.riivo_injurydetails ?? undefined,
