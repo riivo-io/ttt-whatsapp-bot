@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/flags.ts (commit 28d7572). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/flags.ts (commit 0320d02). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5263: staff-only risk flags on a claim (SPEC-04 "Cover check and risk flags"). A flag is a warning for the broker,
 // never a finding about the client: Tina never sees one, no message mentions one, and no flag changes the claim's status,
@@ -129,7 +129,7 @@ export function claimFlags(claim: FlagClaim, documents: readonly FlagDocument[],
 
   // AC 2.
   if (on('walkthrough-end') && claim.sapsRequired && !claim.sapsCaseNumber?.trim()) {
-    out.push({ type: 'SAPS case missing', detail: `No SAPS case number when Tina finished her questions. The claim form needs one for a ${claim.claimType} claim.` });
+    out.push({ type: 'SAPS case missing', detail: `No SAPS case number after the client's questions. The claim form needs one for a ${claim.claimType} claim.` });
   }
 
   // AC 3. At open only: a later status change (a policy cancelled after the claim) is not a cover gap on the incident date,

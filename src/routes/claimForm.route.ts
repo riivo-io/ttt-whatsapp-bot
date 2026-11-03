@@ -7,13 +7,14 @@
  *   POST /claim-form/:token/file       one photo or document (raw bytes), ?item=<evidence key>
  *   POST /claim-form/:token/submit     the client is done: Tina carries on on WhatsApp, or tells the email agent
  *   POST /claim-form/api/links         TTTFG-5188: a link for an email claim, with the signing API's key
+ *   GET  /claim-form/api/blank-form    TTTFG-5188: an insurer's blank form for the email agent, with the same key
  * The token is the only key: it can't be guessed, and every call checks it again.
  */
 import express, { Router, type Request, type Response } from 'express';
 import type { ClientFile } from '../departments/insurance/followon';
 import type { GuidedSave, GuidedSaved, GuidedView } from '../departments/insurance/guided';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../claimform/page';
-import { createGuidedLink, finishGuidedLink, openGuidedLink, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
+import { createGuidedLink, finishGuidedLink, isBlankFormUrl, openGuidedLink, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
 import { LINK_PREVIEW, sameKey } from './signing.route';
 
 /** What the route needs for one link's claim. */
@@ -35,6 +36,8 @@ export interface ClaimFormDeps extends GuidedLinkDeps {
     whatsApp?: string | null;
     /** The signing API's key: the email agent asks for an email claim's link with it. Absent: nobody can. */
     apiKey?: string;
+    /** An insurer's blank form, as Tina reads it for a WhatsApp claim. */
+    blankForm?(url: string): Promise<Uint8Array>;
 }
 
 const VOICE_MAX = 16 * 1024 * 1024;
@@ -108,13 +111,26 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!res.headersSent) res.status(500).json({ ok: false, message: 'Something went wrong. Please try again.' });
     };
 
-    // TTTFG-5188: an email claim's link. The key is checked before the body is read. An email claim has no WhatsApp number.
-    router.post('/api/links', (req: Request, res: Response, next: () => void) => {
+    const apiKey = (req: Request, res: Response, next: () => void) => {
         const d = getDeps();
         if (!d) return void off(res);
         if (!d.apiKey || !sameKey(req.header('authorization') ?? '', `Bearer ${d.apiKey}`)) return void res.status(401).json({ ok: false, message: 'Unauthorised' });
         next();
-    }, express.json({ limit: '10kb' }), async (req: Request, res: Response) => {
+    };
+
+    // TTTFG-5188: the email agent fills an email claim's form, but only Tina's login reads the insurers' blank forms.
+    router.get('/api/blank-form', apiKey, async (req: Request, res: Response) => {
+        const d = getDeps()!;
+        const url = typeof req.query.url === 'string' ? req.query.url : '';
+        if (!isBlankFormUrl(url)) return void res.status(400).json({ ok: false, message: 'Not a blank claim form' });
+        if (!d.blankForm) return void off(res);
+        try {
+            res.set('Cache-Control', 'no-store').type('application/pdf').send(Buffer.from(await d.blankForm(url)));
+        } catch (e) { failed('blank form', res, e); }
+    });
+
+    // TTTFG-5188: an email claim's link. The key is checked before the body is read. An email claim has no WhatsApp number.
+    router.post('/api/links', apiKey, express.json({ limit: '10kb' }), async (req: Request, res: Response) => {
         const d = getDeps()!;
         try {
             const { claimId, contactId, callbackUrl } = (req.body ?? {}) as Record<string, unknown>;

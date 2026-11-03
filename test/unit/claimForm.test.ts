@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { createGuidedLink, guidedFormOn, LINK_DAYS, memoryLinkStore, openGuidedLink, postFormDone, sha256, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
+import { createGuidedLink, guidedFormOn, isBlankFormUrl, LINK_DAYS, memoryLinkStore, openGuidedLink, postFormDone, sha256, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../../src/claimform/page';
 import { joinParts, LINK_LOGGED, linkInteractive, withLinkLine } from '../../src/domain/claimsOutbox';
 import { claimFormRouter, type ClaimFormSession } from '../../src/routes/claimForm.route';
@@ -309,4 +309,39 @@ test('Submit tells the email agent, signed under its key, and a refusal is an er
     assert.deepEqual(JSON.parse(calls[0].body), { caller: 'claim-email', claimId: CLAIM });
     assert.equal(calls[0].sig, crypto.createHmac('sha256', 'key').update(calls[0].body).digest('hex'));
     await assert.rejects(postFormDone(link, 'key', 'claim-email', post));
+});
+
+const BLANK = 'https://tttfinancialgroup.sharepoint.com/sites/TTTFinancialGroup/Shared%20Documents/Insurance%20Claims%20Forms/Discovery/discovery-motor-damage-claim-form.pdf';
+
+test('only a PDF in the insurers\' forms folder counts as a blank form', () => {
+    assert.equal(isBlankFormUrl(BLANK), true);
+    for (const bad of [
+        'https://tttfinancialgroup.sharepoint.com/sites/TTTFinancialGroup/Shared%20Documents/Clients/Thabo/id.pdf',
+        'https://tttfinancialgroup.sharepoint.com/sites/TTTFinancialGroup/Shared%20Documents/Insurance%20Claims%20Forms/../Clients/id.pdf',
+        'https://tttfinancialgroup.sharepoint.com/sites/TTTFinancialGroup/Shared%20Documents/Insurance%20Claims%20Forms/%2E%2E/Clients/id.pdf',
+        'https://tttfinancialgroup.sharepoint.com/sites/TTTFinancialGroup/Shared%20Documents/Insurance%20Claims%20Forms/list.xlsx',
+        'https://evil.example/sites/x/Shared%20Documents/Insurance%20Claims%20Forms/a.pdf',
+        'http://tttfinancialgroup.sharepoint.com/sites/x/Shared%20Documents/Insurance%20Claims%20Forms/a.pdf',
+        BLANK + '?download=1', 'not a url', '',
+    ]) assert.equal(isBlankFormUrl(bad), false, bad);
+});
+
+test('the email agent gets a blank form only with the key, and only from that folder', async () => {
+    const read: string[] = [];
+    const app = express();
+    app.use('/claim-form', claimFormRouter(() => ({ ...deps(), session: (_l: GuidedLinkRow) => fakeSession([]), apiKey: 'k', blankForm: async (u: string) => { read.push(u); return new TextEncoder().encode('%PDF-blank'); } })));
+    const server = app.listen(0);
+    await new Promise((r) => server.once('listening', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/claim-form/api/blank-form`;
+    const get = (url: string, key: string) => fetch(`${base}?url=${encodeURIComponent(url)}`, { headers: { Authorization: `Bearer ${key}` } });
+    try {
+        assert.equal((await get(BLANK, 'wrong')).status, 401);
+        assert.equal((await get('https://tttfinancialgroup.sharepoint.com/sites/TTTFinancialGroup/Shared%20Documents/Clients/id.pdf', 'k')).status, 400);
+        assert.deepEqual(read, []);
+        const r = await get(BLANK, 'k');
+        assert.equal(r.status, 200);
+        assert.match(r.headers.get('content-type') ?? '', /application\/pdf/);
+        assert.equal(await r.text(), '%PDF-blank');
+        assert.deepEqual(read, [BLANK]);
+    } finally { await new Promise((r) => server.close(r)); }
 });
