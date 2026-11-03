@@ -10,6 +10,8 @@ import crypto from 'crypto';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 export const LINK_DAYS = 7;
+/** TTTFG-5188: the email agent, as it signs on the signing page; its callbacks use this caller's key. */
+export const EMAIL_CLAIM_CALLER = 'claim-email';
 
 export type LinkStatus = 'open' | 'done' | 'expired' | 'superseded';
 
@@ -25,6 +27,8 @@ export interface GuidedLinkRow {
     created_at: string;
     opened_at: string | null;
     finished_at: string | null;
+    /** TTTFG-5188: an email claim's link. Who to tell when the client submits; absent on a WhatsApp link, whose `phone` Tina carries on with. */
+    callback_url?: string | null;
 }
 
 export interface GuidedLinkStore {
@@ -45,13 +49,15 @@ export interface GuidedLinkDeps {
 const nowOf = (d: GuidedLinkDeps) => d.now?.() ?? new Date();
 export const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
-export async function createGuidedLink(d: GuidedLinkDeps, input: { claimId: string; phone: string; contactId: string; phoneNumberId?: string | null }): Promise<{ id: string; url: string; expiresAt: string }> {
+export async function createGuidedLink(d: GuidedLinkDeps, input: { claimId: string; phone: string; contactId: string; phoneNumberId?: string | null; callbackUrl?: string }): Promise<{ id: string; url: string; expiresAt: string }> {
     const token = crypto.randomBytes(32).toString('base64url');
     const created = nowOf(d);
     const row: GuidedLinkRow = {
         id: crypto.randomUUID(), token_hash: sha256(token), claim_id: input.claimId, phone: input.phone, contact_id: input.contactId,
         phone_number_id: input.phoneNumberId ?? null, status: 'open', expires_at: new Date(created.getTime() + LINK_DAYS * 86_400_000).toISOString(),
         created_at: created.toISOString(), opened_at: null, finished_at: null,
+        // Only when there is one: a WhatsApp link writes the row as it always has.
+        ...(input.callbackUrl ? { callback_url: input.callbackUrl } : {}),
     };
     await d.store.insert(row);
     await d.store.supersedeOpen(input.claimId, row.created_at);
@@ -59,18 +65,19 @@ export async function createGuidedLink(d: GuidedLinkDeps, input: { claimId: stri
 }
 
 export type LinkRefusal = 'not-found' | 'expired' | 'done' | 'superseded';
-export type OpenedLink = { ok: true; row: GuidedLinkRow } | { ok: false; reason: LinkRefusal };
+export type OpenedLink = { ok: true; row: GuidedLinkRow } | { ok: false; reason: LinkRefusal; emailed?: boolean };
 
 /** The link's row, or why it doesn't work. `record`: this is the client opening it (a link preview doesn't count). */
 export async function openGuidedLink(d: GuidedLinkDeps, token: string, o: { record?: boolean } = {}): Promise<OpenedLink> {
     if (!/^[A-Za-z0-9_-]{20,100}$/.test(token)) return { ok: false, reason: 'not-found' };
     const row = await d.store.byTokenHash(sha256(token));
     if (!row) return { ok: false, reason: 'not-found' };
-    if (row.status === 'done') return { ok: false, reason: 'done' };
-    if (row.status === 'superseded') return { ok: false, reason: 'superseded' };
+    const emailed = row.callback_url ? { emailed: true } : {};
+    if (row.status === 'done') return { ok: false, reason: 'done', ...emailed };
+    if (row.status === 'superseded') return { ok: false, reason: 'superseded', ...emailed };
     if (row.status === 'expired' || Date.parse(row.expires_at) <= nowOf(d).getTime()) {
         if (row.status === 'open') await d.store.update(row.id, { status: 'expired' });
-        return { ok: false, reason: 'expired' };
+        return { ok: false, reason: 'expired', ...emailed };
     }
     if (o.record && !row.opened_at) {
         row.opened_at = nowOf(d).toISOString();
@@ -80,6 +87,20 @@ export async function openGuidedLink(d: GuidedLinkDeps, token: string, o: { reco
 }
 
 export const finishGuidedLink = (d: GuidedLinkDeps, id: string) => d.store.update(id, { status: 'done', finished_at: nowOf(d).toISOString() });
+
+/**
+ * TTTFG-5188: the client submitted an email claim's form, so its caller carries on. A POST of JSON signed under the caller's
+ * own key, as the signing page's callback is. Thrown when it isn't taken: the client's Submit then fails and can be tried again.
+ */
+export async function postFormDone(link: Pick<GuidedLinkRow, 'callback_url' | 'claim_id'>, key: string, caller: string, post: typeof fetch = fetch): Promise<void> {
+    const body = JSON.stringify({ caller, claimId: link.claim_id });
+    const res = await post(link.callback_url!, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-signing-signature': crypto.createHmac('sha256', key).update(body).digest('hex') },
+        body,
+    });
+    if (!res.ok) throw new Error(`the form's caller answered ${res.status}`);
+}
 
 // ------------------------------------------------------------------------------------------------- in memory
 

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit c7c179a). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 28d7572). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -173,6 +173,26 @@ export const FNOL_EMAIL_TEMPLATE = {
     `${v.owner.charAt(0).toUpperCase()}${v.owner.slice(1)} will look after your claim.`,
     "Next steps: we'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have.",
     AI_HANDLING_LINE,
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
+/**
+ * TTTFG-5188 (the user, 3 Nov 2026): an email claim gets the guided form rather than a list of questions, as on WhatsApp
+ * (TTTFG-5562). Fixed wording filled with CRM values and the link, so it goes without approval, as the signing link does.
+ * The wording waits for TTT's approval with the acknowledgement's.
+ */
+export interface FormLinkEmailVars { firstName: string; reference: string; link: string; expiresOn: string }
+
+export const FORM_LINK_EMAIL_TEMPLATE = {
+  name: 'Claim - form link (email)',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<FormLinkEmailVars, 'reference'>) => `Your claim form (${v.reference})`,
+  render: (v: FormLinkEmailVars) => [
+    `Hi ${v.firstName}, to carry on with your claim (${v.reference}), please fill in your claim form here:`,
+    v.link,
+    `You can stop and come back to it: the link works until ${v.expiresOn}. Once you've submitted it, we'll email you the form to sign.`,
     'Kind regards,\nTTT',
   ].join('\n\n'),
 } as const;
