@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -235,10 +235,12 @@ export interface AnswerRecord {
    * TTTFG-4830: where the value came from when it wasn't the reply to this question: `report`, what the client said
    * while reporting the claim (before the form's questions); `same-message`, a reply to another question that answered
    * this one too; `correction`, the client changed their earlier answer; `computed` (28 Oct 2026), worked out from
-   * other answers (`sumOf`); `form` (TTTFG-5562), the client's answer on the guided form. Absent: the client's reply to
-   * this question.
+   * other answers (`sumOf`); `form` (TTTFG-5562), the client's answer on the guided form; `email` (TTTFG-5188), what a
+   * client's email stated. Absent: the client's reply to this question.
    */
-  source?: 'report' | 'same-message' | 'correction' | 'computed' | 'form';
+  source?: 'report' | 'same-message' | 'correction' | 'computed' | 'form' | 'email';
+  /** TTTFG-5188 AC 11: the email the answer came from (its internet message ID), when `source` is email. */
+  messageId?: string;
   /**
    * TTTFG-4830: the value doesn't look right (formats.ts: a phone number with too many digits, an email without "@",
    * an ID number that fails its check digit). Tina pointed it out and the client sent it again still that way, so it's
@@ -252,8 +254,9 @@ export type ClaimAnswers = Record<string, AnswerRecord>;
 /**
  * The seam TTTFG-5176 calls at the end of the conversation, once every item is in or passed over (TTTFG-5196 moved it
  * there from after the last form question). TTTFG-5192 fills and files the form, then calls the signing step
- * (TTTFG-5196). 'sent' moves the claim to Form sent; 'notAvailable' (no signing page yet) leaves the status alone, and
- * the closing line points at no link.
+ * (TTTFG-5196). 'sent' moves the claim to Form sent, unless the client still owes something (TTTFG-5212: it stays at
+ * Awaiting client docs, so the reminders go on); 'notAvailable' (no signing page yet) leaves the status to that same
+ * rule, and the closing line points at no link.
  */
 export type SignatureResult = 'sent' | 'notAvailable';
 export type RequestClaimSignature = (claimId: string) => Promise<SignatureResult>;

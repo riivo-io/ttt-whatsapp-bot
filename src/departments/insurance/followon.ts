@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -48,7 +48,7 @@ import { clientQuestionDetail, DEPARTMENT, OWN_PLUMBER_NOTE, PACK_FOLLOW_UP, toB
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import type { FlagTrigger } from './flags';
 import { formatProblem } from './formats';
-import { claimGate } from './gate';
+import { blockedBy, claimGate } from './gate';
 import {
   applies, chased, computedTotals, deferred, evidenceIn, formItems, itemName, missingItems, moreKey, nextBatch, nextItem, PHONE_OR_TABLET_KEY,
   phoneFromItems, sapsStepApplies,
@@ -402,7 +402,8 @@ type Out =
   | { kind: 'drop-answer'; key: string }
   | { kind: 'save-saps'; caseNumber?: string; station?: string }
   | { kind: 'file'; file: ClientFile; itemKey?: string }
-  | { kind: 'request-signature' }
+  /** `stillToCome` (TTTFG-5212): the client still owes something, so a link that goes doesn't move the claim to Form sent. */
+  | { kind: 'request-signature'; stillToCome?: boolean }
   | { kind: 'status'; status: 'Awaiting client docs' }
   /** `forTtt` (TTTFG-4830, 29 Oct 2026): what the insurer still needs that Tina doesn't ask the client for (forTtt()). */
   | { kind: 'evidence-complete'; forTtt?: QuestionItem[] }
@@ -519,6 +520,13 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
     const onOptional = !next.required && !st.signingRequested;
     return { ...st, phase: 'items', asking: next.key, misses: 0, ...(onOptional ? { waitingFor: 'optional' as const } : {}) };
   }
+  // TTTFG-5212 AC 8: everything has been asked and the client still owes something, so the claim waits on them, link or
+  // no link, and the morning reminder keeps going (reminder.ts REMINDED_STATUSES). Form sent is for a claim with nothing
+  // left to come. Pack complete and Additional info requested aren't in BEFORE_EVIDENCE, so they are never set back.
+  if (missing.length && BEFORE_EVIDENCE.includes(c.claim.status)) {
+    out.push({ kind: 'status', status: 'Awaiting client docs' });
+    st = { ...st, evidenceStarted: true };
+  }
   const ttt = forTtt(c.form, w);
   const complete: Out = { kind: 'evidence-complete', ...(ttt.length ? { forTtt: ttt } : {}) };
   if (st.signingRequested) {
@@ -538,7 +546,7 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
   out.push({ kind: 'closing' });
   if (missing.length) out.push({ kind: 'still-missing', items: missing, lead: '' });
   const ready = (signature: SignatureStatus) => readyToRegister(c.claim, missing, signature, ttt);
-  out.push({ kind: 'request-signature' }, { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), template: READY_TO_REGISTER });
+  out.push({ kind: 'request-signature', ...(missing.length ? { stillToCome: true } : {}) }, { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), template: READY_TO_REGISTER });
   return missing.length ? stillNeedState(c, { ...st, signingRequested: true }, missing) : null;
 }
 
@@ -2115,7 +2123,7 @@ export async function followOnTurn(
         break;
       case 'request-signature':
         if ((await ports.requestClaimSignature(claimId)) === 'sent') {
-          await setStatus('Form sent');
+          if (!o.stillToCome) await setStatus('Form sent');
           signature = 'Link sent';
         }
         break;
@@ -2201,7 +2209,7 @@ async function sendClaimText(ports: FollowOnPorts, conv: Conversation, text: str
   if (!gate.ok) {
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
-      detail: `Tina's reply on claim ${claim.reference} was blocked by the ${gate.rule} rule ("${gate.matched}"). The client got the holding line. Please update them.`,
+      detail: `Tina's reply on claim ${claim.reference} was blocked by ${blockedBy(gate)}. The client got the holding line. Please update them.`,
     });
   }
   await ports.send(conv.phone, { kind: 'text', text: gate.text, ...(gate.ok && choices?.length ? { choices } : {}) });

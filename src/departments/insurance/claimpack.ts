@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed and every required item is in, the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -31,6 +31,7 @@ import { PDFDocument, StandardFonts, type PDFPage } from 'pdf-lib';
 import { DEPARTMENT, PACK_FOLLOW_UP, type AgentActionRow, type Owner } from './claim';
 import type { ClaimAnswers, ClaimForm, QuestionItem } from './contracts';
 import { formatText, type CrmValues } from './fill';
+import { CLAIM_TO_INSURER_TEMPLATE } from './templates';
 import type { ClaimStatus, SignatureStatus } from './followon';
 import { applies, evidenceIn, formItems, itemName, type ClaimFacts, type ReceivedEvidence } from './progress';
 import { sha256 } from './signing';
@@ -114,7 +115,15 @@ export interface PackClaim extends ScoreClaim {
   reasonBelow100: string | null;
   /** riivo_claim.riivo_channel: where the claim came in; the Review item carries it. */
   channel: 'email' | 'whatsapp' | null;
+  /** TTTFG-5204: how the insurer takes claims (riivo_provider.riivo_claimschannel) and where (riivo_claimsemail). */
+  insurerRoute: InsurerRoute;
 }
+
+/** How an insurer takes claims. A provider with no channel set is treated as a portal: nothing is ever emailed to it. */
+export interface InsurerRoute { channel: 'Portal' | 'Email' | null; claimsEmail: string | null }
+
+/** TTTFG-5204 AC 8: the email to the insurer, shown on the Review item for the broker to approve. */
+export interface InsurerEmail { to: string; subject: string; text: string }
 
 export interface PackFileRow { claimId: string; contactId: string; fileName: string; fileRef: string; fileHash: string }
 
@@ -135,6 +144,8 @@ export interface PackContext {
   evidence: PackEvidence[];
   /** The same in one paragraph, for a pane that shows text. */
   text: string;
+  /** TTTFG-5204 AC 8: for an insurer that takes claims by email. The pack above is its attachment. */
+  insurerEmail?: InsurerEmail;
 }
 
 export interface PackItemRow {
@@ -171,9 +182,10 @@ export interface ClaimPackPorts {
   createPackItem(row: PackItemRow): Promise<{ id: string }>;
   /**
    * riivo_claimstatus Pack complete and riivo_packcompleteon, and riivo_submittedbelow100reason cleared: a reason is
-   * for one pack, so the new one needs its own. The cover columns are left as they are (TTTFG-5204).
+   * for one pack, so the new one needs its own. The cover columns are left as they are (TTTFG-5204). `insurerEmail`:
+   * riivo_insurercontactemail, which My Day reads to show a pack as going by email (TTTFG-5060).
    */
-  setPackComplete(claimId: string, at: string): Promise<void>;
+  setPackComplete(claimId: string, at: string, insurerEmail?: string): Promise<void>;
   createAgentAction(row: AgentActionRow): Promise<unknown>;
   /** Whether the claim owner already has an open claim pack Follow-up (PACK_FOLLOW_UP) on this claim. */
   packFollowUpOpen(claimId: string): Promise<boolean>;
@@ -246,6 +258,8 @@ export async function updateClaimPack(ports: ClaimPackPorts, claimId: string, at
     fileName = pack.fileName;
     const flags = await ports.openFlags(claim.id);
     const context = packContext(claim, c, flags, pack);
+    const email = insurerEmailFor(claim);
+    if (email) context.insurerEmail = email;
     // AC 9: the earlier item first, so a failure in between never leaves two live pack items. Without a pack complete
     // time the earlier item is this signature's own, from a run that didn't finish: it was made again, not re-signed.
     stage = 'item';
@@ -266,7 +280,7 @@ export async function updateClaimPack(ports: ClaimPackPorts, claimId: string, at
     // Never before the signature: the signing page keeps its own clock, and a pack stamped before its signature would
     // look like an earlier signature's (noPack) and be made again.
     const stamp = claim.signedOn && Date.parse(claim.signedOn) > Date.parse(at) ? claim.signedOn : at;
-    await ports.setPackComplete(claim.id, stamp);
+    await ports.setPackComplete(claim.id, stamp, email?.to);
     return { score: c.score, built: { ...pack, itemId, superseded } };
   } catch (err) {
     const msg = String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').slice(0, 300);
@@ -335,6 +349,22 @@ export async function buildPack(ports: ClaimPackPorts, claim: PackClaim): Promis
 }
 
 /** AC 6, 7: what the broker reads beside the pack. The flags are here, and only here: never in the pack. */
+/**
+ * TTTFG-5204 AC 8: the email for an insurer that takes claims by email, or null. The address is the insurer's record's, by
+ * code; the wording is the template's. One with no address gets no email here, and its approval says why (submit.ts).
+ */
+export function insurerEmailFor(claim: Pick<PackClaim, 'insurerRoute' | 'contactName' | 'insurer' | 'reference' | 'claimType' | 'crm'>): InsurerEmail | null {
+  const to = claim.insurerRoute.claimsEmail?.trim();
+  if (claim.insurerRoute.channel !== 'Email' || !to) return null;
+  const policy = claim.crm.riivo_policy?.riivo_policy_no;
+  const incident = claim.crm.riivo_claim?.riivo_incidentdate;
+  const vars = {
+    clientName: claim.contactName, policyNumber: policy ? String(policy) : null, reference: claim.reference, claimType: claim.claimType, insurer: claim.insurer,
+    incidentDate: incident ? String(incident) : null,
+  };
+  return { to, subject: CLAIM_TO_INSURER_TEMPLATE.subject(vars), text: CLAIM_TO_INSURER_TEMPLATE.render(vars) };
+}
+
 export function packContext(claim: Pick<PackClaim, 'id' | 'reference'>, c: Completeness, flags: ClaimFlag[], pack: BuiltPack): PackContext {
   const missing = [...new Set(c.missing.map(itemName))];
   const text = [

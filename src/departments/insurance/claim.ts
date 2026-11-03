@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -7,7 +7,7 @@
 // Seam for tests: ClaimPorts. Dataverse, WhatsApp and the clock are faked there. The real adapters come with
 // TTTFG-4885 (riivo_claim, riivo_provider.riivo_assistnumber) and the SPEC-05 story that loads department packages
 // into Tina (epic TTTFG-4830).
-import { claimGate } from './gate';
+import { blockedBy, claimGate } from './gate';
 import {
   advance, askedKey, atNight, complete, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
   STOPPED_TEXT, VOICE_OR_TEXT,
@@ -42,7 +42,8 @@ export interface ClaimRow {
   contactId: string;
   policyId: string;
   providerId: string;
-  claimType: ClaimType;
+  /** TTTFG-5188 AC 4: on an email claim, a detail the email doesn't state stays blank, so these may be absent. */
+  claimType?: ClaimType;
   reportedOn: string;
   /** TTTFG-5562: not yet known on a claim opened for the guided form, which asks them. */
   incidentAt?: string;
@@ -53,7 +54,7 @@ export interface ClaimRow {
   saps?: boolean;
   injuries?: boolean;
   injuryDetails?: string;
-  channel: 'WhatsApp';
+  channel: 'WhatsApp' | 'Email';
   status: 'FNOL logged';
   lastClientMessageOn: string;
   owner: Owner;
@@ -61,6 +62,8 @@ export interface ClaimRow {
 
 /** A riivo_agentaction row: the audit trail (SPEC-04 "AI governance") and the follow-ups (SPEC-05 "Follow-ups"). */
 export interface AgentActionRow {
+  /** TTTFG-5267: a row id from a key, so a second write with it is refused. Absent: Dataverse gives it one. */
+  id?: string;
   kind: 'Created' | 'Follow-up';
   department: typeof DEPARTMENT;
   owner: Owner;
@@ -72,8 +75,12 @@ export interface AgentActionRow {
   urgent?: true;
   /** TTTFG-4830: why it is urgent (riivo_urgencyreason), when it isn't the 5168 one (someone hurt, no assist number). */
   urgencyReason?: string;
-  /** TTTFG-5212: the channel the row is about (riivo_channel). Absent: WhatsApp, Tina's. */
-  channel?: 'WhatsApp' | 'Email';
+  /** TTTFG-5212: the channel the row is about (riivo_channel). Absent: WhatsApp, Tina's. Null: the claim has none (TTTFG-5208). */
+  channel?: 'WhatsApp' | 'Email' | null;
+  /** TTTFG-5188: the Outlook thread the row came from (riivo_conversationid), so a later email in it finds the claim. */
+  conversationId?: string;
+  /** TTTFG-5188: riivo_subject, when it isn't a template's name and version. */
+  subject?: string;
   at: string;
   /**
    * For a template send: which template and which version went out, and the text exactly as sent. For a Follow-up in
@@ -131,6 +138,9 @@ export interface Conversation {
   contactNumber?: string;
 }
 
+/** The AI disclosure, the same words on WhatsApp and by email. */
+export const AI_HANDLING_LINE = 'TTT uses AI tools to enhance your experience. Your claim will be reviewed by a broker at TTT.';
+
 /**
  * TTTFG-5168 AC 8: the acknowledgement. Fixed text filled with CRM data; Claude writes none of it, because the AI
  * disclosure is a POPIA and TCF requirement and a generated acknowledgement drops or rewords it on some runs.
@@ -145,8 +155,7 @@ export const FNOL_TEMPLATE = {
   version: 'draft-3',
   approved: false,
   render: (v: { firstName: string; reference: string }) =>
-    `Thanks ${v.firstName}, your claim is logged. Your claim reference is *${v.reference}*.\n\n` +
-    'TTT uses AI tools to enhance your experience. Your claim will be reviewed by a broker at TTT.',
+    `Thanks ${v.firstName}, your claim is logged. Your claim reference is *${v.reference}*.\n\n${AI_HANDLING_LINE}`,
 } as const;
 
 /** SPEC-05 "Unknown numbers": the one reply an unknown number gets. */
@@ -755,7 +764,7 @@ export async function sendText(
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner,
       regarding: claim ? { table: 'riivo_claim', id: claim.id } : { table: 'riivo_request', id: conv.requestId }, contactId,
-      detail: `Tina's reply was blocked by the ${gate.rule} rule ("${gate.matched}"). The client got the holding line. Please update them.`,
+      detail: `Tina's reply was blocked by ${blockedBy(gate)}. The client got the holding line. Please update them.`,
       at,
     });
   }

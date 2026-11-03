@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -10,7 +10,8 @@
 // Per open claim of the client, a reminder goes out when (AC 1, 8):
 // - the claim is at Awaiting client docs or Additional info requested (REMINDED_STATUSES). Tina sets Awaiting client
 //   docs when she starts on the evidence, so a client who stopped part way through the form's questions (FNOL logged)
-//   isn't reminded;
+//   isn't reminded. A claim stays there when the signing link goes with something still to come: Form sent is for a
+//   claim with nothing left to come (followon.ts proceed), and gets no message but the link;
 // - something is still needed (missingItems): the items the client can get, by name; on a claim the client left half
 //   way, the questions still open, counted;
 // - it is day `fromDay` (1) or later, and before `stopAfterDays` (10). The reminders stop there and the claim goes to

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/gate.ts (commit e7d5b7b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/gate.ts (commit c7c179a). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168 AC 9: the claim-outcome rule of the policy gate (SPEC-04 "Policy gate", SPEC-05 "What Tina may and may
 // not do"). Tina never says a claim is accepted, approved, paid or settled: that is the insurer's decision and the
@@ -32,15 +32,35 @@ const RULES: RegExp[] = [
   /\b(?:claim approval|approved claim|your payout|payout of)\b/gi,
 ];
 
+// TTTFG-5204 AC 3: the cover position. Whether a claim is covered is the broker's decision (TTT's claims guide; the FAIS
+// General Code of Conduct, POPIA section 71), so the agent never says it either way, to the client or in a draft. A form's
+// own question never matches ("Is the vehicle covered by another insurer?", "Does your policy cover this?"): every rule
+// below states cover as a fact.
+const COVERED_THING = '(?:claim|loss|damage|incident|accident|theft|event|vehicle|car|item|items|it|this|that)';
+const COVER_RULES: RegExp[] = [
+  // "you're covered", "you are fully covered", "you'll be covered"
+  /\byou(?:'re|'ll be| are| will be| would be| should be)\s+(?:not\s+|fully\s+|also\s+|still\s+|definitely\s+)?covered\b/gi,
+  // "your claim is covered", "this is not covered", "it's covered", "the damage will be covered"
+  new RegExp(`\\b${COVERED_THING}\\b[^.?!\\n]{0,30}?\\b(?:is|are|was|will be|would be|should be)\\s+(?:not\\s+|fully\\s+|also\\s+|still\\s+|definitely\\s+)?covered\\b`, 'gi'),
+  new RegExp(`\\b${COVERED_THING}'s\\s+(?:not\\s+|fully\\s+|also\\s+|still\\s+|definitely\\s+)?covered\\b`, 'gi'),
+  // "isn't covered", "won't be covered", "you're not covered" and any other denial
+  /\b\w+n't\s+(?:be\s+|been\s+)?covered\b|\bnot\s+(?:be\s+|being\s+|been\s+|fully\s+|yet\s+)?covered\b/gi,
+  // "covered under your policy", "your policy covers this", "the insurer will cover it"
+  /\bcovered\s+(?:under|by)\s+(?:your|the|this)\s+(?:policy|cover|plan|insurance)\b/gi,
+  /\b(?:policy|cover|insurance|insurer|plan)\s+(?:covers|will cover|would cover|should cover|does cover)\s+(?:this|it|that|the|your)\b/gi,
+  // "this is excluded", "excluded under your policy", "an exclusion applies"
+  /\bexcluded\b|\bexclusions?\s+appl(?:y|ies)\b/gi,
+];
+
 /** A clause that only describes what may happen ("whether", "if", "once" before the match) states no outcome. */
 const CONDITIONAL = /\b(?:whether|if|once|when|until|unless|before|after)\b/i;
 
-function conditional(text: string, at: number): boolean {
+function conditional(text: string, at: number, words: RegExp = CONDITIONAL): boolean {
   const clauseStart = Math.max(text.lastIndexOf('.', at - 1), text.lastIndexOf('?', at - 1), text.lastIndexOf('!', at - 1), text.lastIndexOf('\n', at - 1), text.lastIndexOf(',', at - 1));
-  return CONDITIONAL.test(text.slice(clauseStart + 1, at));
+  return words.test(text.slice(clauseStart + 1, at));
 }
 
-export type GateRule = 'claim-outcome' | 'claim-risk';
+export type GateRule = 'claim-outcome' | 'claim-cover' | 'claim-risk';
 export type GateResult = { ok: true; text: string } | { ok: false; text: string; rule: GateRule; matched: string };
 
 export function claimOutcomeGate(text: string): GateResult {
@@ -48,6 +68,22 @@ export function claimOutcomeGate(text: string): GateResult {
   for (const rule of RULES) {
     for (const m of flat.matchAll(rule)) {
       if (!conditional(flat, m.index)) return { ok: false, text: HOLDING_LINE, rule: 'claim-outcome', matched: m[0] };
+    }
+  }
+  return { ok: true, text };
+}
+
+/**
+ * TTTFG-5204 AC 3. An open question passes: "whether it's covered is your broker's decision". Only the words that leave it
+ * open, unlike the outcome rule: "we checked after your call and you're covered" states a position.
+ */
+const OPEN_QUESTION = /\b(?:whether|if|unless)\b/i;
+
+export function claimCoverGate(text: string): GateResult {
+  const flat = text.replace(/[’‘]/g, "'");
+  for (const rule of COVER_RULES) {
+    for (const m of flat.matchAll(rule)) {
+      if (!conditional(flat, m.index, OPEN_QUESTION)) return { ok: false, text: HOLDING_LINE, rule: 'claim-cover', matched: m[0] };
     }
   }
   return { ok: true, text };
@@ -105,8 +141,23 @@ export function claimRiskGate(text: string): GateResult {
   return { ok: true, text };
 }
 
-/** Every outbound Tina claim text: the claim-outcome rule, then the claim-risk rule. */
+/** Every outbound Tina claim text: the claim-outcome rule, the cover rule, then the claim-risk rule. */
 export function claimGate(text: string): GateResult {
-  const outcome = claimOutcomeGate(text);
+  const outcome = claimDraftGate(text);
   return outcome.ok ? claimRiskGate(text) : outcome;
 }
+
+/**
+ * TTTFG-5204 (Implementation step 5): a draft reply on a claim, for the broker to approve: the outcome and cover rules.
+ * The risk rule stays Tina's: a broker may write about a late claim, and reads the draft before it goes.
+ */
+export function claimDraftGate(text: string): GateResult {
+  const outcome = claimOutcomeGate(text);
+  return outcome.ok ? claimCoverGate(text) : outcome;
+}
+
+/**
+ * For the broker's Follow-up when a reply is blocked: the rule, and what tripped it. Not for the cover rule: the Follow-up
+ * would then state the position the gate just stopped (TTTFG-5204, Implementation step 5).
+ */
+export const blockedBy = (gate: Extract<GateResult, { ok: false }>) => (gate.rule === 'claim-cover' ? `the ${gate.rule} rule` : `the ${gate.rule} rule ("${gate.matched}")`);
