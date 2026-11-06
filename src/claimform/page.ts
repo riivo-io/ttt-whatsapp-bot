@@ -705,6 +705,11 @@ const SCRIPT = String.raw`
             if (filled(draft[k])) answers.push({ key: k, value: draft[k] });
             else if (A[k] !== undefined) cleared.push(k);
           });
+          // The count the client sees is their answer, even untouched: "1" came from what they told Tina, so the
+          // "is there another?" after the last card is a no. Without it the server holds that question open and
+          // Submit keeps sending them back to this step.
+          var n = stepCount(f, f.control), last = f.control.group + '.more.' + n;
+          if (v === true && n < stepMax(f.control) && !filled(value(last))) answers.push({ key: last, value: false });
         }
         if (filled(v)) {
           if (v !== A[f.key] || NK[f.key]) answers.push({ key: f.key, value: v });
@@ -901,6 +906,13 @@ const SCRIPT = String.raw`
     busy = true; submitting = true; $('next').disabled = true;
     $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(function (u) { return u.state === 'up'; }) ? 'Uploading your photos…' : 'Submitting…');
     whenIdle(function () {
+      // A problem on a question that no longer shows (the second person's phone, after the count went back to one) has
+      // nothing to fix: the server dropped that answer. Kept, it would send the client to that step on every Submit.
+      Object.keys(problems).forEach(function (k) {
+        var f = FIELD[k];
+        if (f && (f.hidden || !shows(f))) { delete problems[k]; delete errors[k]; }
+      });
+      drawNotice();
       var open = Object.keys(problems);
       if (open.length) { busy = false; submitting = false; goFix(open[0]); return; }
       $('next').innerHTML = '<span class="spin"></span>Submitting…';
@@ -909,9 +921,14 @@ const SCRIPT = String.raw`
         if (r.open && r.open.length) {
           var go = function () {
             var target = null;
-            V.screens.forEach(function (s, i) { if (target === null && s.fields.some(function (f) { return shows(f) && !f.hidden && r.open.indexOf(f.key) >= 0; })) target = i; });
-            if (target === null) return location.reload();
-            here = { id: 'screen', i: target, anchor: anchorFor(target, function (f) { return r.open.indexOf(f.key) >= 0; }) };
+            // A hidden "is there another?" is answered by the count of people above the cards, so that's where they go.
+            var asks = function (f) {
+              return r.open.indexOf(f.key) >= 0 || (f.control.kind === 'stepper' && r.open.some(function (k) { return k.indexOf(f.control.group + '.more.') === 0; }));
+            };
+            V.screens.forEach(function (s, i) { if (target === null && s.fields.some(function (f) { return shows(f) && !f.hidden && asks(f); })) target = i; });
+            // Nothing on the page asks it: reloading would only land on the same step again, so it says so instead.
+            if (target === null) { errors = { submit: 'Something on the form still needs an answer. Please ask ' + (V.emailed ? 'your broker' : 'Tina') + ' for help.' }; return render(); }
+            here = { id: 'screen', i: target, anchor: anchorFor(target, asks) };
             errors = {};
             render();
           };
