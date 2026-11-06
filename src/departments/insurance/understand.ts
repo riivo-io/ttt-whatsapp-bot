@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 0320d02). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit ff8e5de). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Claude reads one WhatsApp message from the client and says what it means for the step Tina is on. Code
 // decides what happens next (walkthrough.ts). This is the "use Claude only to understand each answer" half of the
@@ -13,7 +13,7 @@
 //
 // Pure, apart from the model port. No zod: the host (the email agent or Tina) may pin a different zod major.
 import {
-  atNight, CANCEL_WORDS, CLAIM_TYPES, isGeyser, isTheft, missingFor, partOfDay, QUESTION_HELP, questionHelp, sastInstant, sastParts,
+  atNight, CANCEL_WORDS, CLAIM_TYPES, isGeyser, isTheft, MIN_DESCRIPTION_WORDS, missingFor, partOfDay, QUESTION_HELP, questionHelp, sastInstant, sastParts,
   SPOKEN_HELP, STOP_HELP,
   type Answer, type ClaimType, type Fact, type Facts, type Step, type WalkthroughState,
 } from './walkthrough';
@@ -65,8 +65,9 @@ const STEP_HELP: Record<Step, string> = {
     + 'ask to wait. Use kind "facts" when they already say what happened, when or where, and set those fields.',
   danger: 'Tina asked whether anyone is hurt or in danger right now. Use kind "yes" or "no". Anything that says someone is hurt, '
     + 'injured, trapped, bleeding, unsafe or in danger now is "yes".',
-  'claim-type': 'Tina asked what kind of claim it is. Use kind "facts" and set claimType. Also set any other fields the client '
-    + 'mentions. A stolen car is Motor theft; a car taken at gunpoint or by force is Hijacking; damage at home (geyser, storm, '
+  'claim-type': 'Tina asked what kind of claim it is, or what happened in a few words. Use kind "facts" and set claimType from '
+    + 'what the client says happened ("someone crashed into my car" is Motor accident; "someone stole my TV" is Property loss or '
+    + 'damage), and description in their words. Also set any other fields the client mentions. A stolen car is Motor theft; a car taken at gunpoint or by force is Hijacking; damage at home (geyser, storm, '
     + 'break-in) is Property loss or damage; a lost or stolen phone, laptop, bag or jewellery carried away from home is Portable '
     + 'possessions.',
   incident: 'Tina asked what happened, when and where. Use kind "facts".',
@@ -325,8 +326,6 @@ export async function understand(
   return { kind: 'facts', facts: { ...(answer.kind === 'facts' ? answer.facts : {}), contractor } };
 }
 
-/** A first message this short isn't the client's account of what happened (TTTFG-4830): Tina still asks for it. */
-const MIN_OPENING_DESCRIPTION_WORDS = 8;
 
 /**
  * TTTFG-4830 (28 Oct 2026): what the client's first message already says about the incident ("my car was hit at the
@@ -341,7 +340,7 @@ export async function openingFacts(model: UnderstandModel, text: string, now: Da
   if (read.kind !== 'facts') return { facts: {} };
   const facts = { ...read.facts };
   let opening: string | undefined;
-  if (facts.description && facts.description.split(/\s+/).length < MIN_OPENING_DESCRIPTION_WORDS) {
+  if (facts.description && facts.description.split(/\s+/).length < MIN_DESCRIPTION_WORDS) {
     opening = facts.description;
     delete facts.description;
   }

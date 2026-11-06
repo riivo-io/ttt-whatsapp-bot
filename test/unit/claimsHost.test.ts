@@ -190,7 +190,7 @@ test('TTTFG-4830 (28 Oct 2026): the opening is read before the walkthrough start
     assert.equal(w.reads.length, 1);
     assert.equal(w.reads[0].sentBefore, 0);
     assert.match(w.reads[0].user, /Someone broke into my house last night/);
-    assert.deepEqual(w.texts(), ['Is this claim about your Discovery Insure Household policy (DI-HOME)?']);
+    assert.deepEqual(w.texts(), ['That sounds like a claim on your Discovery Insure Household policy (DI-HOME). Is that right?']);
     const s = w.store.get(PHONE)!.state;
     assert.deepEqual(s.policies.map((p) => p.id), ['p-home']);
     assert.deepEqual(s.allPolicies?.map((p) => p.id), ['p-car', 'p-home'], 'the motor policy is kept, in case the client says no');

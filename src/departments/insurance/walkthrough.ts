@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 0320d02). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit ff8e5de). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -29,6 +29,12 @@
 //
 // Only a WhatsApp number on the CRM can open a claim (decided 9 October 2026): an unknown number gets the
 // unknown-number reply, no claim and no follow-up. Tina never asks for an ID number or a policy number.
+//
+// What happened comes before the policy (6 Nov 2026): a client with more than one policy who hasn't said what happened
+// is asked that first, in their own words ("someone stole my TV"; no list to pick from). Tina works out the kind of
+// claim from it and offers the policies that fit, each with what happened in front ("Theft – Hybrid"), so the client
+// can see which policy the claim goes on (most of TTT's clients with two policies have two "Personal" ones, which
+// product names can't tell apart). A client with one policy is asked to confirm it first, as before.
 //
 // Pure: no reads, no clock. claim.ts does the I/O.
 
@@ -128,6 +134,8 @@ export interface WalkthroughState {
   allPolicies?: Policy[];
   /** TTTFG-4830: the policy was checked against the kind of claim once (it is never asked about again). */
   policyChecked?: true;
+  /** 6 Nov 2026: the safety line went with the reply to what happened, asked before the policy (it goes once). */
+  safetySent?: true;
 }
 
 /** What Claude understood from the client's message. Code decides what happens next. */
@@ -159,7 +167,7 @@ export type Say =
   /** `tries`: how often each question in it was asked before this time (askedKey); absent or 0 is the first time. */
   /** `assist` (TTTFG-4830): the plumber question, with the insurer's assist line in front (WalkthroughState.assistSent). */
   | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true; tries?: Record<string, number>; assist?: true }
-  /** TTTFG-4830: what to do if anyone is hurt or in danger. Said once, at the start of the reply to the policy. */
+  /** TTTFG-4830: what to do if anyone is hurt or in danger. Said once, at the start of the reply to the first question. */
   | { kind: 'safety' }
   /** TTTFG-4830: the answer to the client's question about what Tina asked (Answer 'question'), before she asks again. */
   | { kind: 'help'; text: string }
@@ -272,18 +280,47 @@ const HOME_TYPES: readonly ClaimType[] = ['Property loss or damage', 'Portable p
  */
 export function policyFits(p: Policy, t?: ClaimType): boolean | undefined {
   if (!t) return undefined;
+  const kind = policyKind(p);
+  if (!kind) return undefined;
+  if (MOTOR_TYPES.includes(t)) return kind === 'motor';
+  if (HOME_TYPES.includes(t)) return kind === 'home';
+  return undefined;
+}
+
+/**
+ * What the policy is for, by its product name: 'motor' (a car) or 'home' (the home and belongings). undefined when the
+ * name doesn't say: "Personal" (most of TTT's policies, 6 Nov 2026) or "Commercial" can be either.
+ */
+export function policyKind(p: Policy): 'motor' | 'home' | undefined {
   const motor = /\b(motor|vehicle|car|auto)/i.test(p.product);
   const home = /\b(household|home|house|building|contents|property|all ?risks?|portable)/i.test(p.product);
-  if (motor === home) return undefined;
-  if (MOTOR_TYPES.includes(t)) return motor;
-  if (HOME_TYPES.includes(t)) return home;
-  return undefined;
+  return motor === home ? undefined : motor ? 'motor' : 'home';
 }
 
 /** The policies that fit the claim, when that leaves some out but not all; otherwise all of them. */
 function fitting(policies: Policy[], t?: ClaimType): Policy[] {
   const fit = policies.filter((p) => policyFits(p, t) !== false);
   return fit.length ? fit : policies;
+}
+
+/** A first account this short isn't the client's account of what happened (TTTFG-4830): Tina still asks for it. */
+export const MIN_DESCRIPTION_WORDS = 8;
+
+/**
+ * 6 Nov 2026: what happened, as a short label in front of each policy Tina offers ("Theft – Hybrid"). Empty when the
+ * kind of claim isn't known or is "Other".
+ */
+export function incidentLabel(f: Facts, opening?: string): string {
+  const theft = isTheft(f, opening);
+  switch (f.claimType) {
+    case 'Motor accident': return 'Car accident';
+    case 'Motor theft': return 'Car theft';
+    case 'Hijacking': return 'Hijacking';
+    case 'Windscreen': return 'Windscreen';
+    case 'Property loss or damage': return theft ? 'Theft' : isGeyser(f, opening) ? 'Burst geyser' : 'Damage at home';
+    case 'Portable possessions': return theft ? 'Theft' : 'Lost item';
+    default: return '';
+  }
 }
 
 /** TTTFG-4830: a question that has been asked this often without an answer (WalkthroughState.misses) is left for the broker. */
@@ -502,7 +539,8 @@ export function sastParts(iso: string): { date: string; time: string } {
  * already said about this incident (TTTFG-5184: the message that made Tina ask "Is this a new claim?"; TTTFG-4830: the
  * first message, read before the policy question), so the later steps don't ask it again. `opening`: a first message
  * too short to keep as the description (WalkthroughState.opening). TTTFG-4830 (28 Oct 2026): when the kind of claim is
- * known, only the policies that fit it are offered.
+ * known, only the policies that fit it are offered. 6 Nov 2026: with more than one policy and the kind of claim not
+ * known, what happened is asked first.
  */
 export function start(contact: { id: string; firstName: string } | null, policies: Policy[], known: Facts = {}, opening?: string, guided?: boolean): Turn {
   if (!contact) return { state: null, say: [{ kind: 'unknown-number' }], effects: [] };
@@ -515,12 +553,13 @@ export function start(contact: { id: string; firstName: string } | null, policie
   }
   const facts = merge({}, known, opening);
   const offered = fitting(policies, facts.claimType);
+  const step: Step = !facts.claimType && policies.length > 1 ? 'claim-type' : 'policy';
   const state: WalkthroughState = {
-    contactId: contact.id, firstName: contact.firstName, policies: offered, step: 'policy', facts,
+    contactId: contact.id, firstName: contact.firstName, policies: offered, step, facts,
     ...(opening ? { opening } : {}), ...(offered.length < policies.length ? { allPolicies: policies } : {}),
     ...(guided ? { guided: true as const } : {}),
   };
-  const first = counted(state, ask('policy', {}));
+  const first = counted(state, ask(step, facts, opening));
   return { state: first.state, say: [first.say], effects: [] };
 }
 
@@ -551,13 +590,25 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
   const same = (): Turn => askIn(state);
   // TTTFG-4830 (QC): a reply Tina couldn't read. She says so, and the rest of a list of questions goes one at a time.
   const missed = (s: WalkthroughState): Turn => askIn({ ...s, oneByOne: s.step }, [{ kind: 'lead', text: NOT_UNDERSTOOD }]);
-  // The safety line goes with the first reply to the policy question only, not when Tina asks again after a mismatch.
-  const safety = (): Say[] => (state.onSceneSent || state.policyChecked ? [] : [{ kind: 'safety' }]);
+  // The safety line goes with the reply to Tina's first question only (the policy, or what happened when that is asked
+  // first), not when she asks the policy again after a mismatch. A policy chosen before what happened means it went.
+  const safetyGone = (s: WalkthroughState) => !!(s.onSceneSent || s.policyChecked || s.safetySent || s.policyId);
+  const safety = (): Say[] => (safetyGone(state) ? [] : [{ kind: 'safety' }]);
+  /** The state and what goes in front, for the reply to what happened (6 Nov 2026: asked before the policy). */
+  const firstReply = (s: WalkthroughState, before: Say[] = []): Turn =>
+    safetyGone(s) ? toReady(s, before) : toReady({ ...s, safetySent: true }, [{ kind: 'safety' }, ...before]);
   // TTTFG-4830: once the kind of claim is known, the on-scene checklist (once), and Tina waits for "ready" before the
   // questions about what happened. Until it's known, the claim type is asked first. A policy that doesn't fit the kind
   // of claim (a break-in on the motor policy) is checked once, against the policies that do.
   const toReady = (s: WalkthroughState, before: Say[] = []): Turn => {
     if (!s.facts.claimType) return askIn({ ...s, step: 'claim-type' }, before);
+    // 6 Nov 2026: what happened came first, so now the policy, from those that fit it.
+    if (!s.policyId) {
+      const { allPolicies: _a, ...base } = s;
+      const all = s.allPolicies ?? s.policies;
+      const offered = fitting(all, s.facts.claimType);
+      return askIn({ ...base, step: 'policy', policies: offered, ...(offered.length < all.length ? { allPolicies: all } : {}) }, before);
+    }
     const chosen = s.policies.find((p) => p.id === s.policyId);
     const all = s.allPolicies ?? s.policies;
     if (chosen && !s.policyChecked && policyFits(chosen, s.facts.claimType) === false && all.some((p) => policyFits(p, s.facts.claimType) !== false)) {
@@ -648,8 +699,21 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
         const s = missedOn(state);
         return giveUp(s) ?? missed(s);
       }
+      // 6 Nov 2026: what happened, asked before the policy, comes in a few words ("someone stole my TV"). Like a short
+      // first message, that isn't the client's account yet: it says what kind of claim it is, and Tina still asks for it.
+      const short = state.step === 'claim-type' && !state.policyId && !state.facts.description
+        && answer.facts.description && answer.facts.description.split(/\s+/).length < MIN_DESCRIPTION_WORDS ? answer.facts.description : undefined;
+      if (short) {
+        const opening = [state.opening, short].filter(Boolean).join(' ');
+        const { description: _d, ...said } = answer.facts;
+        const facts = merge(state.facts, said, opening);
+        if (facts.claimType) return firstReply({ ...state, facts, opening });
+        // No kind of claim in it: a miss, as any reply that doesn't answer; the words are kept to read the next one by.
+        const s = missedOn({ ...state, opening });
+        return giveUp(s) ?? missed(s);
+      }
       const facts = merge(state.facts, answer.facts, state.opening);
-      if (state.step === 'claim-type' && facts.claimType) return toReady({ ...state, facts });
+      if (state.step === 'claim-type' && facts.claimType) return firstReply({ ...state, facts });
       // Nothing new (Claude repeated what Tina already had): a miss too.
       if (sameFacts(facts, state.facts)) {
         const s = missedOn(state);
@@ -709,7 +773,7 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     if (!Object.keys(stand).length) return undefined;
     const facts = merge(s.facts, stand, s.opening);
     const next = { ...s, facts };
-    if (s.step === 'claim-type' && facts.claimType) return toReady(next, [{ kind: 'not-known' }]);
+    if (s.step === 'claim-type' && facts.claimType) return firstReply(next, [{ kind: 'not-known' }]);
     return askIn({ ...next, step: nextFactStep(facts, s.opening) }, [{ kind: 'not-known' }]);
   }
 }

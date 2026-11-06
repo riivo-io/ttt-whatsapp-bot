@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 0320d02). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit ff8e5de). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -13,7 +13,8 @@
 //   isn't reminded. A claim stays there when the signing link goes with something still to come: Form sent is for a
 //   claim with nothing left to come (followon.ts proceed), and gets no message but the link;
 // - something is still needed (missingItems): the items the client can get, by name; on a claim the client left half
-//   way, the questions still open, counted;
+//   way, the questions still open, counted. A claim marked evidence complete (riivo_evidencecomplete) is finished as far
+//   as the client is concerned, whatever the list works out later (SAPS required afterwards, say): no reminder, no broker step;
 // - it is day `fromDay` (1) or later, and before `stopAfterDays` (10). The reminders stop there and the claim goes to
 //   the broker as a call to make (below; TTTFG-5289 may move the day);
 // - it isn't Sunday in South Africa;
@@ -25,8 +26,8 @@
 // - a WhatsApp claim: the approved WhatsApp template (REMINDER_TEMPLATE), whatever the 24-hour window, the list in one
 //   line because a template variable can't hold line breaks. The host must have it (`template: true`), and Tina must
 //   not be waiting on "which claim?";
-// - an email claim: an email (REMINDER_EMAIL_TEMPLATE) through the host's `email` port (TTTFG-4973's templated sends).
-//   Tina has none, so an email claim gets no reminder from her, and never a WhatsApp one.
+// - an email claim: an email (REMINDER_EMAIL_TEMPLATE) through the host's `email` port. The email agent has one, and runs
+//   remindEmailClaims() each morning. Tina has none, so an email claim gets no reminder from her, and never a WhatsApp one.
 // Each reminder writes a Created agent action with the time, the template's name and version and the text as sent.
 //
 // The broker (the claim's owner) gets a Follow-up, from the same clock, per claim that would be reminded (AC 4, 5):
@@ -41,13 +42,13 @@
 // `still-need`), so a reply ("the case number is CAS 123/10/2026") is read against it. A claim the client left half way
 // keeps its state: the reply resumes the questions, as it would without a reminder. When two claims are reminded, the
 // state is left alone and a reply goes through "which claim?".
-import { DEPARTMENT, type Conversation } from './claim';
+import { DEPARTMENT, type Conversation, type Owner } from './claim';
 import {
   CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
   type StoredClaimForm,
 } from './followon';
 import { chased } from './progress';
-import { claimWords, isOpenClaim, type ResumePorts, type ResumeState } from './resume';
+import { claimWords, isOpenClaim, NO_RESUME_STATE, type ResumePorts, type ResumeState } from './resume';
 import { REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 export interface ReminderSettings extends ClaimSettings {
@@ -59,6 +60,8 @@ export interface ReminderSettings extends ClaimSettings {
   stopAfterDays?: number;
   /** The host can send REMINDER_TEMPLATE as an approved WhatsApp template. Without it no WhatsApp reminder goes. */
   template?: boolean;
+  /** The email agent's run: only the client's email claims are looked at. WhatsApp claims and their broker steps are Tina's. */
+  emailOnly?: boolean;
 }
 export const REMINDER_SETTINGS_DEFAULTS = { fromDay: 1, brokerAlertDays: 5, stopAfterDays: 10 } as const;
 
@@ -79,7 +82,7 @@ export type BrokerStep = 'alert' | 'call';
 export interface ReminderEmailPort {
   /** The client's first name, or null when they can't be emailed (no address, Do Not Email). */
   contact(contactId: string): Promise<{ firstName: string } | null>;
-  send(contactId: string, message: { subject: string; text: string }): Promise<void>;
+  send(contactId: string, message: { subject: string; text: string }, claim: { id: string; owner: Owner }): Promise<void>;
 }
 
 export interface ReminderPorts extends ResumePorts {
@@ -185,9 +188,10 @@ export async function remindTurn(
   let firstName: string | undefined;
   let lastSent: string | undefined;
   for (const o of open) {
+    const email = o.channel === 'Email';
+    if (settings.emailOnly && !email) continue;
     if (o.disputed) { outcomes.push({ reference: o.reference, skipped: 'disputed' }); continue; }
     if (!isReminded(o.status)) { outcomes.push({ reference: o.reference, skipped: 'status' }); continue; }
-    const email = o.channel === 'Email';
     const when: Today = !today.ok ? today
       : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
       // Tina asked "which claim?" or "is this a new claim?" and is waiting: a reminder now would cross it.
@@ -198,6 +202,7 @@ export async function remindTurn(
     if (!when.ok && !due) { outcomes.push({ reference: o.reference, skipped: when.skipped }); continue; }
 
     const claim = await ports.loadClaim(o.id);
+    if (claim.evidenceComplete) { outcomes.push({ reference: o.reference, skipped: 'nothing-needed' }); continue; }
     const form: StoredClaimForm = claim.claimFormId
       ? await ports.claimForm(claim.claimFormId)
       : (await ports.activeClaimForm(claim.providerId, claim.claimType)) ?? (await ports.genericClaimForm());
@@ -232,7 +237,7 @@ export async function remindTurn(
       if (!contact) { outcomes.push({ reference: o.reference, skipped: 'no-email-address', ...broker }); continue; }
       const vars = { firstName: contact.firstName, claim: label, lines, questionsLeft: missing.some((i) => !chased(i)) };
       const message = { subject: REMINDER_EMAIL_TEMPLATE.subject(vars), text: REMINDER_EMAIL_TEMPLATE.render(vars) };
-      await ports.email!.send(contactId, message);
+      await ports.email!.send(contactId, message, { id: claim.id, owner: claim.owner });
       await ports.createAgentAction({
         ...row, detail: `Reminder email sent for claim ${claim.reference}: ${lines.join('; ')}.`,
         template: { name: REMINDER_EMAIL_TEMPLATE.name, version: REMINDER_EMAIL_TEMPLATE.version, text: `${message.subject}\n\n${message.text}` },
@@ -262,4 +267,35 @@ export async function remindTurn(
     return { state: { followOn, pending: null }, outcomes, lastSent };
   }
   return { state, outcomes, lastSent };
+}
+
+export interface EmailReminderPorts extends ReminderPorts {
+  email: ReminderEmailPort;
+  /** The clients with an email claim at a reminded status. */
+  emailClaimClients(): Promise<string[]>;
+}
+
+/** AC 2: there is no conversation on an email claim, and emailOnly keeps remindTurn off the WhatsApp parts. */
+const NO_CONVERSATION: Conversation = { phone: '', requestId: '', signUpLink: '' };
+
+/**
+ * AC 2: one morning's email reminders and their broker steps, for every client with an email claim waiting on them. One
+ * client's failure (a mailbox refused) doesn't stop the others; nothing was recorded for the failed claim, so the next
+ * morning tries it again.
+ */
+export async function remindEmailClaims(ports: EmailReminderPorts, now: Date, settings: ReminderSettings = {}) {
+  const counts = { clients: 0, sent: 0, brokerSteps: 0, failed: 0 };
+  const errors: Array<{ contactId: string; error: string }> = [];
+  for (const contactId of await ports.emailClaimClients()) {
+    counts.clients++;
+    try {
+      const { outcomes } = await remindTurn(ports, NO_CONVERSATION, NO_RESUME_STATE, contactId, now, { ...settings, emailOnly: true });
+      counts.sent += outcomes.filter((o) => 'sent' in o).length;
+      counts.brokerSteps += outcomes.filter((o) => o.broker).length;
+    } catch (e) {
+      counts.failed++;
+      errors.push({ contactId, error: String((e as Error)?.message ?? e).slice(0, 200) });
+    }
+  }
+  return { counts, errors };
 }

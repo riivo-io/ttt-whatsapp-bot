@@ -212,7 +212,7 @@ test('TTTFG-4830 (28 Oct 2026): the report is read before the walkthrough starts
     assert.equal(reads[0].sentBefore, 0);
     assert.match(reads[0].user, /Someone drove into the back of my car at the Claremont robot/);
     // A car accident: only the motor policy is offered; the household one is kept in case the client says no.
-    assert.deepEqual(w.since(), ['Is this claim about your Discovery Insure Motor policy (DI-9)?']);
+    assert.deepEqual(w.since(), ['That sounds like a claim on your Discovery Insure Motor policy (DI-9). Is that right?']);
     const walk = w.store.get(PHONE)!.walk!;
     assert.deepEqual(walk.policies.map((p) => p.id), ['pol-car']);
     assert.deepEqual(walk.allPolicies?.map((p) => p.id), ['pol-home', 'pol-car']);
