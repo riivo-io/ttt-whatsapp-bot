@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 0320d02). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit ff8e5de). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -9,7 +9,7 @@
 // into Tina (epic TTTFG-4830).
 import { blockedBy, claimGate } from './gate';
 import {
-  advance, askedKey, atNight, complete, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
+  advance, askedKey, atNight, complete, incidentLabel, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
   STOPPED_TEXT, VOICE_OR_TEXT,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
 } from './walkthrough';
@@ -524,14 +524,19 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
   const again = tries[step] ?? 0;
   switch (step) {
     case 'policy': {
-      const list = state.policies.map((p, i) => `${i + 1}. ${describe(p)}`).join('\n');
+      // 6 Nov 2026: what happened goes in front of each policy ("Theft – Hybrid Household policy (HY-1)").
+      const label = incidentLabel(state.facts, state.opening);
+      const list = state.policies.map((p, i) => `${i + 1}. ${label ? `${label} – ` : ''}${describe(p)}`).join('\n');
       const one = state.policies.length === 1 ? describe(state.policies[0]) : '';
       if (one) {
-        return [`Is this claim about your ${one}?`, `Sorry, I just need to check: is this claim about your ${one}? Please answer yes or no.`,
+        // 6 Nov 2026: Tina worked out from what happened which policy it goes on (the client's others don't fit it).
+        const suggest = label && state.allPolicies && !state.policyChecked ? `That sounds like a claim on your ${one}. Is that right?` : '';
+        return [suggest || `Is this claim about your ${one}?`, `Sorry, I just need to check: is this claim about your ${one}? Please answer yes or no.`,
           `Is it your ${one}? Yes or no?`][again ? ((again - 1) % 2) + 1 : 0];
       }
       // TTTFG-4830: the policies are also the choices the client taps (policyChoices), so the first ask needn't list them.
-      return ['Which policy is this claim about?', `Which one is it? Please pick it from the list, or reply with its number:\n${list}`,
+      // 6 Nov 2026: what happened is asked first, so the question names it, and so does each policy to pick from.
+      return [label ? `Which policy should your ${label.toLowerCase()} claim go on?` : 'Which policy is this claim about?', `Which one is it? Please pick it from the list, or reply with its number:\n${list}`,
         `Please reply with 1${state.policies.length > 1 ? `, 2${state.policies.length > 2 ? ' or another number' : ''}` : ''}:\n${list}`][again ? ((again - 1) % 2) + 1 : 0];
     }
     case 'ready':
@@ -542,6 +547,8 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
         ? [`Is everything in the summary above correct? ${SUMMARY_ASK}`, `Is that all correct? ${SUMMARY_ASK}`][(again - 1) % 2]
         : summary(state);
     default: {
+      // 6 Nov 2026: with more than one policy, what happened is Tina's first question, before the policy.
+      if (step === 'claim-type' && !state.policyId && !(tries[askedKey('claimType')] ?? 0)) return INCIDENT_FIRST_QUESTION;
       // TTTFG-4830: a yes/no asked for the first time brings its details question with it ("If yes to 1: please send me
       // their details"), so the yes and the details can come in one reply. Two or more questions are numbered, so the
       // client can answer by number, with a blank line between them so each stands out. A yes/no asked on its own is
@@ -617,9 +624,31 @@ export const CLAIM_TYPE_CHOICES: Choice[] = [
   { title: 'Lost or stolen item', description: 'Something you carry, like a phone, a laptop or a bag' },
   { title: 'Something else' },
 ];
-/** The client's policies, by insurer; the tap says the policy's number in the list, as a typed reply would. */
-const policyChoices = (ps: Policy[]): Choice[] =>
-  ps.map((p, i) => ({ title: p.insurer, description: `${p.product} policy (${p.policyNumber})`, reply: `${i + 1}. ${describe(p)}` }));
+/**
+ * 6 Nov 2026: the first question for a client with more than one policy, answered in their own words (no taps). Tina
+ * works out the kind of claim from it, then offers the policies that fit.
+ */
+export const INCIDENT_FIRST_QUESTION = 'What happened? Just tell me in a few words, for example "someone crashed into my car" or "someone stole my TV".';
+
+/** An insurer's name without "Ltd" or "(Pty) Ltd", so it fits a tap after what happened ("Theft – Santam"). */
+const shortInsurer = (name: string) => name.replace(/\s*(\(Pty\)\s*)?(Ltd|Limited)\.?\s*$/i, '').trim() || name;
+
+/**
+ * The client's policies, by insurer; the tap says the policy's number in the list, as a typed reply would. 6 Nov 2026:
+ * what happened goes in front ("Theft – Hybrid", "Theft – Momentum"), so the client sees which policy it goes on.
+ */
+const policyChoices = (state: WalkthroughState): Choice[] => {
+  const label = incidentLabel(state.facts, state.opening);
+  const name = (p: Policy) => (label ? `${label} – ${shortInsurer(p.insurer)}` : p.insurer);
+  // Two policies with one insurer would read the same: their numbers tell them apart.
+  const twice = (p: Policy) => state.policies.filter((x) => name(x) === name(p)).length > 1;
+  return state.policies.map((p, i) => ({
+    title: twice(p) ? `${name(p)} (${p.policyNumber})` : name(p),
+    // WhatsApp cuts a long title ("Car accident – Discovery…"), so the whole policy is in the line under it.
+    description: describe(p),
+    reply: `${i + 1}. ${describe(p)}`,
+  }));
+};
 
 /**
  * TTTFG-4830: what the client can tap to answer what this Say asks, or nothing when the answer is the client's own
@@ -631,12 +660,13 @@ export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] |
   if (say.kind !== 'ask' || say.correcting || !state) return undefined;
   switch (say.step) {
     case 'policy':
-      return state.policies.length === 1 ? YES_NO : policyChoices(state.policies);
+      return state.policies.length === 1 ? YES_NO : policyChoices(state);
     case 'ready':
     case 'danger':
       return READY;
     case 'claim-type':
-      return CLAIM_TYPE_CHOICES;
+      // 6 Nov 2026: asked before the policy, what happened is answered in the client's own words, not picked from a list.
+      return state.policyId ? CLAIM_TYPE_CHOICES : undefined;
     case 'summary':
       return SUMMARY_CHOICES;
     default:

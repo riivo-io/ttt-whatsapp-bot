@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 0320d02). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit ff8e5de). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed and every required item is in, the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.

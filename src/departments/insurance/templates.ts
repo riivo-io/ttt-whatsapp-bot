@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 0320d02). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit ff8e5de). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -155,6 +155,8 @@ export interface FnolEmailVars {
   reference: string;
   /** Who looks after the claim: the broker's first name, or the team as the client reads it. */
   owner: string;
+  link?: string;
+  expiresOn?: string;
 }
 
 /**
@@ -165,13 +167,16 @@ export interface FnolEmailVars {
  */
 export const FNOL_EMAIL_TEMPLATE = {
   name: 'Claim - FNOL logged (email)',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
   subject: (v: Pick<FnolEmailVars, 'reference'>) => `Your claim is logged (${v.reference})`,
   render: (v: FnolEmailVars) => [
     `Thanks ${v.firstName}, your claim is logged. Your claim reference is ${v.reference}.`,
     `${v.owner.charAt(0).toUpperCase()}${v.owner.slice(1)} will look after your claim.`,
-    "Next steps: we'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have.",
+    // The user (3 Nov 2026): one email. With the form's link when it can go with it; otherwise the link follows on its own.
+    ...(v.link
+      ? ['Next step: please fill in your claim form here:', v.link, `You can stop and come back to it: the link works until ${v.expiresOn}. Once you've submitted it, we'll email you the form to sign.`]
+      : ["Next steps: we'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have."]),
     AI_HANDLING_LINE,
     'Kind regards,\nTTT',
   ].join('\n\n'),
