@@ -18,12 +18,19 @@
  *   without the client waiting for it (the caller files the copy and writes its records, which can take a while), and
  *   is retried until the caller answers 2xx: three times straight away, then by the signing-sweep cron, backing off
  *   for about 3 days. A delivery holds a lease (callback_next_at), so the same callback never runs twice at once.
+ * - The PDFs are only kept here until the caller has them: KEEP_FILES_DAYS after a link closes (signed and delivered,
+ *   expired or superseded), the sweep deletes them from the bucket (POPIA: the caller's copy is the record). A signed
+ *   form whose callback was never taken is kept, because it is the only copy.
  */
 import crypto from 'crypto';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import type { NewSigningRequest, SignatureAudit, SignChannel, SigningRequestRow, SigningStore, SignStamp } from './store';
 
 export const LINK_DAYS = 7;
+/** How long after a link's expiry its PDFs stay in the bucket (so at most LINK_DAYS + this after the link was made). */
+export const KEEP_FILES_DAYS = 30;
+/** PDFs deleted per sweep, so one sweep stays short; the next sweep carries on. */
+const PURGE_BATCH = 50;
 /** The callback is tried this often in all (three straight away, the rest by the cron, backing off) before it gives up. */
 export const MAX_CALLBACK_ATTEMPTS = 20;
 /** How long one delivery may take before the sweep may try the callback again. */
@@ -270,10 +277,11 @@ export async function deliverCallback(d: SigningDeps, row: SigningRequestRow, si
 }
 
 /**
- * The signing-sweep cron: open requests past 7 days expire, and callbacks that are due are tried again, each under its
- * own lease (an overlapping sweep or a delivery still running skips it). One that fails doesn't stop the rest.
+ * The signing-sweep cron: open requests past 7 days expire, callbacks that are due are tried again, each under its
+ * own lease (an overlapping sweep or a delivery still running skips it), and closed requests' PDFs older than
+ * KEEP_FILES_DAYS past expiry are deleted. One that fails doesn't stop the rest.
  */
-export async function sweepSigning(d: SigningDeps): Promise<{ expired: number; delivered: number; failed: number }> {
+export async function sweepSigning(d: SigningDeps): Promise<{ expired: number; delivered: number; failed: number; purged: number }> {
     const now = nowOf(d);
     const expired = await d.store.expireOpen(now);
     let delivered = 0;
@@ -289,5 +297,25 @@ export async function sweepSigning(d: SigningDeps): Promise<{ expired: number; d
             console.error(`[Signing] sweep: ${row.id}: ${(e as Error).message}`);
         }
     }
-    return { expired, delivered, failed };
+    return { expired, delivered, failed, purged: await purgeOldFiles(d, now) };
+}
+
+/** Deletes the PDFs of closed requests that expired more than KEEP_FILES_DAYS ago. Never fails the sweep. */
+async function purgeOldFiles(d: SigningDeps, now: Date): Promise<number> {
+    let purged = 0;
+    try {
+        const before = new Date(now.getTime() - KEEP_FILES_DAYS * 86_400_000);
+        for (const row of await d.store.filesToPurge(before, PURGE_BATCH)) {
+            try {
+                await d.store.purgeFiles(row, now);
+                purged++;
+            } catch (e) {
+                console.error(`[Signing] sweep: could not delete the PDFs of ${row.id}: ${(e as Error).message}`);
+            }
+        }
+    } catch (e) {
+        // For example the files_purged_at migration (20261106120000_signing_purge_files.sql) isn't run yet.
+        console.error(`[Signing] sweep: could not look for PDFs to delete: ${(e as Error).message}`);
+    }
+    return purged;
 }
