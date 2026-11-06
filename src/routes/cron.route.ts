@@ -80,7 +80,7 @@ router.get('/claims-reminders', async (req: Request, res: Response) => {
 /**
  * TTTFG-5196: the signing page's sweep. Open signing links past their 7 days become expired, and a signed form whose
  * callback wasn't taken (the caller was down) is sent again, backing off, for about 3 days (signing.ts deliverCallback).
- * Every 15 minutes.
+ * Closed links' PDFs are deleted 30 days after expiry (KEEP_FILES_DAYS). Every 15 minutes.
  */
 router.get('/signing-sweep', async (req: Request, res: Response) => {
     if (!isAuthorized(req)) {
