@@ -12,7 +12,7 @@ import {
 import { claimsContactNumber } from '../../src/domain/claimsHost';
 import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
-import { SAFETY_TEXT, type AgentActionRow, type ClaimRow } from '../../src/departments/insurance/claim';
+import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
 import type { ClientFile, FollowOnClaim, StoredClaimForm } from '../../src/departments/insurance/followon';
 import { isOpenClaim, type OpenClaim, type ResumePorts } from '../../src/departments/insurance/resume';
@@ -163,10 +163,10 @@ test('the whole claim: walkthrough, the questions, the photo, then the form to s
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
     assert.equal(w.rows.length, 1);
-    // TTTFG-4830: what to gather at the scene went out once, after what to do if anyone is hurt, before what happened.
+    // TTTFG-4830: what to gather at the scene went out once, before what happened. TTTFG-5299: no safety line before it.
     const onScene = w.sent.filter((t) => t.startsWith("While you're still at the scene, try to get these. They make your claim easier:\n\n1. The other car's *registration number*"));
     assert.equal(onScene.length, 1);
-    assert.ok(w.sent.indexOf(onScene[0]) > w.sent.indexOf(SAFETY_TEXT));
+    assert.doesNotMatch(w.sent.join('\n'), /10111|hurt or in danger/);
     assert.ok(w.sent.indexOf(onScene[0]) < w.sent.findIndex((t) => /in your own words what happened|On what date/.test(t)));
     const opened = w.since().join('\n');
     assert.match(opened, /CLM-000001/); // the acknowledgement
@@ -220,7 +220,7 @@ test('TTTFG-4830 (28 Oct 2026): the report is read before the walkthrough starts
     assert.equal(walk.facts.description, 'Someone drove into the back of my car at the Claremont robot');
 });
 
-test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser list; unset or blank, the list gives no TTT number', async () => {
+test('TTTFG-5299 (9 Nov 2026): the burst-geyser list gives no TTT number, whatever CLAIMS_CONTACT_NUMBER says', async () => {
     const HOME: Policy = { id: 'pol-home', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Household', policyNumber: 'OM-1', assistNumber: '' };
     const GEYSER = 'My geyser burst this morning and water came through the bedroom ceiling';
     const geyserList = async (raw: string | undefined) => {
@@ -236,8 +236,7 @@ test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser l
         assert.match(list, /Turn off the water/);
         return list;
     };
-    assert.match(await geyserList(' 021 555 0100 '), /\n\nYou can also call TTT on 021 555 0100\.\n\n/);
-    for (const raw of [undefined, '', '  ']) assert.doesNotMatch(await geyserList(raw), /call TTT|plumber urgently/i);
+    for (const raw of [' 021 555 0100 ', undefined, '', '  ']) assert.doesNotMatch(await geyserList(raw), /call TTT|plumber urgently/i);
 });
 
 test('a photo sent during the walkthrough is kept and filed when the claim opens', async () => {
@@ -785,4 +784,51 @@ test('TTTFG-5562: a form submitted after the conversation moved on tells the bro
     assert.equal(await claimsFormDone(w.deps, PHONE, w.rows[0].id, tick(t, 1)), 'stale');
     assert.deepEqual(w.since(), []);
     assert.ok(w.actions.some((a) => a.kind === 'Follow-up' && /submitted the claim form/.test(a.detail)));
+});
+
+// ---- TTTFG-5299: roadside help on the demo numbers ----
+const ROADSIDE = { roadside: true, fromDamage: false, someoneHurt: false };
+const withRoadside = (w: ReturnType<typeof world>, route: Record<string, unknown> = ROADSIDE) => {
+    const roadsideRequests: string[] = [];
+    w.deps.roadsideModel = async () => route;
+    w.deps.openRoadsideRequest = async (_c, _p, text) => (roadsideRequests.push(text), 'req-roadside');
+    return roadsideRequests;
+};
+
+test('TTTFG-5299: a demo client who has broken down gets the insurer\'s number, and no claim opens', async () => {
+    const w = world({ isClaim: false });
+    const roadside = withRoadside(w);
+    assert.equal(await say(w, "I've broken down on the N1", DAY1), 'roadside');
+    const [reply] = w.since();
+    assert.match(reply, /Discovery Insure's roadside assist line on \*0860 333 444\*/);
+    assert.match(reply, /Discovery Insure will confirm what your policy includes when you call\./);
+    assert.deepEqual(roadside, ["I've broken down on the N1"]);
+    assert.deepEqual(w.requests, [], 'no claim request');
+    assert.equal(w.rows.length, 0);
+    assert.deepEqual(w.actions.map((a) => [a.kind, a.open, a.regarding.id]), [['Created', true, 'req-roadside']]);
+    assert.equal(w.store.get(PHONE)!.roadside ?? null, null, 'nothing left to ask');
+});
+
+test('TTTFG-5299: after an accident, yes starts the claim walkthrough on the same policy; the roadside state is kept between', async () => {
+    const OM: Policy = { id: 'pol-om', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Motor', policyNumber: 'OM-1', assistNumber: '0860 600 600' };
+    const w = world({ policies: [POLICY, OM] });
+    withRoadside(w, { roadside: true, fromDamage: true, someoneHurt: false });
+    assert.equal(await say(w, 'A taxi hit me and I need a tow', DAY1), 'roadside');
+    assert.deepEqual(w.since(), ['Which policy is this car on?']);
+    assert.equal(w.store.get(PHONE)!.roadside?.requestId, 'req-roadside');
+    assert.equal(await say(w, '2', tick(DAY1, 1)), 'roadside');
+    const [number, offer] = w.since();
+    assert.match(number, /0860 600 600/);
+    assert.equal(offer, "Once you're safe, would you like me to start a claim for the damage?");
+    assert.equal(await say(w, 'Yes', tick(DAY1, 2)), 'started');
+    assert.deepEqual(w.requests, ['A taxi hit me and I need a tow']);
+    const kept = w.store.get(PHONE)!;
+    assert.equal(kept.roadside ?? null, null);
+    assert.equal(kept.walk?.policyId, 'pol-om');
+    assert.doesNotMatch(w.since().join('\n'), /Which policy|Is this claim about/);
+});
+
+test('TTTFG-5299: roadside off (no model): a breakdown is read as anything else, and no roadside request opens', async () => {
+    const w = world({ isClaim: false });
+    assert.equal(await say(w, "I've broken down on the N1", DAY1), 'hello');
 });

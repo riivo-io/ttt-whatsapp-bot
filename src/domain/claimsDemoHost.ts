@@ -17,6 +17,9 @@
  * A voice note (TTTFG-4830) is transcribed first (deps.transcribe, with Tina's last message as the hint) and read as
  * what the client said, with Claude told it is a transcript; the package says back what it saved from it. One that
  * can't be heard is answered here, and nothing is read or saved.
+ * TTTFG-5299 (roadside help, ROADSIDE_ENABLED): a car that has broken down gets the insurer's assist number before
+ * anything else is read (roadside*.ts); the roadside conversation is kept in the walkthrough's place. A yes to a claim
+ * after an accident starts the walkthrough on the same policy, as a claim report would.
  * Every morning at 08:00 (TTTFG-5212, first cut) claimsDemoReminder() sends each demo number what it still has to send
  * on its open claims ("Things we still need from you"), and puts the conversation back on that list.
  *
@@ -27,6 +30,9 @@ import { claimTurn, DEPARTMENT } from '../departments/insurance/claim';
 import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { prefersChat } from '../departments/insurance/guided';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
+import type { RoadsidePorts, RoadsideState } from '../departments/insurance/roadside';
+import { roadsideRoute, type RoadsideModel } from '../departments/insurance/roadside-intent';
+import { roadsideReply, roadsideStart } from '../departments/insurance/roadside-turn';
 import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyModel, type ReportedModel } from '../departments/insurance/reply';
 import { remindTurn, type BrokerStep, type ReminderOutcome, type ReminderPorts, type ReminderSettings } from '../departments/insurance/reminder';
 import { NO_RESUME_STATE, resumeTurn, type ResumePorts, type ResumeState } from '../departments/insurance/resume';
@@ -104,6 +110,8 @@ export interface DemoConversation {
     /** The riivo_request the latest claim conversation runs under ('' before the first claim). */
     requestId: string;
     walk: WalkthroughState | null;
+    /** TTTFG-5299: a roadside conversation in progress, with the riivo_request it runs under. */
+    roadside?: RoadsideState | null;
     resume: ResumeState;
     /** Files sent before the claim existed, for the follow-on's start. */
     held: ResumeFile[];
@@ -171,11 +179,18 @@ export interface ClaimsDemoDeps {
     transcribe?(voice: DemoVoice, hint: string): Promise<VoiceHeard>;
     /** TTTFG-5562: a new claim gets the link to the guided form (CLAIMS_GUIDED_FORM). Absent: every question on WhatsApp. */
     guidedForm?: boolean;
+    /** TTTFG-5299: roadside help (ROADSIDE_ENABLED). Absent: off, and a breakdown is read as anything else is. */
+    roadsideModel?: RoadsideModel;
+    /** TTTFG-5299: opens the riivo_request (Insurance, topic Roadside assistance). Null when refused: the number still goes. */
+    openRoadsideRequest?(contactId: string, phone: string, text: string): Promise<string | null>;
 }
+
+/** A demo number is always a known client, so roadside never asks it which insurer: the insurer list isn't needed. */
+const asRoadsidePorts = (ports: ResumePorts): RoadsidePorts => ({ ...ports, insurers: async () => [] });
 
 export type DemoOutcome =
     | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request' | 'busy'
-    | 'voice-unheard';
+    | 'voice-unheard' | 'roadside';
 
 export const helloText = (firstName: string) =>
     `Hi ${firstName}, it's Tina from TTT. On this number I'm set up to help with insurance claims. Tell me what happened `
@@ -249,6 +264,50 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     };
     const conv = () => claimsConversation(m.phone, c.requestId, deps.signUpLink, deps.contactNumber);
 
+    /** The claim is open: the follow-on starts at once, with any files the client sent on the way and the form answers their report already gave. */
+    const openedFollowOn = async (ports: ResumePorts, claimId: string, walk: WalkthroughState): Promise<DemoOutcome> => {
+        c.walk = null;
+        const reported = await formAnswersFromReport(deps, ports, claimId, walk, c.said ?? [], now);
+        const fo = await followOnTurn(ports, conv(), null, {
+            kind: 'start', claimId, describedAsTheft: describedAsTheft(walk), files: c.held, reported,
+        }, now, deps.guidedForm ? { guidedForm: true } : {});
+        c.resume = { followOn: fo.state, pending: null };
+        c.held = [];
+        c.said = [];
+        return done('opened');
+    };
+
+    /**
+     * A claim report starts the walkthrough under a new riivo_request, with what the report already says read first.
+     * `policyId` (TTTFG-5299 AC 8): the policy roadside help settled; with the guided form the claim may open at once.
+     */
+    const startClaim = async (text: string, policyId?: string): Promise<DemoOutcome> => {
+        const requestId = await deps.openRequest(m.contactId, m.phone, text);
+        if (!requestId) {
+            await deps.say(m.phone, "Sorry, I couldn't open your claim just now. Please try again in a few minutes.");
+            return done('no-request');
+        }
+        c.requestId = requestId;
+        c.said = [text.trim()];
+        // TTTFG-4830 (28 Oct 2026): what the report already says goes into the start, so the policy question offers only the
+        // policies that fit the claim. As before, a failed read here only means Tina asks for it.
+        const opening = await openingFacts(deps.understandModel, text, now);
+        const ports = deps.ports(requestId, sent);
+        const t = await claimTurn(ports, conv(), null, {
+            kind: 'start', ...opening, ...(deps.guidedForm ? { guided: true } : {}), ...(policyId ? { policyId } : {}),
+        }, now);
+        if (t.claim) {
+            const contact = await ports.contactByWhatsApp(m.phone);
+            const walk: WalkthroughState = {
+                contactId: m.contactId, firstName: contact?.firstName ?? '', policies: [], policyId, step: 'summary', facts: opening.facts ?? {},
+                ...(opening.opening ? { opening: opening.opening } : {}),
+            };
+            return openedFollowOn(ports, t.claim.id, walk);
+        }
+        c.walk = t.state;
+        return done('started');
+    };
+
     // ---- TTTFG-4830: a voice note is read as what the client said ----
     const spoken = !!m.voice;
     if (m.voice) {
@@ -259,6 +318,19 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
             return 'voice-unheard';
         }
         m = { ...m, text: heard.text };
+    }
+
+    // ---- TTTFG-5299: roadside help in progress ----
+    if (c.roadside) {
+        const rs = c.roadside;
+        c.roadside = null;
+        if (deps.roadsideModel && !m.file && m.text.trim()) {
+            const requestId = rs.requestId ?? '';
+            const r = await roadsideReply(asRoadsidePorts(deps.ports(requestId, sent)), claimsConversation(m.phone, requestId, deps.signUpLink, deps.contactNumber), rs, m.text, now);
+            if (r.state) c.roadside = { ...r.state, requestId };
+            if (r.claim) return startClaim(r.claim.opening, r.claim.policyId);
+            return done('roadside');
+        }
     }
 
     // ---- a 5168 walkthrough in progress ----
@@ -284,17 +356,21 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
             }
             return done('walkthrough');
         }
-        // The claim is open: the follow-on starts at once, with any files the client sent on the way and the form
-        // answers their report already gave.
-        c.walk = null;
-        const reported = await formAnswersFromReport(deps, ports, r.claim.id, walk, c.said ?? [], now);
-        const fo = await followOnTurn(ports, conv(), null, {
-            kind: 'start', claimId: r.claim.id, describedAsTheft: describedAsTheft(walk), files: c.held, reported,
-        }, now, deps.guidedForm ? { guidedForm: true } : {});
-        c.resume = { followOn: fo.state, pending: null };
-        c.held = [];
-        c.said = [];
-        return done('opened');
+        return openedFollowOn(ports, r.claim.id, walk);
+    }
+
+    // ---- TTTFG-5299: a car that has broken down, before anything is read against the open claims ----
+    if (deps.roadsideModel && deps.openRoadsideRequest && !m.file && m.text.trim()) {
+        const route = await roadsideRoute(watch(deps.roadsideModel), m.text);
+        if (unavailable) return busy();
+        if (route) {
+            const requestId = (await deps.openRoadsideRequest(m.contactId, m.phone, m.text)) ?? '';
+            const ports = deps.ports(requestId, sent);
+            const contact = await ports.contactByWhatsApp(m.phone);
+            const r = await roadsideStart(asRoadsidePorts(ports), claimsConversation(m.phone, requestId, deps.signUpLink, deps.contactNumber), contact, route, m.text, now);
+            c.roadside = r.state ? { ...r.state, requestId } : null;
+            return done('roadside');
+        }
     }
 
     // ---- no walkthrough: which open claim is this about? ----
@@ -345,19 +421,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         }
         return done(m.file ? 'file-held' : 'hello');
     }
-    const requestId = await deps.openRequest(m.contactId, m.phone, m.text);
-    if (!requestId) {
-        await deps.say(m.phone, "Sorry, I couldn't open your claim just now. Please try again in a few minutes.");
-        return done('no-request');
-    }
-    c.requestId = requestId;
-    c.said = [m.text.trim()];
-    // TTTFG-4830 (28 Oct 2026): what the report already says goes into the start, so the policy question offers only the
-    // policies that fit the claim. As before, a failed read here only means Tina asks for it.
-    const opening = await openingFacts(deps.understandModel, m.text, now);
-    const t = await claimTurn(deps.ports(requestId, sent), conv(), null, { kind: 'start', ...opening, ...(deps.guidedForm ? { guided: true } : {}) }, now);
-    c.walk = t.state;
-    return done('started');
+    return startClaim(m.text);
 }
 
 /**

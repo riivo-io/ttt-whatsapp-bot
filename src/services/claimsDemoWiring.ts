@@ -29,6 +29,7 @@ import { dataverseSigningPorts } from '../departments/insurance/signing-datavers
 import type { GuidedLinkRow } from '../claimform/links';
 import { earlierClaimAnswers, fileGuided, finishGuided, loadGuided, saveGuided, type GuidedCrm } from '../departments/insurance/guided';
 import type { ClaimFormSession } from '../routes/claimForm.route';
+import { roadsideRequestBody } from '../domain/claimsHost';
 import { voiceNoteNote, whatsappCommunicationRow, type WhatsAppParty, type WhatsAppRegarding } from '../domain/whatsappLog';
 
 const OPT = 463630000;
@@ -445,6 +446,17 @@ export async function openDemoRequest(dv: Dv, contactId: string, phone: string, 
         return r.riivo_requestid;
     } catch (e) {
         console.error('[ClaimsDemo] Could not open the claim request:', (e as Error).message);
+        return null;
+    }
+}
+
+/** TTTFG-5299: a roadside conversation's riivo_request (Insurance, topic Roadside assistance), as Tina's claims path opens it. */
+export async function openRoadsideDemoRequest(dv: Dv, contactId: string, phone: string, text: string): Promise<string | null> {
+    try {
+        const r = await dv<{ riivo_requestid: string }>('POST', 'riivo_requests?$select=riivo_requestid', roadsideRequestBody(guid(contactId), phone, text), { returnRow: true });
+        return r.riivo_requestid;
+    } catch (e) {
+        console.error('[ClaimsDemo] Could not open the roadside request:', (e as Error).message);
         return null;
     }
 }

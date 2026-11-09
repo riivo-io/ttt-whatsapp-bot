@@ -48,16 +48,18 @@ import {
 import type { Dv } from '../departments/insurance/dataverse';
 import type { ClientFile, ResumeFile } from '../departments/insurance/followon';
 import type { IntentModel } from '../departments/insurance/intent';
+import type { RoadsideModel } from '../departments/insurance/roadside-intent';
+import { isRoadside } from '../departments/insurance/roadside-turn';
 import type { ReplyModel, ReportedModel } from '../departments/insurance/reply';
 import { NO_RESUME_STATE, type ResumeState } from '../departments/insurance/resume';
 import { lastReminderPort, reminderSettingsFromDataverse } from '../departments/insurance/resume-dataverse';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
-import { claimsContactNumber } from '../domain/claimsHost';
+import { claimsContactNumber, roadsideSwitch } from '../domain/claimsHost';
 import { interactiveFor, LINK_LOGGED, linkInteractive, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, withLinkLine, type OutPart } from '../domain/claimsOutbox';
 import {
-    blankForm, cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, withdrawOpenClaims, writeDemoLog,
+    blankForm, cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, openRoadsideDemoRequest, withdrawOpenClaims, writeDemoLog,
     type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
 } from './claimsDemoWiring';
 import type { SignedCallback } from '../departments/insurance/signing';
@@ -285,19 +287,28 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
         async load(phone) {
             const row = await supabaseService.getClaimConversation(phone);
             return row ? {
-                contactId: row.contact_id, requestId: row.request_id, walk: (row.walkthrough as WalkthroughState | null) ?? null,
+                contactId: row.contact_id, requestId: row.request_id,
+                // TTTFG-5299: the walkthrough column holds a roadside conversation instead, when there is one.
+                walk: isRoadside(row.walkthrough) ? null : (row.walkthrough as WalkthroughState | null) ?? null,
+                roadside: isRoadside(row.walkthrough) ? row.walkthrough : null,
                 said: ((row.walkthrough as { said?: string[] } | null)?.said) ?? [],
                 resume: (row.resume as ResumeState) ?? NO_RESUME_STATE, held: (row.held as ResumeFile[]) ?? [], lastSent: row.last_sent, updatedAt: row.updated_at,
             } : null;
         },
         save: (phone, c: DemoConversation) => supabaseService.saveClaimConversation({
             // The client's walkthrough messages ride along in the walkthrough column (no extra column needed).
-            phone_number: phone, contact_id: c.contactId, request_id: c.requestId, walkthrough: c.walk ? { ...c.walk, said: c.said ?? [] } : null,
+            phone_number: phone, contact_id: c.contactId, request_id: c.requestId,
+            walkthrough: c.walk ? { ...c.walk, said: c.said ?? [] } : c.roadside ?? null,
             resume: c.resume, held: c.held, last_sent: c.lastSent,
         }),
         remove: (phone) => supabaseService.deleteClaimConversation(phone),
         ports: (_requestId, sent) => demoPorts(ch, phone, contactId, sent),
         intentModel: demoModel(INTENT_MODEL, 'record_claim_intent') as IntentModel,
+        // TTTFG-5299: roadside help, off unless ROADSIDE_ENABLED=true (read on every message).
+        ...(roadsideSwitch(process.env.ROADSIDE_ENABLED) ? {
+            roadsideModel: demoModel(process.env.CLAIMS_ROADSIDE_MODEL || INTENT_MODEL, 'record_roadside_intent') as RoadsideModel,
+            openRoadsideRequest: (contactId: string, phone: string, text: string) => openRoadsideDemoRequest(ch.dv, contactId, phone, text),
+        } : {}),
         understandModel: demoModel(UNDERSTAND_MODEL, 'record_answer') as UnderstandModel,
         replyModel: demoModel(UNDERSTAND_MODEL, 'record_reply') as ReplyModel,
         reportedModel: demoModel(UNDERSTAND_MODEL, 'record_known_answers') as ReportedModel,

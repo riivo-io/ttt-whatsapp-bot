@@ -8,12 +8,19 @@
  *  - a client with none: the claim route (AC 1) decides. A claim report opens a riivo_request (Insurance, topic Claim)
  *    and starts the walkthrough. Anything else goes back to Tina's normal path;
  *  - an unknown number reporting a claim gets only the unknown-number reply (AC 2): no claim, no follow-up.
+ * TTTFG-5299 (roadside help, ROADSIDE_ENABLED): a car that has broken down is asked about before a claim. A known
+ * client or an unknown number gets their insurer's assist number from the CRM (src/departments/insurance/roadside*.ts),
+ * under a riivo_request with topic Roadside assistance. The roadside conversation is kept where the walkthrough is (its
+ * state says `roadside: true`), and a yes to a claim after an accident starts the walkthrough on the same policy.
  *
  * Pure apart from the injected deps (Tina's Ports pattern, see CONTEXT.md), so it is tested without Meta, Dynamics,
  * Supabase or Claude. src/services/claims.service.ts wires the real ones.
  */
-import { claimTurn, type ClaimPorts, type Conversation } from '../departments/insurance/claim';
+import { claimTurn, type Conversation } from '../departments/insurance/claim';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
+import type { RoadsidePorts, RoadsideResult, RoadsideState } from '../departments/insurance/roadside';
+import { roadsideRoute, type RoadsideModel } from '../departments/insurance/roadside-intent';
+import { isRoadside, roadsideReply, roadsideStart } from '../departments/insurance/roadside-turn';
 import { openingFacts, understand, type UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 
@@ -35,9 +42,11 @@ export const claimsConversation = (phone: string, requestId: string, signUpLink:
     ({ phone, requestId, signUpLink, ...(contactNumber ? { contactNumber } : {}) });
 
 export interface StoredWalkthrough {
+    /** '' for an unknown number's roadside conversation (TTTFG-5299 AC 2). */
     contactId: string;
     requestId: string;
-    state: WalkthroughState;
+    /** TTTFG-5299: or a roadside conversation (`roadside: true`), kept in the same row. */
+    state: WalkthroughState | RoadsideState;
     lastSent: string | null;
     updatedAt: string;
 }
@@ -57,18 +66,92 @@ export interface ClaimsHostDeps {
     /** Logs the client's inbound on the request (riivo_whatsappcommunications) and in the session history. */
     logIncoming(requestId: string, text: string): Promise<void>;
     /** The package's ports for this conversation. `contact` is the sender Tina already resolved. */
-    ports(requestId: string, contact: { id: string; firstName: string } | null): ClaimPorts;
+    ports(requestId: string, contact: { id: string; firstName: string } | null): RoadsidePorts;
+    /** TTTFG-5299: ROADSIDE_ENABLED. Off: no roadside help, and a breakdown goes on to the claim route as before. */
+    roadsideEnabled?: boolean;
+    roadsideModel?: RoadsideModel;
+    /**
+     * TTTFG-5299: opens the riivo_request (Insurance, topic Roadside assistance) a roadside conversation runs under; with
+     * no contact for an unknown number. Null when Dataverse refused it: the number still goes out.
+     */
+    openRoadsideRequest?(contactId: string | null, phone: string, text: string): Promise<string | null>;
 }
 
 export type ClaimsOutcome =
     | { handled: false }
-    | { handled: true; kind: 'unknown-number' | 'started' | 'continued' | 'opened' | 'ended'; reference?: string };
+    | { handled: true; kind: 'unknown-number' | 'started' | 'continued' | 'opened' | 'ended' | 'roadside'; reference?: string };
 
 const NOT_MINE: ClaimsOutcome = { handled: false };
 
-/** An inbound from a number that matches no contact. Handled only when it reports a claim. */
-export async function claimFromUnknownNumber(deps: ClaimsHostDeps, phone: string, text: string): Promise<ClaimsOutcome> {
-    if (!deps.enabled || !(await claimRoute(deps.intentModel, text))) return NOT_MINE;
+/**
+ * TTTFG-5299: the riivo_request a roadside conversation runs under: Insurance, topic Roadside assistance, priority high.
+ * An unknown number's request has no client (AC 2: no client record is read). The same payload on every path (Tina, the
+ * demo numbers, the terminal chat).
+ */
+export function roadsideRequestBody(contactId: string | null, phone: string, text: string): Record<string, unknown> {
+    return {
+        riivo_clientmobilenumber: phone, riivo_channel: 1, riivo_category: 1, riivo_priority: 1, riivo_description: text.slice(0, 100),
+        riivo_classificationtopic: 'Roadside assistance', statecode: 0, statuscode: 1,
+        ...(contactId ? { 'riivo_Client@odata.bind': `/contacts(${contactId})` } : {}),
+    };
+}
+
+/** ROADSIDE_ENABLED: off unless 'true'. Tina's main deploys production, so roadside help is off until it is switched on. */
+export const roadsideSwitch = (raw: string | undefined) => (raw ?? '').trim().toLowerCase() === 'true';
+
+const roadsideOn = (deps: ClaimsHostDeps) => !!(deps.enabled && deps.roadsideEnabled && deps.roadsideModel && deps.openRoadsideRequest);
+
+/**
+ * TTTFG-5299: a roadside message, first or next. Keeps the conversation while it goes on; a yes to a claim after an
+ * accident starts the claim walkthrough on the same policy (AC 8).
+ */
+async function roadsideTurn(
+    deps: ClaimsHostDeps, phone: string, contact: { id: string; firstName: string } | null, text: string, now: Date,
+    stored: StoredWalkthrough | null,
+): Promise<ClaimsOutcome | null> {
+    let requestId: string;
+    let r: RoadsideResult;
+    if (stored && isRoadside(stored.state)) {
+        requestId = stored.requestId;
+        await deps.logIncoming(requestId, text);
+        const conv = claimsConversation(phone, requestId, deps.signUpLink, deps.contactNumber);
+        r = await roadsideReply(deps.ports(requestId, contact), conv, stored.state, text, now);
+    } else {
+        const route = await roadsideRoute(deps.roadsideModel!, text);
+        if (!route) return null;
+        // Help on the road can't wait on the CRM: without a request the number still goes out, and the error is logged.
+        requestId = (await deps.openRoadsideRequest!(contact?.id ?? null, phone, text)) ?? '';
+        await deps.logIncoming(requestId, text);
+        const conv = claimsConversation(phone, requestId, deps.signUpLink, deps.contactNumber);
+        r = await roadsideStart(deps.ports(requestId, contact), conv, contact, route, text, now);
+    }
+    if (r.state) {
+        await deps.save(phone, { contactId: contact?.id ?? '', requestId, state: r.state, lastSent: r.lastSent ?? null });
+        return { handled: true, kind: 'roadside' };
+    }
+    await deps.remove(phone);
+    if (!r.claim || !contact) return { handled: true, kind: 'roadside' };
+
+    // AC 8: the claim, under its own request (topic Claim), from the client's own words, on the policy roadside settled.
+    const claimRequest = await deps.openRequest(contact.id, phone, r.claim.opening);
+    if (!claimRequest) return { handled: true, kind: 'roadside' };
+    const conv = claimsConversation(phone, claimRequest, deps.signUpLink, deps.contactNumber);
+    const opening = await openingFacts(deps.understandModel, r.claim.opening, now);
+    const t = await claimTurn(deps.ports(claimRequest, contact), conv, null, { kind: 'start', ...opening, ...(r.claim.policyId ? { policyId: r.claim.policyId } : {}) }, now);
+    return persist(deps, phone, contact.id, claimRequest, t.state, t.lastSent ?? null, t.claim?.reference, 'started');
+}
+
+/** An inbound from a number that matches no contact. Handled when it asks for roadside help or reports a claim. */
+export async function claimFromUnknownNumber(deps: ClaimsHostDeps, phone: string, text: string, now: Date = new Date()): Promise<ClaimsOutcome> {
+    if (!deps.enabled) return NOT_MINE;
+    // TTTFG-5299 AC 2: roadside help is the one thing an unknown number is given.
+    if (roadsideOn(deps)) {
+        let stored = await deps.load(phone);
+        if (stored && (stored.contactId !== '' || !isRoadside(stored.state) || now.getTime() - Date.parse(stored.updatedAt) > ABANDONED_AFTER_MS)) stored = null;
+        const out = await roadsideTurn(deps, phone, null, text, now, stored);
+        if (out) return out;
+    }
+    if (!(await claimRoute(deps.intentModel, text))) return NOT_MINE;
     const conv = claimsConversation(phone, '', deps.signUpLink, deps.contactNumber);
     // The package's own start with no contact: the unknown-number reply through the gate, and nothing else.
     await claimTurn(deps.ports('', null), conv, null, { kind: 'start' }, new Date());
@@ -86,11 +169,22 @@ export async function claimFromClient(
         stored = null;
     }
 
+    // TTTFG-5299: a roadside conversation in progress, or a new one (asked before the claim route).
+    if (roadsideOn(deps) && (!stored || isRoadside(stored.state))) {
+        const out = await roadsideTurn(deps, phone, contact, text, now, stored);
+        if (out) return out;
+    }
+    if (stored && isRoadside(stored.state)) {
+        // Roadside was switched off mid-conversation: it ends, and the message goes on as any other.
+        await deps.remove(phone);
+        stored = null;
+    }
+
     if (stored) {
         await deps.logIncoming(stored.requestId, text);
         const conv = claimsConversation(phone, stored.requestId, deps.signUpLink, deps.contactNumber);
-        const answer = await understand(deps.understandModel, stored.state, stored.lastSent ?? '', text, now);
-        const r = await claimTurn(deps.ports(stored.requestId, contact), conv, stored.state, answer, now);
+        const answer = await understand(deps.understandModel, stored.state as WalkthroughState, stored.lastSent ?? '', text, now);
+        const r = await claimTurn(deps.ports(stored.requestId, contact), conv, stored.state as WalkthroughState, answer, now);
         return persist(deps, phone, contact.id, stored.requestId, r.state, r.lastSent ?? stored.lastSent, r.claim?.reference, 'continued');
     }
 
