@@ -32,7 +32,7 @@ html, body { height:100%; }
 body { margin:0; background:var(--panel); color:var(--text); font:15.5px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
 button { font:inherit; color:inherit; }
 :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-.app { position:relative; display:flex; flex-direction:column; height:100vh; height:100dvh; background:var(--bg); max-width:520px; margin:0 auto; }
+.app { position:relative; display:flex; flex-direction:column; height:100vh; height:100dvh; height:var(--vvh,100dvh); background:var(--bg); max-width:520px; margin:0 auto; }
 @media (min-width:560px) { body { padding:24px 0; } .app { height:calc(100dvh - 48px); border-radius:20px; overflow:hidden; box-shadow:0 1px 2px rgba(11,15,20,.04),0 12px 32px -12px rgba(11,15,20,.14); } }
 .brand { display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--accent); padding:calc(10px + env(safe-area-inset-top,0px)) 18px 10px; color:#fff; }
 .brand img { height:24px; width:auto; display:block; }
@@ -220,7 +220,7 @@ textarea.live { background:var(--accent-soft); }
 const FONTS = '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" media="print" onload="this.media=\'all\'" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap">';
 const HEAD = (title: string) => `<!doctype html>
 <html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="robots" content="noindex"><meta name="theme-color" content="${TTT_BLUE}">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"><meta name="robots" content="noindex"><meta name="theme-color" content="${TTT_BLUE}">
 <title>${esc(title)}</title>${FONTS}<style>${STYLE}</style>
 </head>`;
 const BRAND = (right = 'Claims') => `<div class="brand"><img src="${TTT_LOGO}" alt="TTT Financial Group"><span id="brandTitle">${esc(right)}</span></div>`;
@@ -1520,6 +1520,34 @@ const SCRIPT = String.raw`
     if (e.message === 'gone') return;
     $('body').innerHTML = '<p class="center help">The form could not be loaded. Please check your connection and refresh the page.</p>';
   });
+
+  // ---- the keyboard never covers what's being typed (the user, 9 Nov 2026) -------------------------------------------
+  // The form fits the part of the screen the keyboard leaves (a phone keeps the page its full height under the keyboard),
+  // and the box being typed in comes to the middle of what's left.
+  var vv = window.visualViewport;
+  function fitScreen() {
+    if (!vv) return;
+    document.documentElement.style.setProperty('--vvh', Math.round(vv.height) + 'px');
+    // iPhones move the whole page up to show the box; the form is already fitted, so the page goes back to the top.
+    if (window.scrollY) window.scrollTo(0, 0);
+  }
+  function centreTyping() {
+    var el = document.activeElement, body = $('body');
+    if (!el || !body || !body.contains(el) || !/^(INPUT|TEXTAREA)$/.test(el.tagName) || /^(range|checkbox|radio|file|button)$/.test(el.type)) return;
+    var b = body.getBoundingClientRect(), r = el.getBoundingClientRect();
+    // A box taller than half of what's left shows from its top; anything else sits in the middle.
+    body.scrollTop += r.height > b.height / 2 ? r.top - b.top - 12 : (r.top + r.height / 2) - (b.top + b.height / 2);
+  }
+  function keyboardMoved() { fitScreen(); centreTyping(); }
+  if (vv) {
+    vv.addEventListener('resize', keyboardMoved);
+    vv.addEventListener('scroll', fitScreen);
+    fitScreen();
+  }
+  // Some phones (and Android with resizes-content) say so on the window instead.
+  window.addEventListener('resize', keyboardMoved);
+  // Once now, and again when the keyboard has finished coming up.
+  document.addEventListener('focusin', function () { setTimeout(centreTyping, 60); setTimeout(centreTyping, 400); });
 })();
 `;
 
