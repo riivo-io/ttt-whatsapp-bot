@@ -7,15 +7,21 @@
  * be live in PROD yet (21 Oct 2026). The switch is a deployment switch, not an agent setting: once on, opening a claim
  * is always live (decision D7).
  * TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER, a TTT number the client can call about the claim, said on the
- * burst-geyser list. Unset or blank: not said (see claimsHost.ts claimsContactNumber).
+ * burst-geyser list. Unset or blank: not said (see claimsHost.ts claimsContactNumber). Not said since TTTFG-5299.
+ * TTTFG-5299: ROADSIDE_ENABLED=true adds roadside help (a car that has broken down gets the insurer's assist number), for
+ * clients and unknown numbers. Off by default, and only with CLAIMS_ENABLED. CLAIMS_ROADSIDE_MODEL picks its model.
  */
 import Anthropic from '@anthropic-ai/sdk';
-import type { ClaimPorts, Outbound } from '../departments/insurance/claim';
-import { dataverseClaimPorts } from '../departments/insurance/dataverse';
+import type { Outbound } from '../departments/insurance/claim';
+import { dataverseRoadsidePorts } from '../departments/insurance/dataverse';
 import type { IntentModel } from '../departments/insurance/intent';
+import type { RoadsidePorts } from '../departments/insurance/roadside';
+import type { RoadsideModel } from '../departments/insurance/roadside-intent';
 import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
-import { claimFromClient, claimFromUnknownNumber, claimsContactNumber, type ClaimsHostDeps, type ClaimsOutcome } from '../domain/claimsHost';
+import {
+    claimFromClient, claimFromUnknownNumber, claimsContactNumber, roadsideRequestBody, roadsideSwitch, type ClaimsHostDeps, type ClaimsOutcome,
+} from '../domain/claimsHost';
 import type { CrmEntity } from '../types/crm.types';
 import { RateLimitError } from '../utils/anthropicRateLimit';
 import { dynamicsService } from './dynamics.service';
@@ -24,6 +30,7 @@ import { supabaseService } from './supabase.service';
 
 const INTENT_MODEL = process.env.CLAIMS_INTENT_MODEL || 'claude-haiku-4-5-20251001';
 const UNDERSTAND_MODEL = process.env.CLAIMS_UNDERSTAND_MODEL || 'claude-sonnet-4-6';
+const ROADSIDE_MODEL = process.env.CLAIMS_ROADSIDE_MODEL || INTENT_MODEL;
 /** SPEC-05: the Insurance and Advice online sign-up link, in the unknown-number reply. */
 const SIGN_UP_LINK = process.env.CLAIMS_SIGNUP_LINK || 'https://www.ttt-tax.co.za/client-onboarding';
 const REQUEST_CATEGORY_INSURANCE = 1; // riivo_request.riivo_category: 0 Tax, 1 Insurance, 2 Accounting
@@ -74,6 +81,19 @@ function deps(from: string, sessionId: string | null, entity: CrmEntity | null, 
         remove: (phone) => supabaseService.deleteClaimWalkthrough(phone),
 
         intentModel: toolModel(INTENT_MODEL, 'record_claim_intent', limits) as IntentModel,
+        roadsideEnabled: roadsideSwitch(process.env.ROADSIDE_ENABLED),
+        roadsideModel: toolModel(ROADSIDE_MODEL, 'record_roadside_intent', limits) as RoadsideModel,
+        async openRoadsideRequest(contactId, phone, text) {
+            // As openRequest: owned by Tina's app user. The broker's row in My Day carries the broker.
+            try {
+                const r = await dynamicsService.webApi<{ riivo_requestid: string }>('POST', 'riivo_requests?$select=riivo_requestid',
+                    roadsideRequestBody(contactId, phone, text), { returnRow: true });
+                return r.riivo_requestid;
+            } catch (e) {
+                console.error('[Roadside] Could not open the roadside request:', (e as Error).message);
+                return null;
+            }
+        },
         understandModel: toolModel(UNDERSTAND_MODEL, 'record_answer', limits) as UnderstandModel,
 
         async openRequest(contactId, phone, text) {
@@ -103,8 +123,8 @@ function deps(from: string, sessionId: string | null, entity: CrmEntity | null, 
             if (sessionId) await supabaseService.saveMessage(sessionId, 'user', text);
         },
 
-        ports(requestId, contact): ClaimPorts {
-            const ports = dataverseClaimPorts({
+        ports(requestId, contact): RoadsidePorts {
+            const ports = dataverseRoadsidePorts({
                 dv: (method, path, body, opts) => dynamicsService.webApi(method, path, body, opts),
                 // The acknowledgement is part of Tina's live conversation (D18): sent in the session, not as a Meta template.
                 send: async (to: string, m: Outbound) => {
@@ -138,8 +158,8 @@ async function guarded(limits: RateLimitError[], run: () => Promise<ClaimsOutcom
 export async function handleUnknownNumberClaim(from: string, text: string): Promise<boolean> {
     if (!claimsEnabled()) return false;
     const limits: RateLimitError[] = [];
-    const out = await guarded(limits, () => claimFromUnknownNumber(deps(from, null, null, limits), from, text));
-    if (out.handled) console.log(`[Claims] ${from} unknown number reported a claim: unknown-number reply sent`);
+    const out = await guarded(limits, () => claimFromUnknownNumber(deps(from, null, null, limits), from, text, new Date()));
+    if (out.handled) console.log(out.kind === 'roadside' ? `[Roadside] ${from} unknown number: roadside help` : `[Claims] ${from} unknown number reported a claim: unknown-number reply sent`);
     return out.handled;
 }
 
