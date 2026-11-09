@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit b7ed5d4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 2621603). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
@@ -191,8 +191,9 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   passengerPhone: card('Contact number'),
   passengerInjury: pills(['Not hurt', 'Minor', 'Needed treatment'], { bare: true }),
   injuredName: card('Name'),
-  injuredDetails: pills(['Minor', 'Went to hospital'], { other: true, bare: true }),
-  injuredRelationship: pills(['Driver', 'Passenger', 'Other driver', 'Pedestrian'], { bare: true }),
+  // The user (9 Nov 2026): each row of taps says what it is, so how badly they were hurt and who they were don't run together.
+  injuredDetails: pills(['Minor', 'Went to hospital'], { other: true, label: 'How badly were they hurt?' }),
+  injuredRelationship: pills(['Driver', 'Passenger', 'Other driver', 'Pedestrian'], { label: 'Who were they?' }),
   witnessName: card('Name'),
   witnessFirstName: card('First name', true),
   witnessSurname: card('Surname', true),

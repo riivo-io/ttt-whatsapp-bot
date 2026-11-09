@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit b7ed5d4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 2621603). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -55,7 +55,7 @@ import {
   SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
-import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, type ClaimTemplate } from './templates';
+import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, longDate, type ClaimTemplate } from './templates';
 import { factColumns, factsMissing, OPENED_FOR_FORM_KEY, plumberAsked, plumberDetail, withFacts, type FactColumns } from './formfacts';
 import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
@@ -394,7 +394,8 @@ type Out =
   | { kind: 'text'; text: string; choices?: Choice[] }
   | { kind: 'template'; template: ClaimTemplate; text: string }
   | { kind: 'received'; item: QuestionItem }
-  | { kind: 'closing' }
+  /** `form` (the user, 9 Nov 2026): the client submitted the guided form, so the thank-you that ends the claim on WhatsApp. */
+  | { kind: 'closing'; form?: boolean }
   /** `lead` (TTTFG-4830): the words in front of "Things we still need from you:" ('' for none). */
   | { kind: 'still-missing'; items: QuestionItem[]; lead: string }
   | { kind: 'save-answer'; key: string; record: AnswerRecord }
@@ -471,6 +472,14 @@ const moveOn = ({ waitingOn: _o, batch: _b, relisted: _r, waiting: _w, waitingFo
  * "Thanks.".
  */
 function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thanks.', listLead: string = ALL_FOR_NOW): FollowOnState | null {
+  workedOut(c, w, st, out);
+  // The SAPS keys belong to the SAPS step; the questions never ask them again.
+  const skip = [...st.skipped, SAPS_CASE_KEY, SAPS_STATION_KEY];
+  return askOrEnd(c, w, st, out, skip, thanks, listLead);
+}
+
+/** The answers the client's other answers give, saved instead of asked. */
+function workedOut(c: Ctx, w: Work, st: FollowOnState, out: Out[]): void {
   // TTTFG-4830 (28 Oct 2026): a total the client's amounts already give ("about how much for everything?") is worked
   // out, not asked. Worked out again when the items change; one the amounts no longer give is dropped and asked.
   for (const t of computedTotals(c.form, w.answers, w.facts, st.sapsRequired)) {
@@ -490,8 +499,9 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
     out.push({ kind: 'save-answer', key: PHONE_OR_TABLET_KEY, record });
     w.answers[PHONE_OR_TABLET_KEY] = record;
   }
-  // The SAPS keys belong to the SAPS step; the questions never ask them again.
-  const skip = [...st.skipped, SAPS_CASE_KEY, SAPS_STATION_KEY];
+}
+
+function askOrEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[], skip: string[], thanks: 'Thanks.' | undefined, listLead: string): FollowOnState | null {
   const batch = nextBatch(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip });
   const next = batch[0] ?? null;
   const leftOff = next && next.key === st.waitingOn && !deferred(next.key, w.answers) ? LEFT_OFF : undefined;
@@ -586,13 +596,22 @@ export const READY_TO_REGISTER = { name: 'Claim - ready to register', version: '
 export function readyToRegister(
   claim: { reference: string; insurer: string; claimType: string }, still: readonly QuestionItem[], signature: SignatureStatus = 'Link sent',
   ttt: readonly QuestionItem[] = [],
+  /**
+   * `form` (the user, 9 Nov 2026): the client submitted the guided form, and Tina asks for nothing after it, so what it
+   * left blank is the broker's to get. `deadline`: the insurer's reporting date, when it's near or passed.
+   */
+  o: { form?: boolean; deadline?: string } = {},
 ): string {
+  const how = o.form ? 'filled in the claim form' : "answered Tina's questions on WhatsApp";
   const form = signature === 'Signed' ? 'the client has signed the claim form.'
-    : signature === 'Link sent' ? "the client answered Tina's questions on WhatsApp and has the claim form to sign."
-      : "the client answered Tina's questions on WhatsApp, but no signing link went to them, so the claim form isn't signed yet.";
-  const later = still.length ? ` Still to come from the client: ${list(still.map(itemName))}. Tina keeps asking for it; it needn't hold the claim up.` : '';
+    : signature === 'Link sent' ? `the client ${how} and has the claim form to sign.`
+      : `the client ${how}, but no signing link went to them, so the claim form isn't signed yet.`;
+  const later = !still.length ? ''
+    : o.form ? ` Left blank on the form: ${list(still.map(itemName))}. Tina won't ask the client for it; please get it from them if the insurer needs it.`
+      : ` Still to come from the client: ${list(still.map(itemName))}. Tina keeps asking for it; it needn't hold the claim up.`;
   const ours = ttt.length ? ` Not asked of the client, for TTT to get: ${list(ttt.map(itemName))}.` : '';
-  return `Claim ${claim.reference} (${claim.claimType}, ${claim.insurer}) is ready to register with the insurer: ${form}${later}${ours} `
+  const when = o.deadline ? ` ${o.deadline}` : '';
+  return `Claim ${claim.reference} (${claim.claimType}, ${claim.insurer}) is ready to register with the insurer: ${form}${later}${ours}${when} `
     + `Please check it and register it with ${claim.insurer}.`;
 }
 
@@ -1376,9 +1395,38 @@ function formDone(c: Ctx, st: FollowOnState): Step {
     });
   }
   st = policeFromForm(c, w, st, out);
-  // The date of the incident was on the form, so this is the first Tina can say anything about the insurer's deadline.
-  if (!st.introSent) deadlineNote(c, out);
-  return { state: proceed(c, w, { ...st, phase: 'items', asking: '', misses: 0, introSent: true, skipped: notYetOnForm(st, w) }, out, 'Thanks.'), out };
+  return { state: formEnd(c, w, st, out), out };
+}
+
+/**
+ * The user (9 Nov 2026): "when the form is submitted, that's it; it's done". The form blocks signing until everything the
+ * client can get is in, so Tina asks for nothing more on WhatsApp: no deadline note, no photos, no list of what's still to
+ * come. The form is filled and signed (with the signature from the form, or a link when that can't be used), the client
+ * gets one thank-you, and the broker's Follow-up says what the form left blank and the insurer's reporting date.
+ */
+function formEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[]): null {
+  workedOut(c, w, st, out);
+  const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
+  const ttt = forTtt(c.form, w);
+  if (!missing.length) out.push({ kind: 'evidence-complete', ...(ttt.length ? { forTtt: ttt } : {}) });
+  const deadline = reportingDate(c);
+  const ready = (signature: SignatureStatus) => readyToRegister(c.claim, missing, signature, ttt, { form: true, deadline });
+  // The signing step first, so the thank-you knows whether a link went after all.
+  out.push(
+    { kind: 'request-signature' },
+    { kind: 'closing', form: true },
+    { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), signed: ready('Signed'), template: READY_TO_REGISTER },
+  );
+  return null;
+}
+
+/** The insurer's reporting date for the broker, when it's near or passed (as the deadline note said to the client). */
+function reportingDate(c: Ctx): string | undefined {
+  if (!c.claim.facts.incidentAt) return undefined;
+  const d = notificationDeadline(c.claim.facts.incidentAt, c.form.notificationPeriodDays, c.now, c.warningDays);
+  if (!d) return undefined;
+  return `${c.claim.insurer} asks for claims to be reported within ${c.form.notificationPeriodDays} days of the incident: `
+    + `${d.variant === 'upcoming' ? 'by' : 'that date was'} ${longDate(d.deadline)}.`;
 }
 
 function answerQuestion(c: Ctx, w: Work, st: FollowOnState, input: Extract<ClientReply, { kind: 'question' }>, out: Out[], at: string): FollowOnState | null {
@@ -1936,10 +1984,20 @@ export function batchText(items: readonly QuestionItem[], o: { lead?: string; in
 export function closingText(signature: SignatureStatus): string {
   return [
     'Thank you for submitting the details.',
-    signature === 'Link sent' ? 'Please check and sign the form using the link I sent.' : '',
+    signature === 'Link sent' ? SIGN_WITH_LINK : '',
     'One of our consultants will be in contact with you.',
   ].filter(Boolean).join(' ');
 }
+
+/**
+ * The user (9 Nov 2026): the only thing Tina says once the client submits the guided form. The sign line only when the
+ * signature from the form couldn't be used and a link went instead.
+ */
+export const FORM_THANKS = 'Thank you!';
+export const FORM_CLOSING = 'A consultant from TTT will be in touch with you shortly. We will keep you updated on the status of your claim.';
+const SIGN_WITH_LINK = 'Please check and sign the form using the link I sent.';
+export const formClosingText = (signature: SignatureStatus) =>
+  [FORM_THANKS, signature === 'Link sent' ? SIGN_WITH_LINK : '', FORM_CLOSING].filter(Boolean).join(' ');
 
 /** "a, b and c". Names that come out the same (several missing questions of one group entry) are listed once. */
 export const list = (names: string[]) => {
@@ -2107,7 +2165,7 @@ export async function followOnTurn(
         await say(`Thanks, I've got ${itemName(o.item)}.`);
         break;
       case 'closing':
-        await say(closingText(signature));
+        await say(o.form ? formClosingText(signature) : closingText(signature));
         break;
       case 'still-missing':
         await say(stillMissingText(o.items, o.lead));

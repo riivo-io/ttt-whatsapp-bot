@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit b7ed5d4). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 2621603). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -228,7 +228,7 @@ function earlierValue(item: QuestionItem, master: MasterForm, earlier: readonly 
 /** The form's own view of a list: its general questions are asked here, even though Tina doesn't ask them on chat. */
 const asGuided = (form: ClaimForm, claim: Pick<FollowOnClaim, 'claimType' | 'facts'>): ClaimForm => withFacts(form, claim, 'show');
 
-const POLICE_HELP = "Not reported yet? Please do, and leave this blank. Tina will ask for it later.";
+const POLICE_HELP = "Not reported yet? Please do, and leave this blank. Your consultant will ask you for it.";
 
 /** The key whose answer says a burst geyser or pipe damaged the home: then the loss was damage, so it isn't asked. */
 const LOSS_KIND_KEY = 'lossKind';

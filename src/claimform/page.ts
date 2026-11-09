@@ -750,7 +750,7 @@ const SCRIPT = String.raw`
       if (blank.length) html += listBox('Left blank', blank, 'You can still sign. Your broker will follow these up with you.');
     } else {
       var missing = files.concat(blank);
-      if (missing.length) html += listBox('Still required', missing, 'You can submit now and send these later. Tina or your broker will follow up.');
+      if (missing.length) html += listBox('Still required', missing, 'You can submit now and send these later. Your consultant will follow up.');
     }
     visibleScreens().forEach(function (i) {
       var s = V.screens[i], rows = '';
