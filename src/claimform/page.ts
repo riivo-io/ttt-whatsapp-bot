@@ -181,7 +181,11 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .sign-acts { display:flex; justify-content:flex-end; }
 .need-box { border:1px solid #E2BC85; background:#FFFBF4; border-radius:12px; padding:10px 14px; display:grid; gap:4px; font-size:13.5px; color:var(--text); }
 .need-box b { color:var(--warn); font-weight:600; }
-.need-box ul { margin:0; padding-left:18px; }
+.need-box ul { margin:0; padding:0; list-style:none; display:grid; }
+/* The user (9 Nov 2026): each line on the list takes the client straight to it, rather than scrolling back. */
+.need-box .jump { display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%; min-height:40px; padding:6px 0; border:none; border-top:1px solid #F1DFC4; background:none; text-align:left; font-size:13.5px; line-height:1.35; color:var(--text); cursor:pointer; }
+.need-box li:first-child .jump { border-top:none; }
+.need-box .jump svg { flex:none; width:18px; height:18px; color:var(--accent-deep); }
 .panel.auto { grid-template-rows:auto auto auto; max-height:88%; }
 .terms { display:grid; gap:10px; font-size:14.5px; color:var(--text); line-height:1.45; }
 .terms p { margin:0; }
@@ -776,14 +780,35 @@ const SCRIPT = String.raw`
     render();
     return true;
   }
+  var ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
+  /** items: { text, jump } where jump is 'f:<question key>' or 'e:<photo or document key>': a tap goes to it. */
   function listBox(title, items, note) {
-    return '<div class="need-box"><b>' + esc(title) + '</b><ul>' + items.map(function (m) { return '<li>' + esc(m) + '</li>'; }).join('') + '</ul>' + (note ? '<span>' + esc(note) + '</span>' : '') + '</div>';
+    return '<div class="need-box"><b>' + esc(title) + '</b><ul>' + items.map(function (m) {
+      return '<li><button type="button" class="jump" data-jump="' + q(m.jump) + '"><span>' + esc(m.text) + '</span>' + ARROW + '</button></li>';
+    }).join('') + '</ul>' + (note ? '<span>' + esc(note) + '</span>' : '') + '</div>';
+  }
+  /**
+   * The user (9 Nov 2026): from the list on the summary straight to the question or the upload. Continue then reads "Back
+   * to summary" and goes back there, so the client doesn't step through the rest of the form to get back.
+   */
+  var toReview = false;
+  function jumpTo(jump) {
+    var kind = jump.slice(0, 2), key = jump.slice(2);
+    errors = {};
+    toReview = true;
+    if (kind === 'e:') {
+      here = { id: 'photos', anchor: visibleBlocks({ id: 'photos' }).some(function (b) { return b.key === key; }) ? key : null };
+      return render();
+    }
+    goFix(key);
   }
   /** The summary: the one step that may scroll. */
   function reviewHtml() {
     var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.sign ? 'you sign, and your claim is submitted' : V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
-    var needed = neededBlank(), files = needed.map(promptOf).concat(missingUploads().map(function (e) { return e.prompt; })), blank = [];
-    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper' && needed.indexOf(f) < 0) blank.push(promptOf(f)); }); });
+    var needed = neededBlank(), blank = [];
+    var files = needed.map(function (f) { return { text: promptOf(f), jump: 'f:' + f.key }; })
+      .concat(missingUploads().map(function (e) { return { text: e.prompt, jump: 'e:' + e.key }; }));
+    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper' && needed.indexOf(f) < 0) blank.push({ text: promptOf(f), jump: 'f:' + f.key }); }); });
     if (V.sign) {
       // What a client can always get must be in before they sign (the server checks it too), with the bare minimum the
       // broker needs; any other question left blank is one they don't know, and the broker follows it up.
@@ -872,7 +897,9 @@ const SCRIPT = String.raw`
     drawnAt = { id: here.id, i: here.i, anchor: here.anchor };
     $('prog').style.width = Math.round((i + part) / Math.max(1, steps.length - 1) * 100) + '%';
     if (!submitting) {
-      $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm' : 'Continue';
+      if (step.id === 'review') toReview = false;
+      $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm'
+        : toReview && (step.id === 'screen' || step.id === 'photos') ? 'Back to summary' : 'Continue';
     }
     $('next').disabled = busy;
     drawNotice();
@@ -1086,13 +1113,19 @@ const SCRIPT = String.raw`
     if (step.id === 'review' && V.sign) return toSign();
     if (step.id === 'sign') return submit(signature());
     if (step.id === 'review') return submit();
-    if (step.id === 'photos') return morePages ? advance(last) : move(1);
+    if (step.id === 'photos') return toReview ? backToReview() : morePages ? advance(last) : move(1);
     var c = collect(page);
     if (c.answers.length || c.notKnown.length || c.cleared.length) {
       forgetSaved(c.answers.map(function (a) { return a.key; }).concat(c.notKnown, c.cleared));
       enqueue(c);
     }
+    if (toReview) return backToReview();
     advance(last);
+  }
+  function backToReview() {
+    here = { id: 'review', anchor: null };
+    errors = {};
+    render();
   }
   /** Confirm and sign: what the client must add first, or on to the signature. */
   function toSign() {
@@ -1436,6 +1469,8 @@ const SCRIPT = String.raw`
       pumpUploads();
       return render();
     }
+    var j = e.target.closest('[data-jump]');
+    if (j) return jumpTo(j.dataset.jump);
     var g = e.target.closest('[data-go]');
     if (g) { here = g.dataset.go === 'photos' ? { id: 'photos', anchor: null } : { id: 'screen', i: Number(g.dataset.go), anchor: null }; errors = {}; return render(); }
     var ed = e.target.closest('[data-edit]');

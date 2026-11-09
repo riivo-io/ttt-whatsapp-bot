@@ -9,6 +9,8 @@
  *                                      { signature }: the client's signature from the form's last screen (a WhatsApp
  *                                      link, when the signing page is set up: the view's `sign`)
  *   POST /claim-form/api/links         TTTFG-5188: a link for an email claim, with the signing API's key
+ *   POST /claim-form/api/form-signature  whether an email claim's client signed at the end of its form, with the same key
+ *   POST /claim-form/api/sign-with-form  signs the email agent's new signing request with that signature, with the same key
  *   GET  /claim-form/api/blank-form    TTTFG-5188: an insurer's blank form for the email agent, with the same key
  * The token is the only key: it can't be guessed, and every call checks it again.
  */
@@ -42,14 +44,25 @@ export interface ClaimFormDeps extends GuidedLinkDeps {
     /** An insurer's blank form, as Tina reads it for a WhatsApp claim. */
     blankForm?(url: string): Promise<Uint8Array>;
     /**
-     * The user (9 Nov 2026): the signing page is set up, so a WhatsApp link's client signs at the end of the form and the
-     * signing step signs the filled form with that signature, instead of sending a link. Absent: Submit, and the link after.
+     * The user (9 Nov 2026): the signing page is set up, so the client signs at the end of the form and the signing step
+     * signs the filled form with that signature, instead of sending a link. Absent: Submit, and the link after.
      */
     signOnForm?: boolean;
+    /**
+     * The user (9 Nov 2026): an email claim signs on the form too. The email agent fills the form, so it asks whether there is
+     * a signature for the claim, and then has its own new signing request signed with it (claimform/signOnForm.ts).
+     */
+    emailSigning?: {
+        hasFormSignature(claimId: string): Promise<boolean>;
+        signWithForm(requestLink: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+    };
 }
 
-/** Whether this link's client signs on the form: a WhatsApp link (an email claim's caller sends its own), signing set up. */
-const signsHere = (d: ClaimFormDeps, link: GuidedLinkRow) => !!d.signOnForm && !link.callback_url;
+/**
+ * Whether this link's client signs on the form: signing set up, and for an email claim's link (callback_url) only when the
+ * email agent can use the signature.
+ */
+const signsHere = (d: ClaimFormDeps, link: GuidedLinkRow) => !!d.signOnForm && (!link.callback_url || !!d.emailSigning);
 
 const VOICE_MAX = 16 * 1024 * 1024;
 /** WhatsApp's own limit for an image is 5 MB and a document 100 MB; a phone's camera stays well under this. */
@@ -154,6 +167,28 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
             const made = await createGuidedLink(d, { claimId, contactId, phone: '', callbackUrl: url });
             res.status(201).json({ url: made.url, expiresAt: made.expiresAt });
         } catch (e) { failed('create', res, e); }
+    });
+
+    // The user (9 Nov 2026): the email agent's half of signing on the form. The drawing never leaves Tina: the agent asks
+    // whether there is one, and then names the signing request it made; Tina signs that request with it.
+    router.post('/api/form-signature', apiKey, express.json({ limit: '10kb' }), async (req: Request, res: Response) => {
+        const d = getDeps()!;
+        if (!d.emailSigning) return void off(res);
+        try {
+            const claimId = (req.body ?? {}).claimId;
+            if (typeof claimId !== 'string' || !/^[0-9a-f-]{36}$/i.test(claimId)) return void res.status(400).json({ ok: false, message: 'claimId is required' });
+            res.json({ ok: true, found: await d.emailSigning.hasFormSignature(claimId) });
+        } catch (e) { failed('form signature', res, e); }
+    });
+    router.post('/api/sign-with-form', apiKey, express.json({ limit: '10kb' }), async (req: Request, res: Response) => {
+        const d = getDeps()!;
+        if (!d.emailSigning) return void off(res);
+        try {
+            const link = (req.body ?? {}).link;
+            if (typeof link !== 'string' || !link.startsWith('https://')) return void res.status(400).json({ ok: false, message: 'link is required' });
+            const r = await d.emailSigning.signWithForm(link);
+            res.status(r.ok ? 200 : 409).json(r);
+        } catch (e) { failed('sign with form', res, e); }
     });
 
     router.get('/:token', async (req: Request, res: Response) => {

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 3bdd9e7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 45ae828). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
