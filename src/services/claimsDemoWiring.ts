@@ -23,7 +23,7 @@ import type { ResumePorts } from '../departments/insurance/resume';
 import { dataverseResumePorts, OPEN_STATUS_FILTER } from '../departments/insurance/resume-dataverse';
 import { onClaimChanged, requestClaimSignature, type SigningStep } from '../departments/insurance/signature-fill';
 import {
-    claimSigningStep, onClaimFormSigned, type SignedCallback, type SigningRequestCreated, type SigningRequestInput,
+    claimSigningStep, onClaimFormSigned, type FormSignature, type SignedCallback, type SigningRequestCreated, type SigningRequestInput,
 } from '../departments/insurance/signing';
 import { dataverseSigningPorts } from '../departments/insurance/signing-dataverse';
 import type { GuidedLinkRow } from '../claimform/links';
@@ -172,6 +172,10 @@ export interface DemoChannels {
 export interface DemoSigning {
     create(input: SigningRequestInput): Promise<SigningRequestCreated>;
     signedOff: boolean;
+    /** The user (9 Nov 2026): the signature the client drew at the end of the guided form, waiting for this claim. */
+    formSignature?(claimId: string): Promise<FormSignature | null>;
+    /** Signs a new request with that signature, and waits for the callback that files it. False: it couldn't. */
+    signWithFormSignature?(request: SigningRequestCreated, signature: FormSignature): Promise<boolean>;
 }
 
 export const FORM_CAPTION = "Here's your claim form, filled in from your answers. Please have a look. "
@@ -280,6 +284,14 @@ export function demoClaimSigningStep(ch: DemoChannels, signing: DemoSigning, pho
         signingClaim: async (claimId) => ({ ...(await dvPorts.signingClaim(claimId)), whatsApp: phone }),
         signedOff: () => signing.signedOff,
         createSigningRequest: (input) => signing.create(input),
+        ...(signing.formSignature && signing.signWithFormSignature ? {
+            formSignature: (claimId: string) => signing.formSignature!(claimId),
+            signWithFormSignature: async (request: SigningRequestCreated, signature: FormSignature) => {
+                const ok = await signing.signWithFormSignature!(request, signature);
+                ch.note?.(ok ? 'Claim form signed with the signature from the guided form' : "The guided form's signature couldn't be used; signing link instead");
+                return ok;
+            },
+        } : {}),
         send: {
             whatsapp: async (to, m) => {
                 await ch.sendText(to, m.text);

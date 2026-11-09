@@ -29,7 +29,18 @@ export interface GuidedLinkRow {
     finished_at: string | null;
     /** TTTFG-5188: an email claim's link. Who to tell when the client submits; absent on a WhatsApp link, whose `phone` Tina carries on with. */
     callback_url?: string | null;
+    /**
+     * The user (9 Nov 2026): the signature the client drew at the end of the form (a PNG data URL), until the signing step
+     * has used it (migration 20261109120000_guided_form_links_signature.sql). Null otherwise.
+     */
+    signature?: string | null;
+    signature_ip?: string | null;
+    signature_user_agent?: string | null;
+    signed_at?: string | null;
 }
+
+/** What the signing step needs of a signature from the form (the claims package's FormSignature). */
+export interface FormSignature { signature: string; ip: string | null; userAgent: string | null }
 
 export interface GuidedLinkStore {
     insert(row: GuidedLinkRow): Promise<void>;
@@ -37,6 +48,8 @@ export interface GuidedLinkStore {
     /** The claim's open links made before `createdBefore` become superseded. */
     supersedeOpen(claimId: string, createdBefore: string): Promise<void>;
     update(id: string, patch: Partial<GuidedLinkRow>): Promise<void>;
+    /** The claim's newest link that holds a signature from the form, or null. */
+    signedFor(claimId: string): Promise<GuidedLinkRow | null>;
 }
 
 export interface GuidedLinkDeps {
@@ -88,6 +101,20 @@ export async function openGuidedLink(d: GuidedLinkDeps, token: string, o: { reco
 
 export const finishGuidedLink = (d: GuidedLinkDeps, id: string) => d.store.update(id, { status: 'done', finished_at: nowOf(d).toISOString() });
 
+/** The signature from the end of the form, kept on the link until the signing step uses it. */
+export const saveFormSignature = (d: GuidedLinkDeps, id: string, s: FormSignature) =>
+    d.store.update(id, { signature: s.signature, signature_ip: s.ip, signature_user_agent: s.userAgent?.slice(0, 400) ?? null, signed_at: nowOf(d).toISOString() });
+
+/** The claim's signature from the form, and its link, or null. */
+export async function formSignatureFor(d: GuidedLinkDeps, claimId: string): Promise<(FormSignature & { linkId: string }) | null> {
+    const row = await d.store.signedFor(claimId);
+    return row?.signature ? { linkId: row.id, signature: row.signature, ip: row.signature_ip ?? null, userAgent: row.signature_user_agent ?? null } : null;
+}
+
+/** Once the signing step has used it (or couldn't), the drawing isn't kept here: the signed form and its audit are the record. */
+export const clearFormSignature = (d: GuidedLinkDeps, linkId: string) =>
+    d.store.update(linkId, { signature: null, signature_ip: null, signature_user_agent: null });
+
 /**
  * TTTFG-5188: the client submitted an email claim's form, so its caller carries on. A POST of JSON signed under the caller's
  * own key, as the signing page's callback is. Thrown when it isn't taken: the client's Submit then fails and can be tried again.
@@ -135,6 +162,10 @@ export function memoryLinkStore(): GuidedLinkStore & { rows: Map<string, GuidedL
             const r = rows.get(id);
             if (r) Object.assign(r, patch);
         },
+        async signedFor(claimId) {
+            const r = [...rows.values()].filter((x) => x.claim_id === claimId && x.signature).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+            return r ? { ...r } : null;
+        },
     };
 }
 
@@ -161,6 +192,12 @@ export function supabaseLinkStore(client?: SupabaseClient): GuidedLinkStore {
         async update(id, patch) {
             const { error } = await db().from('guided_form_links').update(patch).eq('id', id);
             fail('update', error);
+        },
+        async signedFor(claimId) {
+            const { data, error } = await db().from('guided_form_links').select('*').eq('claim_id', claimId).not('signature', 'is', null)
+                .order('created_at', { ascending: false }).limit(1).maybeSingle();
+            fail('signature', error);
+            return (data as GuidedLinkRow | null) ?? null;
         },
     };
 }

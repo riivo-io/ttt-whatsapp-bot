@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 7cb9533). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit b7ed5d4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
@@ -359,8 +359,17 @@ const STEPPERS_BY_MASTER: Partial<Record<MasterFormId, Readonly<Record<string, E
     thirdParties: { kind: 'stepper', group: 'otherParties', label: 'How many other cars were involved?', none: 'No other cars', one: 'other car', many: 'other cars' },
   },
 };
+/**
+ * A kind of claim's own control, where its master form's doesn't fit. A windscreen claim (the user, 9 Nov 2026) is about
+ * the glass, so its damaged parts are the car's glass as taps, not the drawing of the whole car.
+ */
+const GLASS = ['Windscreen', 'Rear window', 'Left side windows', 'Right side windows', 'Sunroof'];
+const BY_CLAIM_TYPE: Readonly<Record<string, Readonly<Record<string, FormControl>>>> = {
+  Windscreen: { damagedParts: multi(GLASS, { other: true, label: 'Which glass is damaged?' }) },
+};
 /** The control of a question on one kind of claim's form. */
-export const formControl = (master: MasterFormId, key: string): FormControl | undefined => BY_MASTER[master]?.[key] ?? FORM_CONTROLS[key];
+export const formControl = (master: MasterFormId, key: string, claimType?: string): FormControl | undefined =>
+  (claimType ? BY_CLAIM_TYPE[claimType]?.[key] : undefined) ?? BY_MASTER[master]?.[key] ?? FORM_CONTROLS[key];
 export const formStepper = (master: MasterFormId, key: string) => STEPPERS_BY_MASTER[master]?.[key] ?? FORM_STEPPERS[key];
 
 /**

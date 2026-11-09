@@ -728,11 +728,12 @@ test('TTTFG-5562 AC 1: with the setting on, the link goes straight after the pol
     await openClaim(w);
     const followOn = w.store.get(PHONE)?.resume.followOn;
     assert.equal(followOn?.phase, 'form');
-    assert.match(w.sent.at(-1)!, /tap below to fill in your claim form/);
+    // The user (9 Nov 2026): the form and nothing else after the walkthrough: no reference, no AI notice, no offer to chat.
+    assert.equal(w.sent.at(-1), 'Fill out the form below to submit your claim.');
     const all = w.sent.join('\n');
-    // The reference message says it; the rest is on the form.
-    assert.match(all, /Your claim reference is/);
-    assert.match(all, /TTT uses AI tools to enhance your experience/);
+    assert.doesNotMatch(all, /Your claim reference is/);
+    assert.doesNotMatch(all, /TTT uses AI tools/);
+    assert.doesNotMatch(all, /"chat"/);
     assert.doesNotMatch(all, /all the facts that matter/);
     assert.doesNotMatch(all, /Tap \*Ready\*/);
     assert.doesNotMatch(all, /Please tell me in your own words/);

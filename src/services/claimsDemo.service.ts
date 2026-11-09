@@ -65,6 +65,7 @@ import { createGuidedLink, EMAIL_CLAIM_CALLER, guidedFormOn, guidedLinksFromEnv,
 import type { ClaimFormDeps, ClaimFormSession } from '../routes/claimForm.route';
 import { callbackSecretFromEnv, signingFromEnv } from '../signing/env';
 import { callerCallbackKey, createSigningRequest } from '../signing/signing';
+import { signWithFormSignature } from '../claimform/signOnForm';
 import { enqueueClaimsBatchCheck, enqueueClaimsFormDone, enqueueClaimsReminder } from '../queue/whatsappQueue';
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
@@ -192,11 +193,14 @@ function guidedLinkMaker(): Pick<DemoChannels, 'guidedLink'> {
 function signing(): DemoSigning | undefined {
     const d = signingFromEnv();
     if (!d) return undefined;
+    const links = guidedLinksFromEnv();
     return {
         create: (input) => createSigningRequest(d, { ...input, callbackUrl: `${d.publicUrl}/webhook/claim-signed` }),
         signedOff: process.env.CLAIMS_SIGN_TEMPLATE_SIGNED_OFF === 'yes',
+        ...(links ? signWithFormSignature(d, links) : {}),
     };
 }
+
 
 /**
  * TTTFG-5196: the client signed a demo claim's form (routes/claimSigned.route.ts). The callback sends the client
@@ -364,6 +368,8 @@ function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
 export function claimFormDeps(): ClaimFormDeps | null {
     const d = guidedLinksFromEnv();
     return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null, apiKey: process.env.SIGNING_API_KEY || undefined,
+        // The user (9 Nov 2026): with the signing page set up, the client signs at the end of the form.
+        ...(signingFromEnv() ? { signOnForm: true } : {}),
         blankForm: (url) => blankForm(channels(newCrmStats(), newDemoLog()), url) } : null;
 }
 

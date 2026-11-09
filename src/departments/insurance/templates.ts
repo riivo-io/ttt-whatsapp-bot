@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 7cb9533). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit b7ed5d4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -60,21 +60,20 @@ export const DISCLOSURE_TEMPLATE = {
 } as const;
 
 /**
- * TTTFG-5562: what opens the guided form, quick to get through: the AI notice and the duty of disclosure that Tina doesn't
- * send on WhatsApp when she sends the form. Fixed text for the same reason as the rest of this file. Saved under the duty of
+ * TTTFG-5562: what opens the guided form, quick to get through: the duty of disclosure that Tina doesn't send on
+ * WhatsApp when she sends the form. Fixed text for the same reason as the rest of this file. Saved under the duty of
  * disclosure's name, so a client who moves to chat later isn't told it again.
+ * form-draft-2 (the user, 9 Nov 2026): the duty of disclosure and how to stop and come back, nothing else, and Begin.
  */
 export const FORM_TERMS = {
   name: DISCLOSURE_TEMPLATE.name,
-  version: 'form-draft-1',
+  version: 'form-draft-2',
   title: 'Before you start',
   lines: [
-    'TTT uses AI tools to enhance your experience. A broker at TTT reviews your claim before it goes to the insurer.',
     "Please give the insurer all the facts that matter, honestly and in full. If you're not sure whether something matters, tell us anyway.",
-    'Only your insurer can decide on your claim.',
     "If you don't know something, just leave it blank. You can stop and come back with the same link.",
   ],
-  agree: 'I agree',
+  agree: 'Begin',
 } as const;
 
 export type ClaimTemplate = typeof DEADLINE_UPCOMING_TEMPLATE | typeof DEADLINE_PASSED_TEMPLATE | typeof DISCLOSURE_TEMPLATE;

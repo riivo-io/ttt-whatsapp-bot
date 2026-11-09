@@ -10,7 +10,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import express from 'express';
-import { createGuidedLink, memoryLinkStore, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
+import { createGuidedLink, formSignatureFor, memoryLinkStore, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
 import { expandRows } from '../departments/insurance/claimform';
 import type { ClaimForm } from '../departments/insurance/contracts';
 import type { FollowOnClaim, FollowOnPorts, StoredClaimForm } from '../departments/insurance/followon';
@@ -93,16 +93,25 @@ function session(link: GuidedLinkRow): ClaimFormSession {
         finish: () => finishGuided(p, link.claim_id, new Date()),
         carryOn: async () => {
             done.push(link.claim_id);
-            console.log(`  ${link.claim_id}: submitted. Tina would now ask on WhatsApp for anything still missing, fill the form and send the signing link.`);
+            const signed = await formSignatureFor(D, link.claim_id);
+            console.log(signed
+                ? `  ${link.claim_id}: submitted and signed on the form (signature ${signed.signature.length} characters). Tina would now fill the form and sign it with this signature: no signing link.`
+                : `  ${link.claim_id}: submitted. Tina would now ask on WhatsApp for anything still missing, fill the form and send the signing link.`);
         },
     };
 }
 
+const D: GuidedLinkDeps = { store: memoryLinkStore(), publicUrl: `http://localhost:${PORT}` };
+
 async function main() {
-    const d: GuidedLinkDeps = { store: memoryLinkStore(), publicUrl: `http://localhost:${PORT}` };
+    const d = D;
     const app = express();
-    app.use('/claim-form', claimFormRouter(() => ({ ...d, session, whatsApp: '27000000000' })));
-    app.get('/__claim/:name', (req, res) => res.json({ claim: claims.get(req.params.name), submitted: done.includes(req.params.name) }));
+    // The user (9 Nov 2026): signing on the form, as when the signing page is set up. --no-sign shows the old Submit.
+    const signOnForm = !process.argv.includes('--no-sign');
+    app.use('/claim-form', claimFormRouter(() => ({ ...d, session, whatsApp: '27000000000', signOnForm })));
+    app.get('/__claim/:name', async (req, res) => res.json({
+        claim: claims.get(req.params.name), submitted: done.includes(req.params.name), signedOnForm: !!(await formSignatureFor(d, req.params.name)),
+    }));
     const links: Record<string, string> = {};
     // A list of every form, so the preview opens on something to click.
     app.get('/', (_req, res) => res.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Guided form preview</title>

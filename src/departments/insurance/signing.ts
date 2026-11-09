@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit 7cb9533). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit b7ed5d4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -142,8 +142,26 @@ export interface LinkMessage {
   subject: string;
 }
 
+/** The signature the client drew at the end of the guided form, with what the signing page records with one. */
+export interface FormSignature {
+  /** A PNG data URL, as the signing page's pad makes it. */
+  signature: string;
+  ip: string | null;
+  userAgent: string | null;
+}
+
 export interface ClaimSigningPorts {
   signingClaim(claimId: string): Promise<SigningClaim>;
+  /**
+   * The user (9 Nov 2026): the client signed at the end of the guided form. The signature waiting for this claim, or
+   * null. Absent: there is no such signature, and the link goes as before.
+   */
+  formSignature?(claimId: string): Promise<FormSignature | null>;
+  /**
+   * Signs the new request with that signature (the signing page's own signing: the same hash check, stamp, audit and
+   * callback) and waits for the callback, which files the signed copy and sets the claim to Signed. False: it couldn't.
+   */
+  signWithFormSignature?(request: SigningRequestCreated, signature: FormSignature): Promise<boolean>;
   /** TTTFG-4869: the template is signed off (broker lead and FAIS reviewer) and, on WhatsApp, approved by Meta. */
   signedOff(template: typeof SIGN_FORM_TEMPLATE, channel: SignChannel): boolean;
   createSigningRequest(input: SigningRequestInput): Promise<SigningRequestCreated>;
@@ -172,6 +190,29 @@ export function claimSigningStep(ports: ClaimSigningPorts): SigningStep {
     if (!claim.channel) return followUp('the claim has no channel');
     const name = CHANNEL_NAME[claim.channel];
     const to = claim.channel === 'whatsapp' ? claim.whatsApp : claim.email;
+
+    // Signed on the form: the filled form is signed now and no link goes. No message goes either, so the link's
+    // template needn't be signed off. If it can't be signed, the link goes as before (a new request supersedes this one).
+    const onForm = ports.formSignature && ports.signWithFormSignature && to && document.stamps?.some((s) => s.kind === 'signature')
+      ? await ports.formSignature(claimId).catch(() => null) : null;
+    if (onForm && to) {
+      try {
+        const request = await ports.createSigningRequest({
+          document: document.bytes, documentHash: document.fileHash ?? sha256(document.bytes), fileName: document.fileName,
+          title: `Claim form for ${claim.insurer} (${claim.reference})`, channel: claim.channel, sentTo: to,
+          caller: 'claim', callerRecordId: claimId, stamps: document.stamps,
+        });
+        if (await ports.signWithFormSignature!(request, onForm)) {
+          await ports.createAgentAction({
+            kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at,
+            detail: `The client signed the claim form for ${claim.reference} at the end of the guided form, so no signing link went.`,
+          }).catch(() => undefined);
+          return 'signed';
+        }
+      } catch (e) {
+        console.error(`Signing ${claim.reference} with the form's signature failed: ${(e as Error).message}`);
+      }
+    }
     if (!to) return followUp(`there is no ${claim.channel === 'whatsapp' ? 'WhatsApp number' : 'email address'} on the claim`);
     const send = ports.send[claim.channel];
     if (!send) return followUp(`signing links can't go out on ${name} yet`);
