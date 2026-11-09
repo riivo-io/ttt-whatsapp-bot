@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit ff8e5de). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 7cb9533). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -153,29 +153,27 @@ export interface FnolEmailVars {
   firstName: string;
   /** The claim reference, CLM-…. */
   reference: string;
-  /** Who looks after the claim: the broker's first name, or the team as the client reads it. */
-  owner: string;
   link?: string;
+  /** The last day the link works, as a calendar date in South Africa, YYYY-MM-DD. */
   expiresOn?: string;
 }
 
 /**
  * TTTFG-5188 AC 5: the acknowledgement for a claim that came in by email. Sent with no approval, so it is fixed text filled
- * with CRM data: Claude writes none of it. The AI line is the same as on WhatsApp (claim.ts AI_HANDLING_LINE). It names
- * the owner as the story says; on 28 Oct 2026 TTT asked that Tina never names the person on WhatsApp, so TTT settles this
- * when it approves the wording.
+ * with CRM data: Claude writes none of it. The AI line is the same as on WhatsApp (claim.ts AI_HANDLING_LINE).
+ * draft-3 (the user, 6 Nov 2026): no broker's name, as on WhatsApp since TTT's 28 Oct feedback (FNOL_TEMPLATE draft-3),
+ * and the link's last day written out ("20 November 2026"), as in the signing link.
  */
 export const FNOL_EMAIL_TEMPLATE = {
   name: 'Claim - FNOL logged (email)',
-  version: 'draft-2',
+  version: 'draft-3',
   approved: false,
   subject: (v: Pick<FnolEmailVars, 'reference'>) => `Your claim is logged (${v.reference})`,
   render: (v: FnolEmailVars) => [
     `Thanks ${v.firstName}, your claim is logged. Your claim reference is ${v.reference}.`,
-    `${v.owner.charAt(0).toUpperCase()}${v.owner.slice(1)} will look after your claim.`,
     // The user (3 Nov 2026): one email. With the form's link when it can go with it; otherwise the link follows on its own.
     ...(v.link
-      ? ['Next step: please fill in your claim form here:', v.link, `You can stop and come back to it: the link works until ${v.expiresOn}. Once you've submitted it, we'll email you the form to sign.`]
+      ? ['Next step: please fill in your claim form here:', v.link, `You can stop and come back to it: the link works until ${longDate(v.expiresOn!)}. Once you've submitted it, we'll email you the form to sign.`]
       : ["Next steps: we'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have."]),
     AI_HANDLING_LINE,
     'Kind regards,\nTTT',
@@ -185,19 +183,19 @@ export const FNOL_EMAIL_TEMPLATE = {
 /**
  * TTTFG-5188 (the user, 3 Nov 2026): an email claim gets the guided form rather than a list of questions, as on WhatsApp
  * (TTTFG-5562). Fixed wording filled with CRM values and the link, so it goes without approval, as the signing link does.
- * The wording waits for TTT's approval with the acknowledgement's.
+ * The wording waits for TTT's approval with the acknowledgement's. draft-2 (6 Nov 2026): the link's last day written out.
  */
-export interface FormLinkEmailVars { firstName: string; reference: string; link: string; expiresOn: string }
+export interface FormLinkEmailVars { firstName: string; reference: string; link: string; /** South African date, YYYY-MM-DD. */ expiresOn: string }
 
 export const FORM_LINK_EMAIL_TEMPLATE = {
   name: 'Claim - form link (email)',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
   subject: (v: Pick<FormLinkEmailVars, 'reference'>) => `Your claim form (${v.reference})`,
   render: (v: FormLinkEmailVars) => [
     `Hi ${v.firstName}, to carry on with your claim (${v.reference}), please fill in your claim form here:`,
     v.link,
-    `You can stop and come back to it: the link works until ${v.expiresOn}. Once you've submitted it, we'll email you the form to sign.`,
+    `You can stop and come back to it: the link works until ${longDate(v.expiresOn)}. Once you've submitted it, we'll email you the form to sign.`,
     'Kind regards,\nTTT',
   ].join('\n\n'),
 } as const;
@@ -327,30 +325,34 @@ export interface StatusTemplate {
   emailSubject(v: StatusUpdateVars): string;
 }
 
+// riivo's best guess, approved by riivo on 6 Nov 2026 so the story can be tested; TTT's Insurance and Advice department
+// still has to confirm it (AC 4), and their wording goes in as a new version. `metaApproved` stays false here: Meta approves
+// per WhatsApp account, so each environment says so with CLAIMS_STATUS_META_APPROVED (statusupdate-dataverse.ts).
+// Meta refuses a body that starts or ends with a variable, or is mostly variables, so both carry fixed text around them.
 export const UNDER_ASSESSMENT_TEMPLATE: StatusTemplate = {
   name: 'Claim - under assessment',
-  version: 'draft-1',
-  approved: false,
+  version: 'riivo-1',
+  approved: true,
   metaApproved: false,
   meta: 'claim_under_assessment',
   templateVersion: 1,
   /** For Meta: {{1}} our reference, {{2}} the insurer. */
-  whatsappBody: 'Your claim {{1}} is being assessed by {{2}}.',
+  whatsappBody: 'An update on your claim {{1}}: {{2}} is now assessing it. You don\'t need to do anything for now. We will be in touch when there is news.',
   params: (v) => [v.reference, v.insurer],
-  render: (v) => `Your claim ${v.reference} is being assessed by ${v.insurer}.`,
+  render: (v) => `An update on your claim ${v.reference}: ${v.insurer} is now assessing it. You don't need to do anything for now. We will be in touch when there is news.`,
   emailSubject: (v) => `Your claim ${v.reference} is being assessed`,
 };
 
 export const ADDITIONAL_INFO_TEMPLATE: StatusTemplate = {
   name: 'Claim - additional info requested',
-  version: 'draft-1',
-  approved: false,
+  version: 'riivo-1',
+  approved: true,
   metaApproved: false,
   meta: 'claim_additional_info',
   templateVersion: 1,
-  /** For Meta: {{1}} our reference, {{2}} the insurer. A body can't start or end with a variable. */
-  whatsappBody: 'On your claim {{1}}, {{2}} has asked for more information. Your broker will tell you what is needed.',
+  /** For Meta: {{1}} our reference, {{2}} the insurer. */
+  whatsappBody: 'An update on your claim {{1}}: {{2}} has asked for more information before they can carry on. We will be in touch to tell you what is needed.',
   params: (v) => [v.reference, v.insurer],
-  render: (v) => `On your claim ${v.reference}, ${v.insurer} has asked for more information. Your broker will tell you what is needed.`,
+  render: (v) => `An update on your claim ${v.reference}: ${v.insurer} has asked for more information before they can carry on. We will be in touch to tell you what is needed.`,
   emailSubject: (v) => `More information needed on your claim ${v.reference}`,
 };
