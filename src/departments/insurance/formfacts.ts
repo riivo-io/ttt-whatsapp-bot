@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formfacts.ts (commit 297301a). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formfacts.ts (commit 0bdca86). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562 (2 Nov 2026): when the guided form is on, Tina sends the link right after the policy and the kind of claim, so
 // what the walkthrough used to ask (what happened, when, where, who else) is asked on the form. These are those questions.

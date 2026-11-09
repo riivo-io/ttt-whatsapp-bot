@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-unknown.ts (commit 297301a). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-unknown.ts (commit 0bdca86). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299 AC 2: roadside help for a number that matches no client. The one thing Tina gives an unknown number
 // (decided 9 October 2026), because an insurer's assist line is not client data.
@@ -12,7 +12,7 @@
 // Motor only and no emergency numbers, as for a client (roadside.ts).
 import { DEPARTMENT, sendText, shortInsurer, type Choice, type Conversation } from './claim';
 import {
-  NOT_READ, numberText, POLICY_CARD, ROADSIDE_REASON, sastWhen,
+  COMMON_NAMES, nameWords, NOT_READ, numberText, POLICY_CARD, ROADSIDE_REASON, sastWhen,
   type Insurer, type RoadsidePorts, type RoadsideResult, type RoadsideState,
 } from './roadside';
 import type { RoadsideRoute } from './roadside-intent';
@@ -24,13 +24,7 @@ export const INSURER_NOT_FOUND = `I couldn't find that insurer on our system. ${
 /** AC 2: no claim for an unknown number, and how to claim instead. */
 export const UNKNOWN_CLAIM_LINE = "I can't open a claim from this number. If you'd like to claim, please email TTT from the email address we have on file for you.";
 
-/** Words that never tell one insurer from another. */
-const GENERIC = new Set([
-  'insurance', 'insure', 'insurer', 'insurers', 'insured', 'company', 'limited', 'ltd', 'pty', 'short', 'term', 'shortterm', 'group', 'the',
-  'of', 'and', 'sa', 'south', 'africa', 'african', 'co', 'general', 'holdings', 'direct', 'my', 'with', 'is', 'im', 'i', 'am', 'its', 'it', 'car',
-]);
-const words = (t: string) => t.toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter((w) => w && !GENERIC.has(w));
-const keyOf = (i: Insurer) => words(i.name).join(' ');
+const keyOf = (i: Insurer) => nameWords(i.name).join(' ');
 
 /** One insurer per name: two rows with the same name read the same, so the one with a number stands for both. */
 function distinct(list: Insurer[]): Insurer[] {
@@ -44,17 +38,17 @@ function distinct(list: Insurer[]): Insurer[] {
 }
 
 /**
- * The insurers the client's words name. The whole name first ("old mutual" is Old Mutual Insure, not Old Mutual Life
- * as well); then the first word of a name ("king" for King Price), when it is at least four letters.
+ * The insurers the client's words name: the whole name ("old mutual" is Old Mutual Insure, not Old Mutual Life as well).
+ * `answer`: the client is answering "which insurer?", so the reply may be the start of a name ("King" for King Price),
+ * and an insurer whose name is an everyday word ("One", "First For Women", "Auto & General") counts. In any other
+ * message such a name is never read as an insurer: "one of my tyres burst" names no insurer (code review, 9 Nov 2026).
  */
-export function matchInsurers(insurers: Insurer[], text: string): Insurer[] {
-  const said = ` ${words(text).join(' ')} `;
-  const named = insurers.filter((i) => keyOf(i) && said.includes(` ${keyOf(i)} `));
-  if (named.length) return distinct(named);
-  return distinct(insurers.filter((i) => {
-    const first = keyOf(i).split(' ')[0];
-    return first.length >= 4 && said.includes(` ${first} `);
-  }));
+export function matchInsurers(insurers: Insurer[], text: string, o: { answer?: boolean } = {}): Insurer[] {
+  const said = nameWords(text).join(' ');
+  const everyday = (i: Insurer) => keyOf(i).split(' ').every((w) => COMMON_NAMES.has(w)) || COMMON_NAMES.has(keyOf(i).split(' ')[0]);
+  const named = insurers.filter((i) => keyOf(i) && ` ${said} `.includes(` ${keyOf(i)} `) && (o.answer || !everyday(i)));
+  if (named.length || !o.answer) return distinct(named);
+  return said.length >= 4 ? distinct(insurers.filter((i) => keyOf(i).startsWith(`${said} `))) : [];
 }
 
 const choices = (list: Insurer[]): Choice[] => list.map((i, n) => ({ title: shortInsurer(i.name), reply: `${n + 1}. ${i.name}` }));
@@ -102,8 +96,8 @@ export async function roadsideFromUnknownReply(ports: RoadsidePorts, conv: Conve
   const tapped = tap && state.candidates ? state.candidates[Number(tap[1]) - 1] : undefined;
   if (tapped) return sendFor(ports, conv, state, tapped, tapped.name, at);
 
-  const inList = state.candidates ? matchInsurers(state.candidates, text) : [];
-  const found = inList.length ? inList : matchInsurers(await ports.insurers(), text);
+  const inList = state.candidates ? matchInsurers(state.candidates, text, { answer: true }) : [];
+  const found = inList.length ? inList : matchInsurers(await ports.insurers(), text, { answer: true });
   if (found.length === 1) return sendFor(ports, conv, state, found[0], found[0].name, at);
   if (found.length > 1 && found.length <= 10) {
     const lastSent = await sendText(ports, conv, WHICH_OF_THESE, null, at, undefined, choices(found));

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 297301a). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 0bdca86). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -500,7 +500,8 @@ const when = (iso: string) => {
   return new Date(t).toLocaleString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
-const describe = (p: Policy) => `${p.insurer} ${p.product} policy (${p.policyNumber})`;
+/** How a policy is named to the client: "Discovery Insure Motor policy (DI-1)". TTTFG-5299: roadside's taps use it too. */
+export const describe = (p: Policy) => `${p.insurer} ${p.product} policy (${p.policyNumber})`;
 
 /**
  * Default wording for a question. Plain and short; Claude may phrase it instead (never for the fixed messages).
@@ -728,7 +729,8 @@ export async function claimTurn(
   return { state: turn.state, lastSent };
 }
 
-async function ownerFor(ports: ClaimPorts, policyId: string | undefined): Promise<Owner> {
+/** Who owns a follow-up: the policy's broker, else the Insurance and Advice team (claimOwner). TTTFG-5299: roadside's rows too. */
+export async function ownerFor(ports: ClaimPorts, policyId: string | undefined): Promise<Owner> {
   const team = await ports.insuranceTeam();
   return claimOwner(policyId ? await ports.policyOwner(policyId) : null, team);
 }

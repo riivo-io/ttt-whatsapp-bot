@@ -832,3 +832,19 @@ test('TTTFG-5299: roadside off (no model): a breakdown is read as anything else,
     const w = world({ isClaim: false });
     assert.equal(await say(w, "I've broken down on the N1", DAY1), 'hello');
 });
+
+test('TTTFG-5299 (code review): an answer to an open claim\'s question is never read as roadside', async () => {
+    const w = world({ isClaim: false });
+    let roadsideCalls = 0;
+    w.deps.roadsideModel = async () => (roadsideCalls++, ROADSIDE);
+    w.deps.openRoadsideRequest = async () => 'req-roadside';
+    await w.deps.save(PHONE, {
+        contactId: CONTACT, requestId: 'req-1', walk: null, held: [], lastSent: 'Where is the vehicle now?',
+        resume: { followOn: { claimId: 'claim-1', phase: 'items', asking: 'vehicleWhere', misses: 0 } as never, pending: null },
+    });
+    // The message goes on to be read against the claim (this world holds no claim row, so that part may throw here):
+    // the point is that roadside never saw it.
+    const out = await say(w, "It's stuck at the tow yard in Epping", DAY1).catch(() => 'read against the claim');
+    assert.notEqual(out, 'roadside');
+    assert.equal(roadsideCalls, 0);
+});

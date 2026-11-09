@@ -360,7 +360,10 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     }
 
     // ---- TTTFG-5299: a car that has broken down, before anything is read against the open claims ----
-    if (deps.roadsideModel && deps.openRoadsideRequest && !m.file && m.text.trim()) {
+    // Not while an open claim is waiting on an answer (a question of the follow-on, or "which claim?"): "it's stuck at
+    // the tow yard" answers "Where is the vehicle now?" and must reach the claim (code review, 9 Nov 2026).
+    const answering = !!c.resume.followOn?.asking || !!c.resume.pending;
+    if (deps.roadsideModel && deps.openRoadsideRequest && !m.file && m.text.trim() && !answering) {
         const route = await roadsideRoute(watch(deps.roadsideModel), m.text);
         if (unavailable) return busy();
         if (route) {

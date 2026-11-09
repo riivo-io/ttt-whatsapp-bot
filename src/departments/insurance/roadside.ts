@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit 297301a). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit 0bdca86). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299: roadside help on WhatsApp. A client whose car has broken down gets their insurer's assist number from the
 // CRM straight away, at any hour, with no person involved; the broker sees in My Day that their client needed help.
@@ -20,7 +20,7 @@
 //
 // An unknown number is roadside-unknown.ts (AC 2); roadside-turn.ts is what the host calls. Every text goes through the claim gate (sendText).
 // DRAFT WORDING (decision D11): the Insurance and Advice department approves it before go-live.
-import { CLIENT_BROKER, claimOwner, DEPARTMENT, sendText, shortInsurer, YES_NO, type ClaimPorts, type Choice, type Conversation, type Owner } from './claim';
+import { CLIENT_BROKER, DEPARTMENT, describe, ownerFor, sendText, shortInsurer, YES_NO, type ClaimPorts, type Choice, type Conversation } from './claim';
 import type { RoadsideRoute } from './roadside-intent';
 import { policyKind, type Policy } from './walkthrough';
 
@@ -110,8 +110,6 @@ export function numbersText(groups: InsurerGroup[], hurt: boolean): string {
   return `${lead}\n${lines.join('\n')}\n\nYour insurer will confirm what your policy includes when you call.`;
 }
 
-const describe = (p: Policy) => `${p.insurer} ${p.product} policy (${p.policyNumber})`;
-
 /** AC 3: one tap per motor policy. Two at one insurer would read the same, so their numbers tell them apart. */
 export function policyChoices(policies: Policy[]): Choice[] {
   const twice = (p: Policy) => policies.filter((x) => x.providerId === p.providerId).length > 1;
@@ -124,17 +122,35 @@ export function policyChoices(policies: Policy[]): Choice[] {
 
 const squash = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-/** The policy the client tapped or named: "2. Santam ...", "2", the policy number, or the insurer's name. */
+/** Words that never tell one insurer from another. */
+const GENERIC = new Set([
+  'insurance', 'insure', 'insurer', 'insurers', 'insured', 'company', 'limited', 'ltd', 'pty', 'short', 'term', 'shortterm', 'group', 'the',
+  'of', 'and', 'sa', 'south', 'africa', 'african', 'co', 'general', 'holdings', 'direct', 'my', 'with', 'is', 'im', 'i', 'am', 'its', 'it', 'car',
+]);
+/**
+ * Insurer names that are everyday words ("One", "First For Women", "Auto & General", "Budget", "Compass"): never read
+ * from words the client wrote about something else, only from an answer to "which insurer?" (code review, 9 Nov 2026).
+ */
+export const COMMON_NAMES = new Set(['one', 'first', 'auto', 'budget', 'compass', 'cia', 'senate', 'zone']);
+/** The words of a name or a message that can tell insurers apart: lower case, no punctuation, no generic words. */
+export const nameWords = (t: string) => t.toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter((w) => w && !GENERIC.has(w));
+
+/**
+ * The policy the client tapped or named: its number in the list ("2", "2. Santam ..."), its policy number, or its
+ * insurer's name as a whole phrase ("Old Mutual") or a first word of four letters or more that isn't an everyday word.
+ */
 export function pickPolicy(policies: Policy[], text: string): Policy | undefined {
   const n = /^\s*(\d{1,2})\s*(?:[.)]|$)/.exec(text);
   if (n) return policies[Number(n[1]) - 1];
   const said = squash(text);
-  const byNumber = policies.filter((p) => p.policyNumber && said.includes(squash(p.policyNumber)));
+  const byNumber = policies.filter((p) => p.policyNumber && squash(p.policyNumber).length >= 3 && said.includes(squash(p.policyNumber)));
   if (byNumber.length === 1) return byNumber[0];
+  const words = ` ${nameWords(text).join(' ')} `;
   const insurers = new Set<string>();
   const named = policies.filter((p) => {
-    const word = shortInsurer(p.insurer).toLowerCase().split(/\s+/)[0];
-    const hit = word.length >= 3 && new RegExp(`\\b${word.replace(/[^a-z0-9]/g, '')}`, 'i').test(text);
+    const name = nameWords(shortInsurer(p.insurer));
+    const first = name[0] ?? '';
+    const hit = (name.length > 0 && words.includes(` ${name.join(' ')} `)) || (first.length >= 4 && !COMMON_NAMES.has(first) && words.includes(` ${first} `));
     if (hit) insurers.add(p.providerId);
     return hit;
   });
@@ -142,17 +158,16 @@ export function pickPolicy(policies: Policy[], text: string): Policy | undefined
   return insurers.size === 1 ? named[0] : undefined;
 }
 
-export const YES_WORDS = /^\W*(yes|yeah|yep|ja|yebo|please|ok(ay)?|sure|start|go ahead)\b/i;
-export const NO_WORDS = /^\W*(no|nope|nah|not now|nee|later|don'?t|not yet)\b/i;
+/**
+ * A clear yes to "would you like me to start a claim?": it starts with yes (or yeah, yep, ja, yebo, sure), or it is only
+ * "ok", "please", "go ahead" or "start". "please hurry, the tow truck isn't here" is not a yes (code review, 9 Nov 2026).
+ */
+export const YES_WORDS = /^\W*(?:(?:yes|yeah|yep|ja|yebo|sure)\b|(?:ok(?:ay)?|please(?: do)?|go ahead|start(?: it| one| a claim)?)\W*$)/i;
+export const NO_WORDS = /^\W*(?:no|nope|nah|nee|not now|not yet|later|don'?t)\b/i;
 
 /** Tuesday 10 November 2026, 21:40, South African time: for the broker's row. */
 export const sastWhen = (at: string) =>
   new Date(at).toLocaleString('en-GB', { timeZone: 'Africa/Johannesburg', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-
-async function brokerOf(ports: ClaimPorts, policyId: string | undefined): Promise<Owner> {
-  const team = await ports.insuranceTeam();
-  return claimOwner(policyId ? await ports.policyOwner(policyId) : null, team);
-}
 
 function situation(s: RoadsideState): string {
   return [s.someoneHurt ? ' and someone is hurt' : '', s.fromDamage ? ' after an accident or damage' : ''].join('');
@@ -163,7 +178,7 @@ function situation(s: RoadsideState): string {
  * with no number on file, an urgent Follow-up too.
  */
 async function brokerRows(ports: ClaimPorts, conv: Conversation, s: RoadsideState, g: InsurerGroup, at: string): Promise<void> {
-  const owner = await brokerOf(ports, g.policies[0].id);
+  const owner = await ownerFor(ports, g.policies[0].id);
   const policies = g.policies.map((p) => `${p.product} ${p.policyNumber}`).join(', ');
   const who = s.firstName ?? 'The client';
   const sent = g.assistNumber
@@ -200,7 +215,7 @@ async function sendNumbers(ports: ClaimPorts, conv: Conversation, s: RoadsideSta
 /** AC 6 and 7: no active motor policy. The policy card, an open Created row and an urgent Follow-up for the broker. */
 async function noMotorPolicy(ports: ClaimPorts, conv: Conversation, s: RoadsideState, all: Policy[], at: string): Promise<RoadsideResult> {
   const lastSent = await sendText(ports, conv, NO_MOTOR_TEXT, null, at, s.contactId);
-  const owner = await brokerOf(ports, all[0]?.id);
+  const owner = await ownerFor(ports, all[0]?.id);
   const who = s.firstName ?? 'The client';
   await ports.createAgentAction({
     kind: 'Created', open: true, urgencyReason: ROADSIDE_REASON, department: DEPARTMENT, owner, regarding: { table: 'riivo_request', id: conv.requestId }, contactId: s.contactId, at,
