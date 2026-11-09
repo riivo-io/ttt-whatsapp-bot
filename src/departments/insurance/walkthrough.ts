@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 5f0ed61). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 697309c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -10,8 +10,8 @@
 //
 // Steps, in the story's order: find client -> confirm policy -> claim type -> what to gather at the scene, and ready
 // -> what, when and where -> third parties, SAPS and injuries -> summary -> confirmed (the claim opens, FNOL logged).
-// TTTFG-4830 (28 Oct 2026): "Is anyone hurt or in danger?" is no longer a question. The reply to the policy starts with
-// what to do if anyone is (call 10111, come back once everyone is safe), so nobody waits on a yes before getting it.
+// TTTFG-4830 (28 Oct 2026): "Is anyone hurt or in danger?" is no longer a question. TTTFG-5299 (the developer, 9 Nov 2026):
+// Tina never tells a client to call the police or emergency services, so the safety line ("call 10111 now") is gone too.
 // Once Tina knows the kind of claim, she sends what to gather while they are still at the scene (claim.ts
 // onSceneText), once, and waits for the client to say they're ready before the questions about what happened.
 //
@@ -115,8 +115,8 @@ export interface WalkthroughState {
   /** TTTFG-4830: the on-scene checklist has gone out (it goes once). */
   onSceneSent?: true;
   /**
-   * TTTFG-4830: the insurer's assist line for a plumber has gone out: with the on-scene list of a burst geyser, or with
-   * the plumber question when the geyser came out only after the list.
+   * TTTFG-4830: the insurer's assist line for a plumber went out. Only on conversations saved before 9 Nov 2026: since
+   * TTTFG-5299 a claim that isn't about a car gets no number to call.
    */
   assistSent?: true;
   /** TTTFG-4830 (QC): the facts Tina's last question asked for; a bare "yes" or "no" answers only those. */
@@ -134,7 +134,7 @@ export interface WalkthroughState {
   allPolicies?: Policy[];
   /** TTTFG-4830: the policy was checked against the kind of claim once (it is never asked about again). */
   policyChecked?: true;
-  /** 6 Nov 2026: the safety line went with the reply to what happened, asked before the policy (it goes once). */
+  /** 6 Nov 2026: the safety line went out. Only on conversations saved before 9 Nov 2026 (TTTFG-5299 took it out). */
   safetySent?: true;
 }
 
@@ -165,10 +165,7 @@ export type Answer =
 export type Say =
   /** `correcting`: the client said the summary is wrong; ask for the right value(s) instead of reading it again. */
   /** `tries`: how often each question in it was asked before this time (askedKey); absent or 0 is the first time. */
-  /** `assist` (TTTFG-4830): the plumber question, with the insurer's assist line in front (WalkthroughState.assistSent). */
-  | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true; tries?: Record<string, number>; assist?: true }
-  /** TTTFG-4830: what to do if anyone is hurt or in danger. Said once, at the start of the reply to the first question. */
-  | { kind: 'safety' }
+  | { kind: 'ask'; step: Step; missing: Fact[]; correcting?: true; tries?: Record<string, number> }
   /** TTTFG-4830: the answer to the client's question about what Tina asked (Answer 'question'), before she asks again. */
   | { kind: 'help'; text: string }
   /** TTTFG-4830: the client's question is for the broker, who got it as a Follow-up. */
@@ -540,10 +537,19 @@ export function sastParts(iso: string): { date: string; time: string } {
  * first message, read before the policy question), so the later steps don't ask it again. `opening`: a first message
  * too short to keep as the description (WalkthroughState.opening). TTTFG-4830 (28 Oct 2026): when the kind of claim is
  * known, only the policies that fit it are offered. 6 Nov 2026: with more than one policy and the kind of claim not
- * known, what happened is asked first.
+ * known, what happened is asked first. `policyId` (TTTFG-5299 AC 8): roadside help already settled the policy, so the
+ * claim goes straight on from it, as if the client had picked it; one that isn't among their active policies is ignored.
  */
-export function start(contact: { id: string; firstName: string } | null, policies: Policy[], known: Facts = {}, opening?: string, guided?: boolean): Turn {
+export function start(contact: { id: string; firstName: string } | null, policies: Policy[], known: Facts = {}, opening?: string, guided?: boolean, policyId?: string): Turn {
   if (!contact) return { state: null, say: [{ kind: 'unknown-number' }], effects: [] };
+  if (policyId && policies.some((p) => p.id === policyId)) {
+    const facts = merge({}, known, opening);
+    const s: WalkthroughState = {
+      contactId: contact.id, firstName: contact.firstName, policies, step: 'policy', facts,
+      ...(opening ? { opening } : {}), ...(guided ? { guided: true as const } : {}),
+    };
+    return advance(s, { kind: 'policy', policyId });
+  }
   if (policies.length === 0) {
     return {
       state: null,
@@ -581,22 +587,13 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
       s = { ...s, facts, step: nextFactStep(facts, s.opening) };
     }
     const c = counted(s, ask(s.step, s.facts, s.opening));
-    // TTTFG-4830: a geyser that came out only after the on-scene list gets the insurer's assist line with the plumber question.
-    if (c.say.kind === 'ask' && c.say.missing.includes('contractor') && !s.assistSent) {
-      return { state: { ...c.state, assistSent: true }, say: [...before, { ...c.say, assist: true }], effects: [] };
-    }
     return { state: c.state, say: [...before, c.say], effects: [] };
   };
   const same = (): Turn => askIn(state);
   // TTTFG-4830 (QC): a reply Tina couldn't read. She says so, and the rest of a list of questions goes one at a time.
   const missed = (s: WalkthroughState): Turn => askIn({ ...s, oneByOne: s.step }, [{ kind: 'lead', text: NOT_UNDERSTOOD }]);
-  // The safety line goes with the reply to Tina's first question only (the policy, or what happened when that is asked
-  // first), not when she asks the policy again after a mismatch. A policy chosen before what happened means it went.
-  const safetyGone = (s: WalkthroughState) => !!(s.onSceneSent || s.policyChecked || s.safetySent || s.policyId);
-  const safety = (): Say[] => (safetyGone(state) ? [] : [{ kind: 'safety' }]);
-  /** The state and what goes in front, for the reply to what happened (6 Nov 2026: asked before the policy). */
-  const firstReply = (s: WalkthroughState, before: Say[] = []): Turn =>
-    safetyGone(s) ? toReady(s, before) : toReady({ ...s, safetySent: true }, [{ kind: 'safety' }, ...before]);
+  // TTTFG-5299 (9 Nov 2026): no safety line any more. firstReply stays the reply to what happened, asked before the policy.
+  const firstReply = (s: WalkthroughState, before: Say[] = []): Turn => toReady(s, before);
   // TTTFG-4830: once the kind of claim is known, the on-scene checklist (once), and Tina waits for "ready" before the
   // questions about what happened. Until it's known, the claim type is asked first. A policy that doesn't fit the kind
   // of claim (a break-in on the motor policy) is checked once, against the policies that do.
@@ -619,8 +616,7 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     // TTTFG-5562: the guided form asks the rest, so the claim opens now and the link goes out.
     if (s.guided) return { state: s, say: before, effects: [{ kind: 'open-claim' }] };
     if (s.onSceneSent) return askIn({ ...s, step: nextFactStep(s.facts, s.opening) }, before);
-    const assist = isGeyser(s.facts, s.opening) ? { assistSent: true as const } : {};
-    return { state: { ...s, step: 'ready', onSceneSent: true, ...assist }, say: [...before, { kind: 'on-scene' }], effects: [] };
+    return { state: { ...s, step: 'ready', onSceneSent: true }, say: [...before, { kind: 'on-scene' }], effects: [] };
   };
 
   // TTTFG-4830 (QC): Tina asked whether to stop. Yes ends the walkthrough with nothing logged; no carries on.
@@ -663,12 +659,11 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
         answer.kind === 'policy' ? state.policies.find((p) => p.id === answer.policyId)
         : answer.kind === 'yes' ? only
         : undefined;
-      if (chosen) return toReady({ ...state, policyId: chosen.id }, safety());
+      if (chosen) return toReady({ ...state, policyId: chosen.id });
       if (answer.kind === 'no' && state.allPolicies) {
-        // TTTFG-4830: not the one (or none of those) that fit: the client's other policies, and no second check. The
-        // safety line comes with them, as it would with a choice.
+        // TTTFG-4830: not the one (or none of those) that fit: the client's other policies, and no second check.
         const { allPolicies, ...rest } = state;
-        return askIn({ ...rest, policies: allPolicies, policyChecked: true }, safety());
+        return askIn({ ...rest, policies: allPolicies, policyChecked: true });
       }
       if (answer.kind === 'no' && only) {
         // Not the policy on file: TTT doesn't hold it, so a person takes it from here.
@@ -682,8 +677,8 @@ export function advance(state: WalkthroughState, answer: Answer): Turn {
     }
 
     case 'danger':
-      // Asked "Is anyone hurt or in danger?" before 28 Oct 2026: whatever the answer, what to do if anyone is, then on.
-      return toReady({ ...state, step: 'ready' }, [{ kind: 'safety' }]);
+      // Asked "Is anyone hurt or in danger?" before 28 Oct 2026: whatever the answer, on (no safety line since 9 Nov 2026).
+      return toReady({ ...state, step: 'ready' });
 
     case 'ready': {
       // Anything but a "not yet" moves on; what happened, when or where, if the client already said it, is kept.

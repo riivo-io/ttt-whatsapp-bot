@@ -47,7 +47,7 @@ import {
 import { claimsContactNumber } from '../domain/claimsHost';
 import { transcribeVoiceNote } from '../services/transcribe.service';
 import {
-    cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
+    cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, openDemoRequest, openRoadsideDemoRequest, withdrawOpenClaims, type DemoChannels, type DemoSigning, type Graph,
 } from '../services/claimsDemoWiring';
 import { claimFormRouter } from '../routes/claimForm.route';
 import { signingRouter } from '../routes/signing.route';
@@ -261,6 +261,9 @@ const deps: ClaimsDemoDeps = {
     replyModel: toolModel(UNDERSTAND_MODEL, 'record_reply'),
     reportedModel: toolModel(UNDERSTAND_MODEL, 'record_known_answers'),
     openRequest: (c, p, text) => openDemoRequest(dv, c, p, text),
+    // TTTFG-5299: roadside help, as on Tina with ROADSIDE_ENABLED=true.
+    roadsideModel: toolModel(process.env.CLAIMS_ROADSIDE_MODEL || INTENT_MODEL, 'record_roadside_intent'),
+    openRoadsideRequest: (c, p, text) => openRoadsideDemoRequest(dv, c, p, text),
     withdrawOpenClaims: (c) => withdrawOpenClaims(dv, c),
     say: (p, text) => channels.sendText(p, text),
     ...(formPort ? { guidedForm: true } : {}),
