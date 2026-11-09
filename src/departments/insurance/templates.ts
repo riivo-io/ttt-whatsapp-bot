@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 45ae828). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit bdf8a77). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -11,8 +11,6 @@
 // (decision D11, 12 October 2026; the story wins over TTTFG-5254 step 16, which still names TTT's FAIS reviewer). The
 // approved text replaces each one with a new version before go-live. The deadline note never says the claim is at
 // risk, late or may be rejected: it states the insurer's period and the date, nothing more.
-
-import { AI_HANDLING_LINE } from './claim';
 
 export const longDate = (isoDate: string) =>
   new Date(`${isoDate}T12:00:00+02:00`).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' });
@@ -162,23 +160,22 @@ export interface FnolEmailVars {
  * with CRM data: Claude writes none of it.
  * draft-3 (the user, 6 Nov 2026): no broker's name, as on WhatsApp since TTT's 28 Oct feedback (FNOL_TEMPLATE draft-3).
  * draft-4 (the user, 9 Nov 2026): with the form's link, as close to WhatsApp's form message as an email can be: we've opened
- * a claim, complete the form so we can submit it. No AI line and no signing link to come: the client signs at the end of
- * the form. The reference is in the subject. Without a link (no claim type yet, or the link couldn't be made) the email
- * path carries on by email like WhatsApp's chat, so that version keeps the reference and the AI line, as WhatsApp's
- * acknowledgement does in chat.
+ * a claim, complete the form so we can submit it. No signing link to come: the client signs at the end of the form.
+ * draft-5 (the user, 9 Nov 2026): no AI line and no reference in the body, with or without the link. The reference stays in
+ * the subject.
  */
 export const FNOL_EMAIL_TEMPLATE = {
   name: 'Claim - FNOL logged (email)',
-  version: 'draft-4',
+  version: 'draft-5',
   approved: false,
   subject: (v: Pick<FnolEmailVars, 'reference'>) => `Your claim is logged (${v.reference})`,
-  render: (v: FnolEmailVars) => (v.link
-    ? [`Hi ${v.firstName}, we've opened a claim for you. Please complete the form below so that we can submit your claim.`, v.link]
-    : [
-      `Thanks ${v.firstName}, your claim is logged. Your claim reference is ${v.reference}.`,
-      "Next steps: we'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have.",
-      AI_HANDLING_LINE,
-    ]).concat('Kind regards,\nTTT').join('\n\n'),
+  render: (v: FnolEmailVars) => [
+    `Hi ${v.firstName}, we've opened a claim for you.`
+      + (v.link ? ' Please complete the form below so that we can submit your claim.'
+        : " We'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have."),
+    ...(v.link ? [v.link] : []),
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
 } as const;
 
 /**
