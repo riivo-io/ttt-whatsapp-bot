@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 2621603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit bdf8a77). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -11,8 +11,6 @@
 // (decision D11, 12 October 2026; the story wins over TTTFG-5254 step 16, which still names TTT's FAIS reviewer). The
 // approved text replaces each one with a new version before go-live. The deadline note never says the claim is at
 // risk, late or may be rejected: it states the insurer's period and the date, nothing more.
-
-import { AI_HANDLING_LINE } from './claim';
 
 export const longDate = (isoDate: string) =>
   new Date(`${isoDate}T12:00:00+02:00`).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' });
@@ -159,22 +157,23 @@ export interface FnolEmailVars {
 
 /**
  * TTTFG-5188 AC 5: the acknowledgement for a claim that came in by email. Sent with no approval, so it is fixed text filled
- * with CRM data: Claude writes none of it. The AI line is the same as on WhatsApp (claim.ts AI_HANDLING_LINE).
- * draft-3 (the user, 6 Nov 2026): no broker's name, as on WhatsApp since TTT's 28 Oct feedback (FNOL_TEMPLATE draft-3),
- * and the link's last day written out ("20 November 2026"), as in the signing link.
+ * with CRM data: Claude writes none of it.
+ * draft-3 (the user, 6 Nov 2026): no broker's name, as on WhatsApp since TTT's 28 Oct feedback (FNOL_TEMPLATE draft-3).
+ * draft-4 (the user, 9 Nov 2026): with the form's link, as close to WhatsApp's form message as an email can be: we've opened
+ * a claim, complete the form so we can submit it. No signing link to come: the client signs at the end of the form.
+ * draft-5 (the user, 9 Nov 2026): no AI line and no reference in the body, with or without the link. The reference stays in
+ * the subject.
  */
 export const FNOL_EMAIL_TEMPLATE = {
   name: 'Claim - FNOL logged (email)',
-  version: 'draft-3',
+  version: 'draft-5',
   approved: false,
   subject: (v: Pick<FnolEmailVars, 'reference'>) => `Your claim is logged (${v.reference})`,
   render: (v: FnolEmailVars) => [
-    `Thanks ${v.firstName}, your claim is logged. Your claim reference is ${v.reference}.`,
-    // The user (3 Nov 2026): one email. With the form's link when it can go with it; otherwise the link follows on its own.
-    ...(v.link
-      ? ['Next step: please fill in your claim form here:', v.link, `You can stop and come back to it: the link works until ${longDate(v.expiresOn!)}. Once you've submitted it, we'll email you the form to sign.`]
-      : ["Next steps: we'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have."]),
-    AI_HANDLING_LINE,
+    `Hi ${v.firstName}, we've opened a claim for you.`
+      + (v.link ? ' Please complete the form below so that we can submit your claim.'
+        : " We'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have."),
+    ...(v.link ? [v.link] : []),
     'Kind regards,\nTTT',
   ].join('\n\n'),
 } as const;
@@ -183,18 +182,40 @@ export const FNOL_EMAIL_TEMPLATE = {
  * TTTFG-5188 (the user, 3 Nov 2026): an email claim gets the guided form rather than a list of questions, as on WhatsApp
  * (TTTFG-5562). Fixed wording filled with CRM values and the link, so it goes without approval, as the signing link does.
  * The wording waits for TTT's approval with the acknowledgement's. draft-2 (6 Nov 2026): the link's last day written out.
+ * draft-3 (the user, 9 Nov 2026): as WhatsApp's form message; the client signs at the end of the form, so no signing link.
  */
 export interface FormLinkEmailVars { firstName: string; reference: string; link: string; /** South African date, YYYY-MM-DD. */ expiresOn: string }
 
 export const FORM_LINK_EMAIL_TEMPLATE = {
   name: 'Claim - form link (email)',
-  version: 'draft-2',
+  version: 'draft-3',
   approved: false,
   subject: (v: Pick<FormLinkEmailVars, 'reference'>) => `Your claim form (${v.reference})`,
   render: (v: FormLinkEmailVars) => [
-    `Hi ${v.firstName}, to carry on with your claim (${v.reference}), please fill in your claim form here:`,
+    `Hi ${v.firstName}, please complete the form below so that we can submit your claim.`,
     v.link,
-    `You can stop and come back to it: the link works until ${longDate(v.expiresOn)}. Once you've submitted it, we'll email you the form to sign.`,
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
+/**
+ * The user (9 Nov 2026): what the client hears once they submit the guided form, the same words on WhatsApp
+ * (followon.ts formClosingText) and by email (FORM_DONE_EMAIL_TEMPLATE). The sign line only when the signature from the
+ * form couldn't be used and a signing link went instead.
+ */
+export const FORM_THANKS = 'Thank you!';
+export const FORM_CLOSING = 'A consultant from TTT will be in touch with you shortly. We will keep you updated on the status of your claim.';
+
+export interface FormDoneEmailVars { reference: string; /** A signing link went, as the signature from the form couldn't be used. */ linkSent: boolean }
+
+/** The user (9 Nov 2026): the email claim's last email, once the form is submitted and signed: WhatsApp's thank-you. */
+export const FORM_DONE_EMAIL_TEMPLATE = {
+  name: 'Claim - form submitted (email)',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<FormDoneEmailVars, 'reference'>) => `Your claim is submitted (${v.reference})`,
+  render: (v: FormDoneEmailVars) => [
+    [FORM_THANKS, v.linkSent ? 'Please check and sign the form using the link we emailed you.' : '', FORM_CLOSING].filter(Boolean).join(' '),
     'Kind regards,\nTTT',
   ].join('\n\n'),
 } as const;

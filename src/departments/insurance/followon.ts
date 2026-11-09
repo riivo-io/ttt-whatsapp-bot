@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 2621603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit bdf8a77). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -55,7 +55,7 @@ import {
   SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
-import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, itOrThem, longDate, type ClaimTemplate } from './templates';
+import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, FORM_CLOSING, FORM_THANKS, itOrThem, longDate, type ClaimTemplate } from './templates';
 import { factColumns, factsMissing, OPENED_FOR_FORM_KEY, plumberAsked, plumberDetail, withFacts, type FactColumns } from './formfacts';
 import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
@@ -1993,8 +1993,7 @@ export function closingText(signature: SignatureStatus): string {
  * The user (9 Nov 2026): the only thing Tina says once the client submits the guided form. The sign line only when the
  * signature from the form couldn't be used and a link went instead.
  */
-export const FORM_THANKS = 'Thank you!';
-export const FORM_CLOSING = 'A consultant from TTT will be in touch with you shortly. We will keep you updated on the status of your claim.';
+export { FORM_CLOSING, FORM_THANKS };
 const SIGN_WITH_LINK = 'Please check and sign the form using the link I sent.';
 export const formClosingText = (signature: SignatureStatus) =>
   [FORM_THANKS, signature === 'Link sent' ? SIGN_WITH_LINK : '', FORM_CLOSING].filter(Boolean).join(' ');

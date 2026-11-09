@@ -29,10 +29,13 @@ const STYLE = `
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 [hidden] { display:none !important; }
 html, body { height:100%; }
+/* The user (9 Nov 2026): a quick second tap on Continue or Back zoomed the page right in. Taps stay taps; pinching still zooms. */
+html { touch-action:manipulation; -webkit-text-size-adjust:100%; }
+button, a, label, input, textarea, .body { touch-action:manipulation; }
 body { margin:0; background:var(--panel); color:var(--text); font:15.5px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
 button { font:inherit; color:inherit; }
 :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-.app { position:relative; display:flex; flex-direction:column; height:100vh; height:100dvh; background:var(--bg); max-width:520px; margin:0 auto; }
+.app { position:relative; display:flex; flex-direction:column; height:100vh; height:100dvh; height:var(--vvh,100dvh); background:var(--bg); max-width:520px; margin:0 auto; }
 @media (min-width:560px) { body { padding:24px 0; } .app { height:calc(100dvh - 48px); border-radius:20px; overflow:hidden; box-shadow:0 1px 2px rgba(11,15,20,.04),0 12px 32px -12px rgba(11,15,20,.14); } }
 .brand { display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--accent); padding:calc(10px + env(safe-area-inset-top,0px)) 18px 10px; color:#fff; }
 .brand img { height:24px; width:auto; display:block; }
@@ -178,7 +181,11 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .sign-acts { display:flex; justify-content:flex-end; }
 .need-box { border:1px solid #E2BC85; background:#FFFBF4; border-radius:12px; padding:10px 14px; display:grid; gap:4px; font-size:13.5px; color:var(--text); }
 .need-box b { color:var(--warn); font-weight:600; }
-.need-box ul { margin:0; padding-left:18px; }
+.need-box ul { margin:0; padding:0; list-style:none; display:grid; }
+/* The user (9 Nov 2026): each line on the list takes the client straight to it, rather than scrolling back. */
+.need-box .jump { display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%; min-height:40px; padding:6px 0; border:none; border-top:1px solid #F1DFC4; background:none; text-align:left; font-size:13.5px; line-height:1.35; color:var(--text); cursor:pointer; }
+.need-box li:first-child .jump { border-top:none; }
+.need-box .jump svg { flex:none; width:18px; height:18px; color:var(--accent-deep); }
 .panel.auto { grid-template-rows:auto auto auto; max-height:88%; }
 .terms { display:grid; gap:10px; font-size:14.5px; color:var(--text); line-height:1.45; }
 .terms p { margin:0; }
@@ -220,7 +227,7 @@ textarea.live { background:var(--accent-soft); }
 const FONTS = '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" media="print" onload="this.media=\'all\'" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap">';
 const HEAD = (title: string) => `<!doctype html>
 <html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="robots" content="noindex"><meta name="theme-color" content="${TTT_BLUE}">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"><meta name="robots" content="noindex"><meta name="theme-color" content="${TTT_BLUE}">
 <title>${esc(title)}</title>${FONTS}<style>${STYLE}</style>
 </head>`;
 const BRAND = (right = 'Claims') => `<div class="brand"><img src="${TTT_LOGO}" alt="TTT Financial Group"><span id="brandTitle">${esc(right)}</span></div>`;
@@ -629,7 +636,7 @@ const SCRIPT = String.raw`
     if (c.bare || c.kind === 'slider') return '';
     var text = c.kind === 'stepper' ? c.label : promptOf(f);
     var tappable = ['yes-no', 'pills', 'combo', 'multi', 'car', 'yes-text', 'date', 'time', 'datetime', 'year', 'stepper'].indexOf(c.kind) >= 0;
-    var need = f.required && c.kind !== 'stepper' ? '<span class="req">Required</span>' : '';
+    var need = (f.required || (V.beforeSigning || []).indexOf(f.key) >= 0) && c.kind !== 'stepper' ? '<span class="req">Required</span>' : '';
     return tappable ? '<div class="ql">' + esc(text) + need + '</div>' : '<label class="ql" for="f-' + q(f.key) + '">' + esc(text) + need + '</label>';
   }
   function fieldHtml(f) {
@@ -751,17 +758,60 @@ const SCRIPT = String.raw`
   function missingUploads() {
     return V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && (u.state === 'up' || u.state === 'ok'); }); });
   }
+  /**
+   * The user (9 Nov 2026): the bare minimum the broker needs (when, where, what happened, the case number when the police
+   * were involved). These can't be left blank: the client fills them in before signing or submitting.
+   */
+  var askedToSign = false;
+  function neededText() { return V.sign ? 'We need this before you can sign.' : 'We need this before you can submit.'; }
+  function neededBlank() {
+    return (V.beforeSigning || []).map(function (k) { return FIELD[k]; })
+      .filter(function (f) { return f && shows(f) && !f.hidden && !filled(value(f.key)); });
+  }
+  /** Back to the first of them, saying why. True when there was one. */
+  function goNeeded() {
+    var blank = neededBlank();
+    if (!blank.length) return false;
+    // From now on the bar over the step also points at the ones on other steps, until they're filled in.
+    askedToSign = true;
+    goFix(blank[0].key);
+    // Every one of them says so, not only the first.
+    blank.forEach(function (f) { errors[f.key] = neededText(); });
+    render();
+    return true;
+  }
+  var ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
+  /** items: { text, jump } where jump is 'f:<question key>' or 'e:<photo or document key>': a tap goes to it. */
   function listBox(title, items, note) {
-    return '<div class="need-box"><b>' + esc(title) + '</b><ul>' + items.map(function (m) { return '<li>' + esc(m) + '</li>'; }).join('') + '</ul>' + (note ? '<span>' + esc(note) + '</span>' : '') + '</div>';
+    return '<div class="need-box"><b>' + esc(title) + '</b><ul>' + items.map(function (m) {
+      return '<li><button type="button" class="jump" data-jump="' + q(m.jump) + '"><span>' + esc(m.text) + '</span>' + ARROW + '</button></li>';
+    }).join('') + '</ul>' + (note ? '<span>' + esc(note) + '</span>' : '') + '</div>';
+  }
+  /**
+   * The user (9 Nov 2026): from the list on the summary straight to the question or the upload. Continue then reads "Back
+   * to summary" and goes back there, so the client doesn't step through the rest of the form to get back.
+   */
+  var toReview = false;
+  function jumpTo(jump) {
+    var kind = jump.slice(0, 2), key = jump.slice(2);
+    errors = {};
+    toReview = true;
+    if (kind === 'e:') {
+      here = { id: 'photos', anchor: visibleBlocks({ id: 'photos' }).some(function (b) { return b.key === key; }) ? key : null };
+      return render();
+    }
+    goFix(key);
   }
   /** The summary: the one step that may scroll. */
   function reviewHtml() {
     var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.sign ? 'you sign, and your claim is submitted' : V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
-    var files = missingUploads().map(function (e) { return e.prompt; }), blank = [];
-    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper') blank.push(promptOf(f)); }); });
+    var needed = neededBlank(), blank = [];
+    var files = needed.map(function (f) { return { text: promptOf(f), jump: 'f:' + f.key }; })
+      .concat(missingUploads().map(function (e) { return { text: e.prompt, jump: 'e:' + e.key }; }));
+    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper' && needed.indexOf(f) < 0) blank.push({ text: promptOf(f), jump: 'f:' + f.key }); }); });
     if (V.sign) {
-      // What a client can always get must be in before they sign (the server checks it too); a question left blank is
-      // one they don't know, and the broker follows it up.
+      // What a client can always get must be in before they sign (the server checks it too), with the bare minimum the
+      // broker needs; any other question left blank is one they don't know, and the broker follows it up.
       if (files.length) html += listBox('Add these before you sign', files, '');
       if (blank.length) html += listBox('Left blank', blank, 'You can still sign. Your broker will follow these up with you.');
     } else {
@@ -847,7 +897,9 @@ const SCRIPT = String.raw`
     drawnAt = { id: here.id, i: here.i, anchor: here.anchor };
     $('prog').style.width = Math.round((i + part) / Math.max(1, steps.length - 1) * 100) + '%';
     if (!submitting) {
-      $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm' : 'Continue';
+      if (step.id === 'review') toReview = false;
+      $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm'
+        : toReview && (step.id === 'screen' || step.id === 'photos') ? 'Back to summary' : 'Continue';
     }
     $('next').disabled = busy;
     drawNotice();
@@ -978,15 +1030,16 @@ const SCRIPT = String.raw`
   function onPage(key) { return page.some(function (b) { return (b.fields || []).some(function (f) { return f.key === key; }); }) || (here && here.id === 'details' && V.details.some(function (d) { return d.key === key; })); }
   /** A slim bar over the step: no connection, or an answer the client has moved past that needs another look. */
   function drawNotice() {
-    var el = $('notice'), html = '', keys = Object.keys(problems).filter(function (k) { return !onPage(k); });
+    var needed = askedToSign ? neededBlank().map(function (f) { return f.key; }) : [];
+    var el = $('notice'), html = '', keys = Object.keys(problems).concat(needed.filter(function (k) { return !(k in problems); })).filter(function (k) { return !onPage(k); });
     if (lost) html = '<span>Some answers could not be saved. Please go back and check them, or ask Tina for help.</span>';
     else if (failures >= 2) html = '<span>No connection. Your answers are safe here and save when you\'re back online.</span>';
-    else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]]) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
+    else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]] || neededText()) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
     el.innerHTML = html;
     el.hidden = !html;
   }
   function goFix(key) {
-    errors[key] = problems[key];
+    errors[key] = problems[key] || ((V.beforeSigning || []).indexOf(key) >= 0 ? neededText() : undefined);
     if (V.details.some(function (d) { return d.key === key; })) { here = { id: 'details', anchor: null }; editing[key] = true; return render(); }
     var at = -1;
     V.screens.forEach(function (s, i) { if (at < 0 && s.fields.some(function (f) { return f.key === key; })) at = i; });
@@ -1060,16 +1113,23 @@ const SCRIPT = String.raw`
     if (step.id === 'review' && V.sign) return toSign();
     if (step.id === 'sign') return submit(signature());
     if (step.id === 'review') return submit();
-    if (step.id === 'photos') return morePages ? advance(last) : move(1);
+    if (step.id === 'photos') return toReview ? backToReview() : morePages ? advance(last) : move(1);
     var c = collect(page);
     if (c.answers.length || c.notKnown.length || c.cleared.length) {
       forgetSaved(c.answers.map(function (a) { return a.key; }).concat(c.notKnown, c.cleared));
       enqueue(c);
     }
+    if (toReview) return backToReview();
     advance(last);
+  }
+  function backToReview() {
+    here = { id: 'review', anchor: null };
+    errors = {};
+    render();
   }
   /** Confirm and sign: what the client must add first, or on to the signature. */
   function toSign() {
+    if (goNeeded()) return;
     var files = missingUploads();
     if (files.length) return goPhotos(files.map(function (e) { return e.key; }));
     move(1);
@@ -1083,6 +1143,7 @@ const SCRIPT = String.raw`
     $('body').insertAdjacentHTML('afterbegin', err('photos'));
   }
   function submit(sig) {
+    if (goNeeded()) return;
     if (V.sign && !sig) { errors = { sign: 'Please sign in the box first.' }; return render(); }
     busy = true; submitting = true; $('next').disabled = true;
     $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(function (u) { return u.state === 'up'; }) ? 'Uploading your photos…' : 'Submitting…');
@@ -1114,6 +1175,8 @@ const SCRIPT = String.raw`
             if (target === null) { errors = { submit: 'Something on the form still needs an answer. Please ask ' + (V.emailed ? 'your broker' : 'Tina') + ' for help.' }; return render(); }
             here = { id: 'screen', i: target, anchor: anchorFor(target, asks) };
             errors = {};
+            r.open.forEach(function (k) { if (FIELD[k]) errors[k] = neededText(); });
+            askedToSign = true;
             render();
           };
           if (r.open.every(holdsKey)) return go();
@@ -1123,7 +1186,7 @@ const SCRIPT = String.raw`
         $('foot').hidden = true; $('notice').hidden = true;
         $('sec').textContent = '';
         $('prog').style.width = '100%';
-        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. Tina will message you on WhatsApp if anything else is needed.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
+        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. A consultant from TTT will be in touch with you shortly.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
       }).catch(function (e) {
         busy = false; submitting = false;
         if (e.message === 'gone') return;
@@ -1406,6 +1469,8 @@ const SCRIPT = String.raw`
       pumpUploads();
       return render();
     }
+    var j = e.target.closest('[data-jump]');
+    if (j) return jumpTo(j.dataset.jump);
     var g = e.target.closest('[data-go]');
     if (g) { here = g.dataset.go === 'photos' ? { id: 'photos', anchor: null } : { id: 'screen', i: Number(g.dataset.go), anchor: null }; errors = {}; return render(); }
     var ed = e.target.closest('[data-edit]');
@@ -1520,6 +1585,34 @@ const SCRIPT = String.raw`
     if (e.message === 'gone') return;
     $('body').innerHTML = '<p class="center help">The form could not be loaded. Please check your connection and refresh the page.</p>';
   });
+
+  // ---- the keyboard never covers what's being typed (the user, 9 Nov 2026) -------------------------------------------
+  // The form fits the part of the screen the keyboard leaves (a phone keeps the page its full height under the keyboard),
+  // and the box being typed in comes to the middle of what's left.
+  var vv = window.visualViewport;
+  function fitScreen() {
+    if (!vv) return;
+    document.documentElement.style.setProperty('--vvh', Math.round(vv.height) + 'px');
+    // iPhones move the whole page up to show the box; the form is already fitted, so the page goes back to the top.
+    if (window.scrollY) window.scrollTo(0, 0);
+  }
+  function centreTyping() {
+    var el = document.activeElement, body = $('body');
+    if (!el || !body || !body.contains(el) || !/^(INPUT|TEXTAREA)$/.test(el.tagName) || /^(range|checkbox|radio|file|button)$/.test(el.type)) return;
+    var b = body.getBoundingClientRect(), r = el.getBoundingClientRect();
+    // A box taller than half of what's left shows from its top; anything else sits in the middle.
+    body.scrollTop += r.height > b.height / 2 ? r.top - b.top - 12 : (r.top + r.height / 2) - (b.top + b.height / 2);
+  }
+  function keyboardMoved() { fitScreen(); centreTyping(); }
+  if (vv) {
+    vv.addEventListener('resize', keyboardMoved);
+    vv.addEventListener('scroll', fitScreen);
+    fitScreen();
+  }
+  // Some phones (and Android with resizes-content) say so on the window instead.
+  window.addEventListener('resize', keyboardMoved);
+  // Once now, and again when the keyboard has finished coming up.
+  document.addEventListener('focusin', function () { setTimeout(centreTyping, 60); setTimeout(centreTyping, 400); });
 })();
 `;
 

@@ -65,7 +65,7 @@ import { createGuidedLink, EMAIL_CLAIM_CALLER, guidedFormOn, guidedLinksFromEnv,
 import type { ClaimFormDeps, ClaimFormSession } from '../routes/claimForm.route';
 import { callbackSecretFromEnv, signingFromEnv } from '../signing/env';
 import { callerCallbackKey, createSigningRequest } from '../signing/signing';
-import { signWithFormSignature } from '../claimform/signOnForm';
+import { emailClaimSigning, signWithFormSignature } from '../claimform/signOnForm';
 import { enqueueClaimsBatchCheck, enqueueClaimsFormDone, enqueueClaimsReminder } from '../queue/whatsappQueue';
 import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
@@ -367,9 +367,11 @@ function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
 /** TTTFG-5562: the guided form's route, when the page is set up. */
 export function claimFormDeps(): ClaimFormDeps | null {
     const d = guidedLinksFromEnv();
+    const signingDeps = signingFromEnv();
     return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null, apiKey: process.env.SIGNING_API_KEY || undefined,
         // The user (9 Nov 2026): with the signing page set up, the client signs at the end of the form.
-        ...(signingFromEnv() ? { signOnForm: true } : {}),
+        // The user (9 Nov 2026): an email claim's client too; the email agent has its own request signed with it.
+        ...(signingDeps ? { signOnForm: true, emailSigning: emailClaimSigning(signingDeps, d) } : {}),
         blankForm: (url) => blankForm(channels(newCrmStats(), newDemoLog()), url) } : null;
 }
 

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 2621603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit bdf8a77). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -106,6 +106,11 @@ export interface GuidedView {
   notKnown: string[];
   /** The screen to open on (AC 5): the first with an unanswered question, `screens.length` for the photos. */
   startAt: number;
+  /**
+   * The user (9 Nov 2026): the questions that can't be left blank before signing (BEFORE_SIGNING), as this form asks them.
+   * The page shows each only when its conditions hold (the case number only when the police were involved).
+   */
+  beforeSigning: string[];
 }
 
 /** What the page needs from the CRM to show what TTT holds (fill-dataverse.ts crmValues). */
@@ -228,7 +233,7 @@ function earlierValue(item: QuestionItem, master: MasterForm, earlier: readonly 
 /** The form's own view of a list: its general questions are asked here, even though Tina doesn't ask them on chat. */
 const asGuided = (form: ClaimForm, claim: Pick<FollowOnClaim, 'claimType' | 'facts'>): ClaimForm => withFacts(form, claim, 'show');
 
-const POLICE_HELP = "Not reported yet? Please do, and leave this blank. Your consultant will ask you for it.";
+const POLICE_HELP = "Not reported yet? Please report it at a police station first: we need the case number before you can sign.";
 
 /** The key whose answer says a burst geyser or pipe damaged the home: then the loss was damage, so it isn't asked. */
 const LOSS_KIND_KEY = 'lossKind';
@@ -425,7 +430,31 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     answers,
     notKnown,
     startAt: startAt < 0 ? screens.length : startAt,
+    beforeSigning: beforeSigningOn(screens),
   };
+}
+
+/**
+ * The user (9 Nov 2026): the bare minimum the broker needs to send the claim pack, so the client can't sign (or submit)
+ * without it, even though any other question may be left blank: when and where it happened, what happened in their own
+ * words, and the police case number when the police were involved.
+ */
+export const BEFORE_SIGNING: readonly string[] = ['incidentAt', 'place', 'description', SAPS_CASE_KEY];
+
+/** BEFORE_SIGNING as this form asks it: never a question the client has no box for. */
+const beforeSigningOn = (screens: readonly GuidedScreen[]) =>
+  BEFORE_SIGNING.filter((k) => screens.some((s) => s.fields.some((f) => f.key === k)));
+
+/** What BEFORE_SIGNING still lacks: a question left blank or "don't know" counts as missing. */
+export function missingBeforeSigning(form: ClaimForm, claim: FollowOnClaim, sapsRequired: boolean): string[] {
+  const facts = factsOf(claim);
+  const police = sapsRequired || policeOpen(claim);
+  const has = (k: string) => {
+    const a = claim.answers[k];
+    return (a?.status === 'answered' && a.value !== null && a.value !== '') || factFor(k, facts) !== undefined;
+  };
+  return beforeSigningOn(screensFor(asGuided(form, claim), claim, [], sapsRequired))
+    .filter((k) => (k !== SAPS_CASE_KEY || police) && !has(k));
 }
 
 /** Whether the police case's own questions are open on the form: the claim needs them, or the client said it was reported. */
@@ -647,7 +676,8 @@ export async function finishGuided(ports: GuidedPorts, claimId: string, now: Dat
   // must be in first. Only what a client can always get is required (a driver's licence, the drawing of the accident);
   // photos of damage never are (contracts.ts `required`).
   const files = missingOnForm(form, claim, items, facts);
-  if (required.length || files.length) return { open: [...required, ...files] };
+  const minimum = missingBeforeSigning(form, claim, sapsRequired).filter((k) => !required.includes(k));
+  if (required.length || minimum.length || files.length) return { open: [...required, ...minimum, ...files] };
   const left = open.filter((k) => !required.includes(k));
   if (left.length) {
     const answers: ClaimAnswers = { ...claim.answers };

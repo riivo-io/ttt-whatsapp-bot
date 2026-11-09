@@ -2,12 +2,19 @@
  * TTTFG-5562: the guided claim form on localhost, with every go-live form and a made-up claim held in memory. Nothing
  * touches the CRM, SharePoint or WhatsApp, so it's safe to click through on a phone-sized window.
  *
- *   npx tsx src/scripts/claim-form-preview.ts [--port 3456] [--configs ../ttt-preseason-agent/config/claimforms]
+ *   npx tsx src/scripts/claim-form-preview.ts [--port 3456] [--configs ../ttt-preseason-agent/config/claimforms] [--https]
+ *
+ * --https (the user, 9 Nov 2026): a phone only lets a page use its microphone over https, so the voice buttons show on a
+ * phone on the same Wi-Fi only with this. The certificate is made on the spot and signed by nobody, so the phone warns
+ * once: tap through (Safari: Show Details, then visit this website).
  *
  * It prints one link per form. A voice recording comes back as a sample sentence; Submit prints what Tina would do next.
  * GET /__claim/<form name> shows what the form has saved so far, for the checks in the test walkthrough.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import https from 'node:https';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
 import { createGuidedLink, formSignatureFor, memoryLinkStore, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
@@ -23,6 +30,18 @@ const arg = (name: string, fallback: string) => {
 };
 const PORT = Number(arg('port', '3456'));
 const DIR = arg('configs', '../ttt-preseason-agent/config/claimforms');
+const HTTPS = process.argv.includes('--https');
+const SCHEME = HTTPS ? 'https' : 'http';
+const LAN = Object.values(networkInterfaces()).flat().filter((a) => a?.family === 'IPv4' && !a.internal).map((a) => a!.address);
+
+/** A certificate for localhost and this computer's addresses on the Wi-Fi, made now and kept in a temporary folder. */
+function selfSigned() {
+    const dir = mkdtempSync(join(tmpdir(), 'claim-form-preview-'));
+    const san = ['DNS:localhost', 'IP:127.0.0.1', ...LAN.map((ip) => `IP:${ip}`)].join(',');
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '30', '-subj', '/CN=claim-form-preview',
+        '-addext', `subjectAltName=${san}`, '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
+    return { key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) };
+}
 
 const CRM = {
     contact: { fullname: 'Sipho Ndlovu', firstname: 'Sipho', lastname: 'Ndlovu', mobilephone: '082 413 7720', telephone1: '021 975 3310', emailaddress1: 'sipho@example.co.za', ttt_idnumber: '8406115123087' },
@@ -101,7 +120,7 @@ function session(link: GuidedLinkRow): ClaimFormSession {
     };
 }
 
-const D: GuidedLinkDeps = { store: memoryLinkStore(), publicUrl: `http://localhost:${PORT}` };
+const D: GuidedLinkDeps = { store: memoryLinkStore(), publicUrl: `${SCHEME}://localhost:${PORT}` };
 
 async function main() {
     const d = D;
@@ -116,15 +135,18 @@ async function main() {
     // A list of every form, so the preview opens on something to click.
     app.get('/', (_req, res) => res.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Guided form preview</title>
 <style>body{font:15px/1.5 system-ui,sans-serif;margin:0 auto;max-width:520px;padding:20px 16px;color:#0B0F14}h1{font-size:20px;margin:0 0 4px}p{color:#6B7684;margin:0 0 16px}a{display:block;padding:12px 14px;margin:0 0 8px;border:1px solid #CDD2D8;border-radius:10px;color:#015A8E;text-decoration:none}</style>
-<h1>Guided claim form preview</h1><p>Made-up claims in memory. Nothing here touches the CRM or WhatsApp.</p>${Object.entries(links).map(([name, url]) => `<a href="${url}">${name.replace('--', ' · ').replace(/-/g, ' ')}</a>`).join('')}`));
-    app.listen(PORT, async () => {
+<h1>Guided claim form preview</h1><p>Made-up claims in memory. Nothing here touches the CRM or WhatsApp.</p>${Object.entries(links).map(([name, url]) => `<a href="${new URL(url).pathname}">${name.replace('--', ' · ').replace(/-/g, ' ')}</a>`).join('')}`));
+    const listening = async () => {
         for (const [i, row] of rows.entries()) {
             claims.set(row.name, claimFor(row, i));
             links[row.name] = (await createGuidedLink(d, { claimId: row.name, phone: '27000000000', contactId: 'preview' })).url;
         }
         console.log(JSON.stringify(links, null, 1));
-        console.log(`Preview on http://localhost:${PORT}, ${rows.length} forms. Nothing here touches the CRM or WhatsApp.`);
-    });
+        console.log(`Preview on ${SCHEME}://localhost:${PORT}, ${rows.length} forms. Nothing here touches the CRM or WhatsApp.`);
+        for (const ip of LAN) console.log(`On a phone on the same Wi-Fi: ${SCHEME}://${ip}:${PORT}/`);
+    };
+    if (HTTPS) https.createServer(selfSigned(), app).listen(PORT, listening);
+    else app.listen(PORT, listening);
 }
 
 void main();

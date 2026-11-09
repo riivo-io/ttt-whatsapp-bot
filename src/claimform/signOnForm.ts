@@ -2,8 +2,9 @@
  * The user (9 Nov 2026): the client signs at the end of the guided form (routes/claimForm.route.ts keeps the drawing on the
  * link), and the claims package's signing step signs the filled form with it instead of sending a link.
  */
-import { clearFormSignature, formSignatureFor, type GuidedLinkDeps } from './links';
-import { signRequest, type SigningDeps } from '../signing/signing';
+import { clearFormSignature, EMAIL_CLAIM_CALLER, formSignatureFor, type GuidedLinkDeps } from './links';
+import { openSigningRequest, signRequest, type SigningDeps } from '../signing/signing';
+import type { ClaimFormDeps } from '../routes/claimForm.route';
 import type { DemoSigning } from '../services/claimsDemoWiring';
 
 /**
@@ -31,6 +32,36 @@ export function signWithFormSignature(d: SigningDeps, links: GuidedLinkDeps): Pi
             // Signed now, so never a link after it. A callback that isn't taken yet is retried by the signing sweep.
             if (!(await r.delivery)) console.error(`[ClaimsDemo] signed request ${request.id}: the callback wasn't taken yet; the sweep retries it`);
             return true;
+        },
+    };
+}
+
+/**
+ * The user (9 Nov 2026): an email claim's client signs at the end of the form too. The email agent fills the form, so it
+ * asks Tina whether there is a signature (the drawing stays here), makes its own signing request (caller claim-email) and
+ * names it; Tina signs that request with the claim's signature. Only a claim-email request, and only with the signature
+ * from that same claim's form. It doesn't wait for the callback (the email agent's own function, which it is calling from):
+ * the signing sweep retries it.
+ */
+export function emailClaimSigning(d: SigningDeps, links: GuidedLinkDeps): NonNullable<ClaimFormDeps['emailSigning']> {
+    return {
+        hasFormSignature: async (claimId) => !!(await formSignatureFor(links, claimId)),
+        signWithForm: async (requestLink) => {
+            const token = new URL(requestLink).pathname.split('/').pop() ?? '';
+            const opened = await openSigningRequest(d, token, { record: false });
+            if (!opened.ok) return { ok: false, reason: opened.reason };
+            if (opened.row.caller !== EMAIL_CLAIM_CALLER) return { ok: false, reason: 'not-this-caller' };
+            const s = await formSignatureFor(links, opened.row.caller_record_id);
+            if (!s) return { ok: false, reason: 'no-signature' };
+            // Used once, either way: if it can't sign, the client gets the link instead.
+            await clearFormSignature(links, s.linkId);
+            const r = await signRequest(d, token, s);
+            if (!r.ok) {
+                console.error(`[ClaimForm] signing request ${opened.row.id} with the email claim's form signature refused: ${r.reason}`);
+                return { ok: false, reason: r.reason };
+            }
+            void r.delivery.then((ok) => { if (!ok) console.error(`[ClaimForm] signed request ${opened.row.id}: the callback wasn't taken yet; the sweep retries it`); });
+            return { ok: true };
         },
     };
 }

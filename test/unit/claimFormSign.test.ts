@@ -10,8 +10,8 @@ import zlib from 'zlib';
 import express from 'express';
 import { PDFDocument } from 'pdf-lib';
 import { createGuidedLink, formSignatureFor, memoryLinkStore, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
-import { signWithFormSignature } from '../../src/claimform/signOnForm';
-import { claimFormRouter, type ClaimFormSession } from '../../src/routes/claimForm.route';
+import { emailClaimSigning, signWithFormSignature } from '../../src/claimform/signOnForm';
+import { claimFormRouter, type ClaimFormDeps, type ClaimFormSession } from '../../src/routes/claimForm.route';
 import { createSigningRequest, sha256, type SigningDeps } from '../../src/signing/signing';
 import { memorySigningStore } from '../../src/signing/store';
 
@@ -49,9 +49,9 @@ function fakeSession(calls: string[]): ClaimFormSession {
     };
 }
 
-async function server(d: GuidedLinkDeps, calls: string[], signOnForm: boolean) {
+async function server(d: GuidedLinkDeps, calls: string[], signOnForm: boolean, more: Partial<ClaimFormDeps> = {}) {
     const app = express();
-    app.use('/claim-form', claimFormRouter(() => ({ ...d, session: (_l: GuidedLinkRow) => fakeSession(calls), whatsApp: '27111111111', signOnForm })));
+    app.use('/claim-form', claimFormRouter(() => ({ ...d, session: (_l: GuidedLinkRow) => fakeSession(calls), whatsApp: '27111111111', signOnForm, ...more })));
     const s = await new Promise<import('node:http').Server>((r) => { const x = app.listen(0, () => r(x)); });
     return { base: `http://127.0.0.1:${(s.address() as AddressInfo).port}/claim-form`, close: () => new Promise((r) => s.close(r)) };
 }
@@ -149,4 +149,69 @@ test('a signature the signing page refuses: false, so the link goes instead', as
     const s = signWithFormSignature(signing, links);
     const gone = { id: 'r-x', link: 'https://tina.example/sign/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', expiresAt: '2026-11-16T00:00:00Z' };
     assert.equal(await s.signWithFormSignature!(gone, { signature: pngSignature(), ip: null, userAgent: null }), false);
+});
+
+// ---- the user (9 Nov 2026): an email claim's client signs on the form too -------------------------------------------
+
+const EMAIL_CLAIM = '0b7e7c1e-1111-4a2b-9c3d-000000000002';
+
+async function emailSetup() {
+    const links: GuidedLinkDeps & { store: ReturnType<typeof memoryLinkStore> } = { store: memoryLinkStore(), publicUrl: 'https://tina.example' };
+    const posted: string[] = [];
+    const store = memorySigningStore();
+    const signing: SigningDeps = {
+        store, publicUrl: 'https://tina.example', callbackSecret: 'secret', retryDelayMs: 0,
+        post: async (url) => { posted.push(url); return { ok: true, status: 200, text: 'ok' }; },
+    };
+    const doc = await PDFDocument.create();
+    doc.addPage([595, 842]);
+    const pdf = await doc.save();
+    const request = (caller: string) => createSigningRequest(signing, {
+        document: pdf, documentHash: sha256(pdf), fileName: 'Claim form.pdf', title: 'Claim form', channel: 'email', sentTo: 'client@example.com',
+        caller, callerRecordId: EMAIL_CLAIM, callbackUrl: 'https://agent.example/api/claim-signed',
+        stamps: [{ kind: 'signature', page: 1, x: 100, y: 100, width: 160, height: 30 }],
+    });
+    return { links, signing, store, posted, request };
+}
+
+test('an email claim\'s link signs on the form when the email agent can use the signature', async () => {
+    const { links, signing } = await emailSetup();
+    const email = await createGuidedLink(links, { ...INPUT, claimId: EMAIL_CLAIM, phone: '', callbackUrl: 'https://agent.example/form-done' });
+    const s = await server(links, [], true, { emailSigning: emailClaimSigning(signing, links) });
+    try {
+        assert.equal((await (await fetch(`${s.base}/${tokenOf(email.url)}/state`)).json()).sign, true);
+    } finally { await s.close(); }
+});
+
+test('the email agent\'s half: is there a signature, then sign its own claim-email request with it, with the API key only', async () => {
+    const { links, signing, store, posted, request } = await emailSetup();
+    const { id } = await createGuidedLink(links, { ...INPUT, claimId: EMAIL_CLAIM, phone: '', callbackUrl: 'https://agent.example/form-done' });
+    const s = await server(links, [], true, { apiKey: 'k', emailSigning: emailClaimSigning(signing, links) });
+    const call = (path: string, body: unknown, key = 'k') => fetch(`${s.base}/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify(body) });
+    try {
+        assert.equal((await call('form-signature', { claimId: EMAIL_CLAIM }, 'wrong')).status, 401);
+        assert.deepEqual(await (await call('form-signature', { claimId: EMAIL_CLAIM })).json(), { ok: true, found: false });
+        await links.store.update(id, { signature: pngSignature(), signature_ip: '196.1.2.3', signature_user_agent: 'TestPhone/1.0', signed_at: new Date().toISOString() });
+        assert.deepEqual(await (await call('form-signature', { claimId: EMAIL_CLAIM })).json(), { ok: true, found: true });
+
+        // Only the email agent's own requests: one made as Tina's 'claim' caller is refused, and the drawing stays.
+        const tinas = await request('claim');
+        const refused = await call('sign-with-form', { link: tinas.link });
+        assert.equal(refused.status, 409);
+        assert.equal((await refused.json()).reason, 'not-this-caller');
+        assert.ok(links.store.rows.get(id)!.signature);
+
+        const mine = await request('claim-email');
+        assert.equal((await call('sign-with-form', { link: mine.link }, 'wrong')).status, 401);
+        assert.deepEqual(await (await call('sign-with-form', { link: mine.link })).json(), { ok: true });
+        const row = store.rows.get(mine.id)!;
+        assert.equal(row.status, 'used');
+        assert.equal(row.audit?.ip, '196.1.2.3');
+        // Used once: the drawing is off the link, and a second request gets the link instead.
+        assert.equal(links.store.rows.get(id)!.signature, null);
+        const again = await request('claim-email');
+        assert.equal((await (await call('sign-with-form', { link: again.link })).json()).reason, 'no-signature');
+        await new Promise((r) => setTimeout(r, 20));
+        assert.deepEqual(posted, ['https://agent.example/api/claim-signed']);
+    } finally { await s.close(); }
 });

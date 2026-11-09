@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit 2621603). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit bdf8a77). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack's ports (claimpack.ts ClaimPackPorts) against Dataverse, in the style of
 // signing-dataverse.ts: the host passes its Dataverse call (`Dv`) and the claim folder, so this file runs unchanged in
