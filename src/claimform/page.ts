@@ -193,6 +193,8 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .wi { display:block; width:100%; height:40px; border:0; background:none; padding:0; font-size:19px; color:var(--muted); scroll-snap-align:center; font-variant-numeric:tabular-nums; cursor:pointer; }
 .wi.on { color:var(--accent-deep); font-weight:500; }
 .wfoot { display:grid; grid-template-columns:1fr 2.2fr; gap:10px; }
+.wnote { margin:0; font-size:13.5px; line-height:1.35; color:var(--warn); background:var(--warn-soft); border-radius:8px; padding:8px 10px; text-align:center; }
+.panel .go:disabled { opacity:.45; cursor:not-allowed; }
 .wfoot button { min-height:48px; border-radius:12px; font-weight:500; font-size:15px; cursor:pointer; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); }
 .wfoot .go { border-color:var(--accent); background:var(--accent); color:#fff; }
 .panel.full { height:100%; max-height:100%; border-radius:0; grid-template-rows:auto auto minmax(0,1fr); padding-top:calc(14px + env(safe-area-inset-top,0px)); animation:none; }
@@ -334,7 +336,8 @@ const SCRIPT = String.raw`
   var ROW = 40, wheel = null, wheelTimer = null;
   function wheelCols(c) {
     if (c.kind === 'time') return ['h', 'i'];
-    if (c.kind === 'datetime') return ['m', 'd', 'h', 'i'];
+    // The user (9 Nov 2026): a year wheel of its own, so the year is never guessed (a guess rolled a future day back a year).
+    if (c.kind === 'datetime') return ['m', 'd', 'y', 'h', 'i'];
     if (c.kind === 'year') return ['y'];
     return c.month ? ['m', 'y'] : ['m', 'd', 'y'];
   }
@@ -346,7 +349,8 @@ const SCRIPT = String.raw`
     if (col === 'd') return range(1, daysIn(wheel.vals)).map(function (x) { return [pad(x), String(x)]; });
     if (col === 'h') return range(0, 23).map(function (x) { return [pad(x), pad(x)]; });
     if (col === 'i') return range(0, 11).map(function (x) { return [pad(x * 5), pad(x * 5)]; });
-    var years = c.kind === 'year' ? range(THIS_YEAR - 45, THIS_YEAR + 1) : c.recent ? range(THIS_YEAR - 2, THIS_YEAR) : range(THIS_YEAR - 60, THIS_YEAR);
+    var years = c.kind === 'year' ? range(THIS_YEAR - 45, THIS_YEAR + 1) : c.recent ? range(THIS_YEAR - 2, THIS_YEAR)
+      : c.kind === 'datetime' ? range(THIS_YEAR - 5, THIS_YEAR) : range(THIS_YEAR - 60, THIS_YEAR);
     return years.map(function (y) { return [String(y), String(y)]; });
   }
   /** What the wheels open on: the answer so far, else now. */
@@ -401,13 +405,31 @@ const SCRIPT = String.raw`
     $('wheels').innerHTML = '<div class="wband"></div>' + wheel.cols.map(function (col) { return '<div class="wheel" data-col="' + col + '">' + colHtml(col) + '</div>'; }).join('');
     $('wheelSheet').hidden = false;
     wheel.cols.forEach(placeCol);
+    noteFuture();
     wheel.cols.forEach(function (col) {
       colEl(col).addEventListener('scroll', function () {
         markCol(this);
         clearTimeout(wheelTimer);
-        wheelTimer = setTimeout(function () { if (wheel) settleDays(); }, 120);
+        wheelTimer = setTimeout(function () { if (wheel) { settleDays(); noteFuture(); } }, 120);
       });
     });
+  }
+  /**
+   * The user (9 Nov 2026): what happened can't be still to come. A date and time, or a recent date, that's after now can't
+   * be chosen: Done waits, and a note says why, until the wheels say a moment that has passed.
+   */
+  function wheelFuture() {
+    var c = wheel.c, v = wheel.vals;
+    if (c.kind === 'datetime') return new Date(Number(v.y), Number(v.m) - 1, Number(v.d), Number(v.h), Number(v.i)) > new Date();
+    if (c.kind === 'date' && c.recent && !c.month) return v.y + '-' + v.m + '-' + v.d > daysAgo(0);
+    return false;
+  }
+  function noteFuture() {
+    readWheels();
+    var future = wheelFuture();
+    $('wheelNote').hidden = !future;
+    $('wheelNote').textContent = wheel.c.kind === 'datetime' ? "That's still to come. Pick a date and time that has passed." : "That's still to come. Pick a date that has passed.";
+    document.querySelector('[data-wheel-done]').disabled = future;
   }
   function closeWheel() { wheel = null; $('wheelSheet').hidden = true; render(); }
   /** What the wheels say, as the question saves it. The year of a date and time: the last time that day has come round. */
@@ -416,14 +438,8 @@ const SCRIPT = String.raw`
     if (c.kind === 'time') return v.h + ':' + v.i;
     if (c.kind === 'year') return Number(v.y);
     if (c.month) return v.y + '-' + v.m;
-    if (c.kind === 'datetime') {
-      // The year it already holds stays, unless that's still to come.
-      var y = Number(v.y);
-      if (new Date(y, Number(v.m) - 1, Number(v.d), Number(v.h), Number(v.i)) > new Date()) y--;
-      return y + '-' + v.m + '-' + v.d + ' ' + v.h + ':' + v.i;
-    }
-    var date = v.y + '-' + v.m + '-' + v.d;
-    return c.recent && date > daysAgo(0) ? daysAgo(0) : date;
+    if (c.kind === 'datetime') return v.y + '-' + v.m + '-' + v.d + ' ' + v.h + ':' + v.i;
+    return v.y + '-' + v.m + '-' + v.d;
   }
   // ---- a list of known names: a dropdown to type into ------------------------------------------------------------------
   var listSheet = null;
@@ -1451,7 +1467,11 @@ const SCRIPT = String.raw`
     var row = e.target.closest('[data-wi]');
     if (row) { row.parentNode.scrollTo({ top: Number(row.dataset.wi) * ROW, behavior: 'smooth' }); return; }
     if (e.target.closest('[data-wheel-clear]')) { draft[wheel.key] = ''; delete errors[wheel.key]; return closeWheel(); }
-    if (e.target.closest('[data-wheel-done]')) { readWheels(); draft[wheel.key] = wheelValue(); delete errors[wheel.key]; closeWheel(); }
+    if (e.target.closest('[data-wheel-done]')) {
+      readWheels();
+      if (wheelFuture()) return noteFuture();
+      draft[wheel.key] = wheelValue(); delete errors[wheel.key]; closeWheel();
+    }
   });
   $('comboSheet').addEventListener('click', function (e) {
     if (e.target.closest('[data-combo-close]')) return closeCombo();
@@ -1527,6 +1547,7 @@ export function claimFormPage(): string {
     <div class="panel auto" role="dialog" aria-labelledby="wheelTitle">
       <div class="panel-head"><span id="wheelTitle"></span><button type="button" data-wheel-close aria-label="Close">✕</button></div>
       <div style="display:grid;gap:8px"><div class="wlabels" id="wheelLabels"></div><div class="wheels" id="wheels"></div></div>
+      <p class="wnote" id="wheelNote" role="alert" hidden></p>
       <div class="wfoot"><button type="button" data-wheel-clear>Clear</button><button type="button" class="go" data-wheel-done>Done</button></div>
     </div>
   </div>
