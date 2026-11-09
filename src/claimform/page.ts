@@ -172,6 +172,10 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 @keyframes spin { to { transform:rotate(360deg); } }
 .notice { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:8px 18px; background:var(--warn-soft); color:var(--warn); font-size:13px; line-height:1.35; }
 .notice button { flex:none; border:none; background:none; color:var(--accent-deep); font-weight:500; font-size:13px; cursor:pointer; padding:4px 0 4px 8px; }
+.sign-pad { position:relative; height:200px; }
+.sign-pad canvas { position:absolute; inset:0; width:100%; height:100%; touch-action:none; background:#fff; border:1px solid var(--line-strong); border-radius:12px; }
+.sign-pad .line { position:absolute; left:18px; right:18px; bottom:44px; border-bottom:1px dashed var(--line-strong); pointer-events:none; }
+.sign-acts { display:flex; justify-content:flex-end; }
 .need-box { border:1px solid #E2BC85; background:#FFFBF4; border-radius:12px; padding:10px 14px; display:grid; gap:4px; font-size:13.5px; color:var(--text); }
 .need-box b { color:var(--warn); font-weight:600; }
 .need-box ul { margin:0; padding-left:18px; }
@@ -280,6 +284,8 @@ const SCRIPT = String.raw`
     var steps = [{ id: 'details' }];
     visibleScreens().forEach(function (i) { steps.push({ id: 'screen', i: i }); });
     steps.push({ id: 'photos' }, { id: 'review' });
+    // The user (9 Nov 2026): the client signs here, so the form is done in one go.
+    if (V.sign) steps.push({ id: 'sign' });
     return steps;
   }
   function sameStep(a, b) { return !!a && !!b && a.id === b.id && a.i === b.i; }
@@ -707,7 +713,7 @@ const SCRIPT = String.raw`
     var key = e.key, count = key ? e.count : extra, id = 'up-' + (key || 'other'), accept = e.kind === 'video' ? 'video/*' : 'image/*,application/pdf';
     var mine = uploads.filter(function (u) { return u.key === key; }), going = mine.filter(function (u) { return u.state === 'up'; }).length;
     var need = e.required && !count && !going;
-    var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : count ? count + ' added' : need ? 'We need this for your claim. No problem if you don\'t have it now: you can add it later.' : 'Not added yet';
+    var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : count ? count + ' added' : need ? (V.sign ? 'We need this before you can sign.' : 'We need this for your claim. No problem if you don\'t have it now: you can add it later.') : 'Not added yet';
     return '<div class="up' + (need ? ' need' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + (e.required && !count ? '<span class="req">Required</span>' : '') + '</b>' + (e.help ? '<span class="eg">' + esc(e.help) + '</span>' : '') + '<small id="st-' + q(id) + '">' + note + '</small></div>'
       + '<div class="up-acts">' + (e.draw ? '<button type="button" class="addb draw" data-draw="' + q(key) + '">Draw</button>' : '') + '<label class="addb" for="' + q(id) + '">' + (e.draw ? 'Photo' : 'Add') + '</label></div><input class="sr" type="file" id="' + q(id) + '" data-up="' + q(key) + '" accept="' + accept + '" multiple>'
       + (mine.length ? '<div class="thumbs">' + mine.map(thumbHtml).join('') + '</div>' : '') + '</div>';
@@ -725,12 +731,27 @@ const SCRIPT = String.raw`
     }
     return String(v);
   }
+  /** The required photos and documents still to add (one being uploaded counts). */
+  function missingUploads() {
+    return V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && (u.state === 'up' || u.state === 'ok'); }); });
+  }
+  function listBox(title, items, note) {
+    return '<div class="need-box"><b>' + esc(title) + '</b><ul>' + items.map(function (m) { return '<li>' + esc(m) + '</li>'; }).join('') + '</ul>' + (note ? '<span>' + esc(note) + '</span>' : '') + '</div>';
+  }
   /** The summary: the one step that may scroll. */
   function reviewHtml() {
-    var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
-    var missing = V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && u.state === 'up'; }); }).map(function (e) { return e.prompt; });
-    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper') missing.push(promptOf(f)); }); });
-    if (missing.length) html += '<div class="need-box"><b>Still required</b><ul>' + missing.map(function (m) { return '<li>' + esc(m) + '</li>'; }).join('') + '</ul><span>You can submit now and send these later. Tina or your broker will follow up.</span></div>';
+    var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.sign ? 'you sign, and your claim is submitted' : V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
+    var files = missingUploads().map(function (e) { return e.prompt; }), blank = [];
+    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper') blank.push(promptOf(f)); }); });
+    if (V.sign) {
+      // What a client can always get must be in before they sign (the server checks it too); a question left blank is
+      // one they don't know, and the broker follows it up.
+      if (files.length) html += listBox('Add these before you sign', files, '');
+      if (blank.length) html += listBox('Left blank', blank, 'You can still sign. Your broker will follow these up with you.');
+    } else {
+      var missing = files.concat(blank);
+      if (missing.length) html += listBox('Still required', missing, 'You can submit now and send these later. Tina or your broker will follow up.');
+    }
     visibleScreens().forEach(function (i) {
       var s = V.screens[i], rows = '';
       s.fields.forEach(function (f) {
@@ -746,12 +767,50 @@ const SCRIPT = String.raw`
     return html + err('submit');
   }
 
+  // ---- signing: the last step, when the client signs on the form (V.sign) -------------------------------------------
+  var inked = false;
+  function signHtml() {
+    return '<p class="help">Draw your signature in the box with your finger. By signing, you confirm that your answers are true and complete, as far as you know, and that this signature goes on your claim form for ' + esc(V.insurer) + '.</p>'
+      + '<div class="sign-pad"><canvas id="signPad" aria-label="Signature pad"></canvas><div class="line"></div></div>'
+      + '<div class="sign-acts"><button type="button" class="link" id="signClear">Clear</button></div>' + err('sign');
+  }
+  function startPad() {
+    var pad = $('signPad'), ctx = pad.getContext('2d'), drawing = false, last = null, r = window.devicePixelRatio || 1;
+    pad.width = pad.clientWidth * r; pad.height = pad.clientHeight * r;
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+    ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#13213f';
+    inked = false;
+    var at = function (e) { var b = pad.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
+    pad.addEventListener('pointerdown', function (e) { drawing = true; last = at(e); pad.setPointerCapture(e.pointerId); e.preventDefault(); });
+    pad.addEventListener('pointermove', function (e) {
+      if (!drawing) return;
+      var p = at(e);
+      ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+      last = p; inked = true; e.preventDefault();
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) { pad.addEventListener(t, function () { drawing = false; }); });
+    $('signClear').addEventListener('click', function () { ctx.clearRect(0, 0, pad.width, pad.height); inked = false; });
+  }
+  /** The signature as a PNG cut to the ink, as the signing page makes it, so it fills the box on the form. */
+  function signature() {
+    var pad = $('signPad');
+    if (!pad || !inked) return null;
+    var w = pad.width, h = pad.height, d = pad.getContext('2d').getImageData(0, 0, w, h).data, x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 0) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (x1 < 0) return null;
+    var m = 6, c = document.createElement('canvas');
+    x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(w - 1, x1 + m); y1 = Math.min(h - 1, y1 + m);
+    c.width = x1 - x0 + 1; c.height = y1 - y0 + 1;
+    c.getContext('2d').drawImage(pad, x0, y0, c.width, c.height, 0, 0, c.width, c.height);
+    return c.toDataURL('image/png');
+  }
+
   var drawnAt = null;
   function render() {
     var body = $('body');
     var steps = route(), i = stepIndex(steps), step = steps[i], anchor = here && here.anchor;
     here = { id: step.id, i: step.i, anchor: anchor };
-    $('sec').textContent = step.id === 'details' ? 'Are these details still right?' : step.id === 'photos' ? 'Add your photos and documents' : step.id === 'review' ? 'Check your claim' : V.screens[step.i].title;
+    $('sec').textContent = step.id === 'details' ? 'Are these details still right?' : step.id === 'photos' ? 'Add your photos and documents' : step.id === 'review' ? 'Check your claim' : step.id === 'sign' ? 'Sign your claim' : V.screens[step.i].title;
     $('back').hidden = i === 0;
     // The height to fit is the page without the phone's keyboard open.
     if (!typing() || !pageH) pageH = body.clientHeight;
@@ -766,11 +825,14 @@ const SCRIPT = String.raw`
       page = rest.slice(0, n);
       morePages = n < rest.length;
       part = all.length ? from / all.length : 0;
-    } else body.innerHTML = step.id === 'review' ? reviewHtml() : detailsHtml();
+    } else body.innerHTML = step.id === 'review' ? reviewHtml() : step.id === 'sign' ? signHtml() : detailsHtml();
+    if (step.id === 'sign') startPad();
     body.scrollTop = top;
     drawnAt = { id: here.id, i: here.i, anchor: here.anchor };
     $('prog').style.width = Math.round((i + part) / Math.max(1, steps.length - 1) * 100) + '%';
-    if (!submitting) { $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? 'Submit claim' : 'Continue'; }
+    if (!submitting) {
+      $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm' : 'Continue';
+    }
     $('next').disabled = busy;
     drawNotice();
   }
@@ -979,6 +1041,8 @@ const SCRIPT = String.raw`
       return move(1);
     }
     var last = page.length ? page[page.length - 1].key : null;
+    if (step.id === 'review' && V.sign) return toSign();
+    if (step.id === 'sign') return submit(signature());
     if (step.id === 'review') return submit();
     if (step.id === 'photos') return morePages ? advance(last) : move(1);
     var c = collect(page);
@@ -988,7 +1052,22 @@ const SCRIPT = String.raw`
     }
     advance(last);
   }
-  function submit() {
+  /** Confirm and sign: what the client must add first, or on to the signature. */
+  function toSign() {
+    var files = missingUploads();
+    if (files.length) return goPhotos(files.map(function (e) { return e.key; }));
+    move(1);
+  }
+  /** To the photos, with what's still needed said at the top. */
+  function goPhotos(keys) {
+    var names = V.evidence.filter(function (e) { return keys.indexOf(e.key) >= 0; }).map(function (e) { return e.prompt; });
+    here = { id: 'photos', anchor: null };
+    render();
+    errors = { photos: 'Please add ' + (names.length === 1 ? 'this' : 'these') + ' before you sign: ' + names.join('; ') };
+    $('body').insertAdjacentHTML('afterbegin', err('photos'));
+  }
+  function submit(sig) {
+    if (V.sign && !sig) { errors = { sign: 'Please sign in the box first.' }; return render(); }
     busy = true; submitting = true; $('next').disabled = true;
     $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(function (u) { return u.state === 'up'; }) ? 'Uploading your photos…' : 'Submitting…');
     whenIdle(function () {
@@ -1002,8 +1081,11 @@ const SCRIPT = String.raw`
       var open = Object.keys(problems);
       if (open.length) { busy = false; submitting = false; goFix(open[0]); return; }
       $('next').innerHTML = '<span class="spin"></span>Submitting…';
-      post('/submit').then(function (r) {
+      post('/submit', sig ? { signature: sig } : {}).then(function (r) {
         busy = false; submitting = false;
+        // A required photo or document that isn't in: the photos, before they can sign.
+        var files = (r.open || []).filter(function (k) { return V.evidence.some(function (e) { return e.key === k; }); });
+        if (files.length) return api('/state').then(function (s) { adopt(s); goPhotos(files); }).catch(function () { goPhotos(files); });
         if (r.open && r.open.length) {
           var go = function () {
             var target = null;
@@ -1025,11 +1107,12 @@ const SCRIPT = String.raw`
         $('foot').hidden = true; $('notice').hidden = true;
         $('sec').textContent = '';
         $('prog').style.width = '100%';
-        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your answers. ' + (V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
+        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. Tina will message you on WhatsApp if anything else is needed.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
       }).catch(function (e) {
         busy = false; submitting = false;
         if (e.message === 'gone') return;
-        errors = { submit: (e.body && e.body.message) || 'No connection. Please try again.' };
+        errors = sig ? { sign: (e.body && e.body.message) || 'No connection. Please try again.' } : { submit: (e.body && e.body.message) || 'No connection. Please try again.' };
+        if (sig && e.status === 400) inked = false;
         render();
       });
     });
@@ -1477,7 +1560,7 @@ export function claimFormPage(): string {
 const REFUSED: Record<LinkRefusal, { title: string; text: string; ok?: boolean }> = {
     'not-found': { title: 'This link does not work', text: 'Please check you opened the whole link, or ask Tina for a new one on WhatsApp.' },
     expired: { title: 'This link has expired', text: 'Links work for 7 days. Reply to Tina on WhatsApp and she will help you carry on.' },
-    done: { title: 'Claim submitted', text: 'Thank you, we have your answers. Tina will message you on WhatsApp with anything still needed and your form to sign.', ok: true },
+    done: { title: 'Claim submitted', text: 'Thank you, we have your claim. Tina will message you on WhatsApp if anything else is needed.', ok: true },
     superseded: { title: 'There is a newer link', text: 'Please open the latest link Tina sent you.' },
 };
 

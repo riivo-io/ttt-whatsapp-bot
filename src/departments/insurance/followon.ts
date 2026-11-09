@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 7cb9533). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit b7ed5d4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -44,7 +44,7 @@
 // conversation stays on it (phase `still-need`): whatever the client sends next is read against the list, and the
 // morning reminder (reminder.ts) puts a client back on it. "I don't know" to one of those items is "not yet", so it
 // stays the client's to send; the broker takes only what the client can't get.
-import { clientQuestionDetail, DEPARTMENT, OWN_PLUMBER_NOTE, PACK_FOLLOW_UP, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
+import { clientQuestionDetail, DEPARTMENT, FNOL_TEMPLATE, OWN_PLUMBER_NOTE, PACK_FOLLOW_UP, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import type { FlagTrigger } from './flags';
 import { formatProblem } from './formats';
@@ -412,7 +412,7 @@ type Out =
    * `template`: the fixed wording's name and version (READY_TO_REGISTER). `withoutLink` (29 Oct 2026): the words when the
    * signing step just before it sent the client no link.
    */
-  | { kind: 'follow-up'; detail: string; template?: { name: string; version: string }; withoutLink?: string };
+  | { kind: 'follow-up'; detail: string; template?: { name: string; version: string }; withoutLink?: string; signed?: string };
 
 /** `waitForMore`: ClaimSettings.waitForMore. */
 export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean; guided?: boolean }
@@ -546,7 +546,7 @@ function proceed(c: Ctx, w: Work, st: FollowOnState, out: Out[], thanks?: 'Thank
   out.push({ kind: 'closing' });
   if (missing.length) out.push({ kind: 'still-missing', items: missing, lead: '' });
   const ready = (signature: SignatureStatus) => readyToRegister(c.claim, missing, signature, ttt);
-  out.push({ kind: 'request-signature', ...(missing.length ? { stillToCome: true } : {}) }, { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), template: READY_TO_REGISTER });
+  out.push({ kind: 'request-signature', ...(missing.length ? { stillToCome: true } : {}) }, { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), signed: ready('Signed'), template: READY_TO_REGISTER });
   return missing.length ? stillNeedState(c, { ...st, signingRequested: true }, missing) : null;
 }
 
@@ -1283,11 +1283,13 @@ function advanceReply(c: Ctx, st: FollowOnState, raw: Exclude<FollowOnInput, { k
 // ---------------------------------------------------------------------------------- TTTFG-5562: the guided form
 
 export const GUIDED_LINK_LABEL = 'Open claim form';
-/** The link's message. It says the client can stop and come back, and how to answer on WhatsApp instead. */
-export const guidedLinkText = (first: string | undefined, minutes: number) =>
-  `${first ? `${first}, please` : 'Please'} tap below to fill in your claim form. Most answers are a tap, I've filled in what we already know, and it takes about ${minutes} minutes. `
-  + 'You can stop and come back with the same link.\n\nIf you\'d rather answer here on WhatsApp, just say "chat".';
-export const FORM_OPEN = 'Your claim form is in the link I sent you. You can stop and come back to it with the same link. If you\'d rather answer here on WhatsApp, just say "chat".';
+/**
+ * The link's message: the form and nothing else (the user, 9 Nov 2026). No claim reference, no notes and no offer to
+ * answer on WhatsApp instead: the form opens with what the client needs to know. A client who can't open it still gets
+ * the questions on WhatsApp (prefersChat).
+ */
+export const guidedLinkText = (_first?: string, _minutes?: number) => 'Fill out the form below to submit your claim.';
+export const FORM_OPEN = 'Your claim form is in the link I sent you. You can stop and come back to it with the same link.';
 export const CHAT_INSTEAD = "No problem, let's do it here.";
 export const FORM_UNAVAILABLE = "I can't open the form just now, so let's do it here.";
 
@@ -1323,7 +1325,10 @@ const notYetOnForm = (st: FollowOnState, w: Work) =>
 /** AC 8: on WhatsApp from the first unanswered question, the SAPS step and the address check first, as on any claim. */
 function formChat(c: Ctx, st: FollowOnState, lead: string = CHAT_INSTEAD): Step {
   const w = work(c.claim);
-  const out: Out[] = [{ kind: 'text', text: lead }];
+  // The user (9 Nov 2026): a claim opened for the form got only its link, so on chat Tina first says what the
+  // acknowledgement would have: the claim is logged, its reference, and the AI notice.
+  const ack = st.introSent ? [] : [{ kind: 'text' as const, text: FNOL_TEMPLATE.render({ firstName: '', reference: c.claim.reference }) }];
+  const out: Out[] = [...ack, { kind: 'text', text: lead }];
   st = policeFromForm(c, w, st, out);
   // TTTFG-5562: the form would have opened with these. On chat, Tina says them.
   if (!st.introSent) {
@@ -2121,12 +2126,16 @@ export async function followOnTurn(
         if (o.file.media === 'video') await ports.storeVideo(o.file, { claimId, itemKey: o.itemKey });
         else await ports.fileToPipeline(o.file, { claimId, itemKey: o.itemKey });
         break;
-      case 'request-signature':
-        if ((await ports.requestClaimSignature(claimId)) === 'sent') {
+      case 'request-signature': {
+        const result = await ports.requestClaimSignature(claimId);
+        if (result === 'sent') {
           if (!o.stillToCome) await setStatus('Form sent');
           signature = 'Link sent';
         }
+        // Signed at the end of the guided form: the signed callback has set the status already.
+        if (result === 'signed') signature = 'Signed';
         break;
+      }
       case 'status':
         await setStatus(o.status);
         break;
@@ -2141,7 +2150,8 @@ export async function followOnTurn(
         await ports.createAgentAction({
           kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId,
           // TTTFG-4830 (29 Oct 2026): the ready-to-register words when the signing step before it sent no link.
-          detail: o.withoutLink !== undefined && signature !== 'Link sent' ? o.withoutLink : o.detail, at, ...(o.template ? { template: o.template } : {}),
+          detail: o.signed !== undefined && signature === 'Signed' ? o.signed
+            : o.withoutLink !== undefined && signature !== 'Link sent' ? o.withoutLink : o.detail, at, ...(o.template ? { template: o.template } : {}),
         });
         break;
     }

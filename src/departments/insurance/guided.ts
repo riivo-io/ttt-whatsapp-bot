@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 7cb9533). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit b7ed5d4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -186,10 +186,10 @@ const fieldType = (item: QuestionItem): GuidedField['type'] =>
   item.answerType === 'number' || item.answerType === 'date' || item.answerType === 'yes/no' || item.answerType === 'choice' ? item.answerType : 'text';
 
 /** How a question is answered: the form's own choices or yes/no as they are, anything else as formcontrols.ts says. */
-function controlFor(item: QuestionItem, baseKey: string, master: MasterForm): GuidedControl {
+function controlFor(item: QuestionItem, baseKey: string, master: MasterForm, claimType?: string): GuidedControl {
   if (item.answerType === 'yes/no') return { kind: 'yes-no' };
   if (item.answerType === 'choice') return { kind: 'pills', options: item.choices ?? [] };
-  const c = formControl(master.id, baseKey);
+  const c = formControl(master.id, baseKey, claimType);
   if (c) return c;
   return item.answerType === 'date' ? { kind: 'date' } : item.answerType === 'number' ? { kind: 'number' } : { kind: 'short' };
 }
@@ -280,7 +280,7 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     const held = variants?.find((v) => v.cond === true);
     const known = answers[item.key]?.status === 'answered';
     const pre = !known && !item.group ? earlierValue(item, master, earlier) : undefined;
-    const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey, master);
+    const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey, master, claim.claimType);
     const hidden = isMore && countedGroup(form, item.group!);
     // A burst geyser or pipe is damage: "stolen, lost or damaged?" is answered for them (applyGuidedSave).
     if (baseKey === LOSS_KIND_KEY && burstAsked(form)) when.push({ key: BURST_KEY, oneOf: [true], not: true });
@@ -643,7 +643,11 @@ export async function finishGuided(ports: GuidedPorts, claimId: string, now: Dat
   const open = guidedOpen(form, claim, sapsRequired);
   const items = formItems(form, claim.answers, facts, sapsRequired);
   const required = open.filter((k) => items.find((i) => i.key === k)?.required);
-  if (required.length) return { open: required };
+  // The user (9 Nov 2026): the client signs at the end of the form, so what the form asks them to send and is required
+  // must be in first. Only what a client can always get is required (a driver's licence, the drawing of the accident);
+  // photos of damage never are (contracts.ts `required`).
+  const files = missingOnForm(form, claim, items, facts);
+  if (required.length || files.length) return { open: [...required, ...files] };
   const left = open.filter((k) => !required.includes(k));
   if (left.length) {
     const answers: ClaimAnswers = { ...claim.answers };
@@ -651,6 +655,14 @@ export async function finishGuided(ports: GuidedPorts, claimId: string, now: Dat
     await ports.saveAnswers(claimId, answers);
   }
   return { open: [] };
+}
+
+/** The required photos and documents the form asks for (its last screen) that still have no file. */
+export function missingOnForm(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers' | 'evidence'>, items: readonly QuestionItem[], facts: ClaimFacts): string[] {
+  // The drawing of the accident isn't asked on chat (TTT gets it), but the form lets the client draw it, so it counts here.
+  const drawings = form.questionList.filter((q) => FORM_DRAWINGS.has(q.key) && !items.some((i) => i.key === q.key));
+  return [...items, ...drawings].filter((i) => i.kind === 'evidence' && i.required && (i.onHand !== false || FORM_DRAWINGS.has(i.key))
+    && applies(i, claim.answers, facts) && filesFor(i, claim.evidence) === 0).map((i) => i.key);
 }
 
 /** A file from the form's last screen, through the same document pipeline as a file sent on WhatsApp (AC 7). */

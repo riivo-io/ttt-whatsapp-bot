@@ -5,7 +5,9 @@
  *   POST /claim-form/:token/answers    one screen's answers
  *   POST /claim-form/:token/voice      a recording (raw audio): { text } for the answer box
  *   POST /claim-form/:token/file       one photo or document (raw bytes), ?item=<evidence key>
- *   POST /claim-form/:token/submit     the client is done: Tina carries on on WhatsApp, or tells the email agent
+ *   POST /claim-form/:token/submit     the client is done: Tina carries on on WhatsApp, or tells the email agent.
+ *                                      { signature }: the client's signature from the form's last screen (a WhatsApp
+ *                                      link, when the signing page is set up: the view's `sign`)
  *   POST /claim-form/api/links         TTTFG-5188: a link for an email claim, with the signing API's key
  *   GET  /claim-form/api/blank-form    TTTFG-5188: an insurer's blank form for the email agent, with the same key
  * The token is the only key: it can't be guessed, and every call checks it again.
@@ -14,8 +16,9 @@ import express, { Router, type Request, type Response } from 'express';
 import type { ClientFile } from '../departments/insurance/followon';
 import type { GuidedSave, GuidedSaved, GuidedView } from '../departments/insurance/guided';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../claimform/page';
-import { createGuidedLink, finishGuidedLink, isBlankFormUrl, openGuidedLink, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
-import { LINK_PREVIEW, sameKey } from './signing.route';
+import { createGuidedLink, finishGuidedLink, isBlankFormUrl, openGuidedLink, saveFormSignature, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
+import { signaturePng } from '../signing/signing';
+import { clientIp, LINK_PREVIEW, sameKey } from './signing.route';
 
 /** What the route needs for one link's claim. */
 export interface ClaimFormSession {
@@ -38,7 +41,15 @@ export interface ClaimFormDeps extends GuidedLinkDeps {
     apiKey?: string;
     /** An insurer's blank form, as Tina reads it for a WhatsApp claim. */
     blankForm?(url: string): Promise<Uint8Array>;
+    /**
+     * The user (9 Nov 2026): the signing page is set up, so a WhatsApp link's client signs at the end of the form and the
+     * signing step signs the filled form with that signature, instead of sending a link. Absent: Submit, and the link after.
+     */
+    signOnForm?: boolean;
 }
+
+/** Whether this link's client signs on the form: a WhatsApp link (an email claim's caller sends its own), signing set up. */
+const signsHere = (d: ClaimFormDeps, link: GuidedLinkRow) => !!d.signOnForm && !link.callback_url;
 
 const VOICE_MAX = 16 * 1024 * 1024;
 /** WhatsApp's own limit for an image is 5 MB and a document 100 MB; a phone's camera stays well under this. */
@@ -165,7 +176,7 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!d) return void off(res);
         try {
             const link = await linked(d, req, res);
-            if (link) res.json({ ...(await d.session(link).view()), ...(link.callback_url ? { emailed: true } : {}) });
+            if (link) res.json({ ...(await d.session(link).view()), ...(link.callback_url ? { emailed: true } : {}), ...(signsHere(d, link) ? { sign: true } : {}) });
         } catch (e) { failed('state', res, e); }
     });
 
@@ -209,15 +220,22 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         } catch (e) { failed('file', res, e); }
     });
 
-    router.post('/:token/submit', async (req: Request, res: Response) => {
+    router.post('/:token/submit', linkFirst, express.json({ limit: '2mb' }), async (req: Request, res: Response) => {
         const d = getDeps();
         if (!d) return void off(res);
         try {
-            const link = await linked(d, req, res);
-            if (!link) return;
+            const link = res.locals.link as GuidedLinkRow;
+            const signature = typeof req.body?.signature === 'string' ? req.body.signature : '';
+            // The same check as the signing page's: a PNG from the pad, of a pad's size.
+            if (signsHere(d, link) && !signaturePng(signature)) return void res.status(400).json({ ok: false, message: 'Please sign in the box.' });
             const session = d.session(link);
             const r = await inTurn(link.id, () => session.finish());
             if (r.open.length) return void res.json({ ok: false, open: r.open });
+            if (signsHere(d, link)) {
+                // Kept on the link until Tina has filled the form. If it can't be kept, the client gets a signing link as before.
+                await saveFormSignature(d, link.id, { signature, ip: clientIp(req), userAgent: req.header('user-agent') ?? null })
+                    .catch((e) => console.error('[ClaimForm] the signature was not kept; a signing link goes instead:', (e as Error).message));
+            }
             await session.carryOn();
             await finishGuidedLink(d, link.id);
             res.json({ ok: true, open: [] });

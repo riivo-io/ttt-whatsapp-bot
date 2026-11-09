@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 7cb9533). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit b7ed5d4). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -155,7 +155,7 @@ export const FNOL_TEMPLATE = {
   version: 'draft-3',
   approved: false,
   render: (v: { firstName: string; reference: string }) =>
-    `Thanks ${v.firstName}, your claim is logged. Your claim reference is *${v.reference}*.\n\n${AI_HANDLING_LINE}`,
+    `Thanks${v.firstName ? ` ${v.firstName}` : ''}, your claim is logged. Your claim reference is *${v.reference}*.\n\n${AI_HANDLING_LINE}`,
 } as const;
 
 /** SPEC-05 "Unknown numbers": the one reply an unknown number gets. */
@@ -831,6 +831,9 @@ async function openClaim(ports: ClaimPorts, conv: Conversation, state: Walkthrou
     });
   }
 
+  // The user (9 Nov 2026): a claim opened for the guided form gets the form's link and nothing else, so no
+  // acknowledgement here. If the link can't be made, followon.ts sends it before the questions go on WhatsApp.
+  if (state.guided) return { id, reference, owner, text: '' };
   const text = FNOL_TEMPLATE.render({ firstName: state.firstName, reference });
   await ports.send(conv.phone, { kind: 'template', name: FNOL_TEMPLATE.name, version: FNOL_TEMPLATE.version, text });
   await ports.createAgentAction({
