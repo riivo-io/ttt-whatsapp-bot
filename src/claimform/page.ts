@@ -29,6 +29,9 @@ const STYLE = `
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 [hidden] { display:none !important; }
 html, body { height:100%; }
+/* The user (9 Nov 2026): a quick second tap on Continue or Back zoomed the page right in. Taps stay taps; pinching still zooms. */
+html { touch-action:manipulation; -webkit-text-size-adjust:100%; }
+button, a, label, input, textarea, .body { touch-action:manipulation; }
 body { margin:0; background:var(--panel); color:var(--text); font:15.5px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
 button { font:inherit; color:inherit; }
 :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
@@ -629,7 +632,7 @@ const SCRIPT = String.raw`
     if (c.bare || c.kind === 'slider') return '';
     var text = c.kind === 'stepper' ? c.label : promptOf(f);
     var tappable = ['yes-no', 'pills', 'combo', 'multi', 'car', 'yes-text', 'date', 'time', 'datetime', 'year', 'stepper'].indexOf(c.kind) >= 0;
-    var need = f.required && c.kind !== 'stepper' ? '<span class="req">Required</span>' : '';
+    var need = (f.required || (V.beforeSigning || []).indexOf(f.key) >= 0) && c.kind !== 'stepper' ? '<span class="req">Required</span>' : '';
     return tappable ? '<div class="ql">' + esc(text) + need + '</div>' : '<label class="ql" for="f-' + q(f.key) + '">' + esc(text) + need + '</label>';
   }
   function fieldHtml(f) {
@@ -751,17 +754,39 @@ const SCRIPT = String.raw`
   function missingUploads() {
     return V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && (u.state === 'up' || u.state === 'ok'); }); });
   }
+  /**
+   * The user (9 Nov 2026): the bare minimum the broker needs (when, where, what happened, the case number when the police
+   * were involved). These can't be left blank: the client fills them in before signing or submitting.
+   */
+  var askedToSign = false;
+  function neededText() { return V.sign ? 'We need this before you can sign.' : 'We need this before you can submit.'; }
+  function neededBlank() {
+    return (V.beforeSigning || []).map(function (k) { return FIELD[k]; })
+      .filter(function (f) { return f && shows(f) && !f.hidden && !filled(value(f.key)); });
+  }
+  /** Back to the first of them, saying why. True when there was one. */
+  function goNeeded() {
+    var blank = neededBlank();
+    if (!blank.length) return false;
+    // From now on the bar over the step also points at the ones on other steps, until they're filled in.
+    askedToSign = true;
+    goFix(blank[0].key);
+    // Every one of them says so, not only the first.
+    blank.forEach(function (f) { errors[f.key] = neededText(); });
+    render();
+    return true;
+  }
   function listBox(title, items, note) {
     return '<div class="need-box"><b>' + esc(title) + '</b><ul>' + items.map(function (m) { return '<li>' + esc(m) + '</li>'; }).join('') + '</ul>' + (note ? '<span>' + esc(note) + '</span>' : '') + '</div>';
   }
   /** The summary: the one step that may scroll. */
   function reviewHtml() {
     var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.sign ? 'you sign, and your claim is submitted' : V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
-    var files = missingUploads().map(function (e) { return e.prompt; }), blank = [];
-    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper') blank.push(promptOf(f)); }); });
+    var needed = neededBlank(), files = needed.map(promptOf).concat(missingUploads().map(function (e) { return e.prompt; })), blank = [];
+    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper' && needed.indexOf(f) < 0) blank.push(promptOf(f)); }); });
     if (V.sign) {
-      // What a client can always get must be in before they sign (the server checks it too); a question left blank is
-      // one they don't know, and the broker follows it up.
+      // What a client can always get must be in before they sign (the server checks it too), with the bare minimum the
+      // broker needs; any other question left blank is one they don't know, and the broker follows it up.
       if (files.length) html += listBox('Add these before you sign', files, '');
       if (blank.length) html += listBox('Left blank', blank, 'You can still sign. Your broker will follow these up with you.');
     } else {
@@ -978,15 +1003,16 @@ const SCRIPT = String.raw`
   function onPage(key) { return page.some(function (b) { return (b.fields || []).some(function (f) { return f.key === key; }); }) || (here && here.id === 'details' && V.details.some(function (d) { return d.key === key; })); }
   /** A slim bar over the step: no connection, or an answer the client has moved past that needs another look. */
   function drawNotice() {
-    var el = $('notice'), html = '', keys = Object.keys(problems).filter(function (k) { return !onPage(k); });
+    var needed = askedToSign ? neededBlank().map(function (f) { return f.key; }) : [];
+    var el = $('notice'), html = '', keys = Object.keys(problems).concat(needed.filter(function (k) { return !(k in problems); })).filter(function (k) { return !onPage(k); });
     if (lost) html = '<span>Some answers could not be saved. Please go back and check them, or ask Tina for help.</span>';
     else if (failures >= 2) html = '<span>No connection. Your answers are safe here and save when you\'re back online.</span>';
-    else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]]) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
+    else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]] || neededText()) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
     el.innerHTML = html;
     el.hidden = !html;
   }
   function goFix(key) {
-    errors[key] = problems[key];
+    errors[key] = problems[key] || ((V.beforeSigning || []).indexOf(key) >= 0 ? neededText() : undefined);
     if (V.details.some(function (d) { return d.key === key; })) { here = { id: 'details', anchor: null }; editing[key] = true; return render(); }
     var at = -1;
     V.screens.forEach(function (s, i) { if (at < 0 && s.fields.some(function (f) { return f.key === key; })) at = i; });
@@ -1070,6 +1096,7 @@ const SCRIPT = String.raw`
   }
   /** Confirm and sign: what the client must add first, or on to the signature. */
   function toSign() {
+    if (goNeeded()) return;
     var files = missingUploads();
     if (files.length) return goPhotos(files.map(function (e) { return e.key; }));
     move(1);
@@ -1083,6 +1110,7 @@ const SCRIPT = String.raw`
     $('body').insertAdjacentHTML('afterbegin', err('photos'));
   }
   function submit(sig) {
+    if (goNeeded()) return;
     if (V.sign && !sig) { errors = { sign: 'Please sign in the box first.' }; return render(); }
     busy = true; submitting = true; $('next').disabled = true;
     $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(function (u) { return u.state === 'up'; }) ? 'Uploading your photos…' : 'Submitting…');
@@ -1114,6 +1142,8 @@ const SCRIPT = String.raw`
             if (target === null) { errors = { submit: 'Something on the form still needs an answer. Please ask ' + (V.emailed ? 'your broker' : 'Tina') + ' for help.' }; return render(); }
             here = { id: 'screen', i: target, anchor: anchorFor(target, asks) };
             errors = {};
+            r.open.forEach(function (k) { if (FIELD[k]) errors[k] = neededText(); });
+            askedToSign = true;
             render();
           };
           if (r.open.every(holdsKey)) return go();
@@ -1123,7 +1153,7 @@ const SCRIPT = String.raw`
         $('foot').hidden = true; $('notice').hidden = true;
         $('sec').textContent = '';
         $('prog').style.width = '100%';
-        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. Tina will message you on WhatsApp if anything else is needed.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
+        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. A consultant from TTT will be in touch with you shortly.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
       }).catch(function (e) {
         busy = false; submitting = false;
         if (e.message === 'gone') return;
