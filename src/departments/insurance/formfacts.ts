@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formfacts.ts (commit ff8e5de). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formfacts.ts (commit 7cb9533). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562 (2 Nov 2026): when the guided form is on, Tina sends the link right after the policy and the kind of claim, so
 // what the walkthrough used to ask (what happened, when, where, who else) is asked on the form. These are those questions.
@@ -24,6 +24,8 @@ const HAPPENED: readonly QuestionItem[] = [
 ];
 export const THIRD_PARTIES = q('thirdParties', 'Was anyone else involved?', 'yes/no', false);
 export const INJURIES = q('injuries', 'Was anyone hurt?', 'yes/no', false);
+/** Who was hurt, on a form with no card per person hurt (a hijacking): what the walkthrough asks on chat after a yes. */
+export const INJURY_DETAILS: QuestionItem = { ...q('injuryDetails', 'Who was hurt, and how?', 'text', false), onlyIf: { key: 'injuries', equals: true } };
 export const SAPS_INVOLVED = q('saps', 'Was it reported to the police?', 'yes/no', false);
 
 /** A burst geyser or pipe: it's usually best that the insurer sends the plumber, so the broker hears at once. */
@@ -57,6 +59,11 @@ export function withFacts<F extends ClaimForm>(form: F, claim: { claimType: stri
   list.unshift(...HAPPENED.filter(wanted));
   if (wanted(THIRD_PARTIES)) beforeGroup(list, THIRD_PARTIES, 'otherParties');
   if (wanted(INJURIES)) beforeGroup(list, INJURIES, 'injured');
+  const hurtCards = (form.questionGroups ?? []).some((g) => g.key === 'injured');
+  if (!hurtCards && wanted(INJURY_DETAILS)) {
+    const at = list.findIndex((i) => i.key === INJURIES.key);
+    list.splice(at >= 0 ? at + 1 : list.length, 0, INJURY_DETAILS);
+  }
   if (wanted(SAPS_INVOLVED)) {
     const at = list.findIndex((i) => i.key.startsWith('sapsCase') || i.key.startsWith('sapsDate') || i.key.startsWith('sapsStation'));
     if (at >= 0) list.splice(at, 0, SAPS_INVOLVED);
@@ -115,7 +122,8 @@ export function factColumns(form: ClaimForm, facts: Facts, answers: ClaimAnswers
   // A count taken back to nobody takes the details with it.
   const others = said('thirdParties') === false ? '' : entriesOf(form, 'otherParties', answers);
   if (others !== undefined && others !== (facts.thirdPartyDetails ?? '')) out.thirdPartyDetails = others;
-  const hurt = said('injuries') === false ? '' : entriesOf(form, 'injured', answers);
+  const told = said(INJURY_DETAILS.key);
+  const hurt = said('injuries') === false ? '' : typeof told === 'string' && told.trim() ? told.trim() : entriesOf(form, 'injured', answers);
   if (hurt !== undefined && hurt !== (facts.injuryDetails ?? '')) out.injuryDetails = hurt;
   return out;
 }

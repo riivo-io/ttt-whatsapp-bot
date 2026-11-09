@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit ff8e5de). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit 7cb9533). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided form's master forms. One per kind of claim, each holding every unique question of every go-live
 // insurer form of that kind, grouped into the topics a client sees one screen at a time. The client only ever sees what
@@ -50,7 +50,7 @@ const fields = (spec: string, prefill = ''): MasterField[] => {
 const topic = (id: string, title: string, spec: string, prefill = ''): MasterTopic => ({ id, title, fields: fields(spec, prefill) });
 
 /** TTTFG-5562: what Tina's walkthrough asks on chat. It opens every form, and the burst pipe only shows on a home claim. */
-const HAPPENED = topic('happened', 'What happened', 'incidentAt place description thirdParties injuries saps burstPipe contractor');
+const HAPPENED = topic('happened', 'What happened', 'incidentAt place description thirdParties injuries injuryDetails saps burstPipe contractor');
 const POLICY = topic('policy', 'Your policy', 'ownPolicy policyholderRelationship policyDocsReceived preferredContact');
 const WHERE = topic('where', 'Where it happened', 'incidentSuburb incidentProvince incidentCountry dateDiscovered');
 const FINANCE_KEYS = 'vehicleFinanced financeInstitution financeAgreementType financeAccountNumber financeSettlementAmount registrationDocsAvailable';

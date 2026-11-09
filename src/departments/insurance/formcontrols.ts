@@ -1,10 +1,11 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit ff8e5de). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 7cb9533). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
 // wording stays for WhatsApp; this is the form's way of asking the same thing, and what it saves is a value the chat's own
 // checks accept (test/claims-guided-controls.test.ts tries every option against every go-live form, and fails on a text,
 // number or date question with no control here).
+import type { MasterFormId } from './masterforms';
 
 export type FormControl =
   /** One option to tap. `other`: "Other" opens a box. `detail`: a box for more, once one is tapped, saved as "<option><joiner><text>". */
@@ -14,8 +15,16 @@ export type FormControl =
    * type. `free`: a name that isn't on the list is kept as typed. `detail`: as for pills.
    */
   | { kind: 'combo'; options: readonly string[]; free?: boolean; label?: string; bare?: boolean; placeholder?: string; detail?: { placeholder: string; joiner: string } }
-  /** Any of the options, saved as "a, b". */
-  | { kind: 'multi'; options: readonly string[]; other?: boolean; label?: string; bare?: boolean }
+  /**
+   * Any of the options, saved as "a, b". `say`: a box under the options, always open, for the rest in the client's own
+   * words, typed or recorded; what's in it is saved after the options, as "Other" would be.
+   */
+  | { kind: 'multi'; options: readonly string[]; other?: boolean; label?: string; bare?: boolean; say?: string }
+  /**
+   * The parts of a car, tapped on a drawing of one seen from above, with what's picked listed under it. Saved as a multi
+   * is ("Bonnet, Windscreen"); `none` is a button of its own that clears the rest, and Other opens a box.
+   */
+  | { kind: 'car'; options: readonly string[]; none: string; other?: boolean; label?: string }
   /**
    * Yes or no; the box shows only on yes. `no`: what "no" saves. `long`: the client's own words, so they can record it too.
    * `needsText`: the form's box wants the thing itself (a number, a name), so yes with nothing typed is a blank, not "Yes".
@@ -28,8 +37,12 @@ export type FormControl =
   /** A date and, if the client knows it, a time, in one text answer. */
   | { kind: 'datetime'; label?: string }
   | { kind: 'year'; label?: string }
-  /** The number of people in a repeating group: it answers the yes/no and the group's "is there another?" questions. */
-  | { kind: 'stepper'; group: string; label: string; none: string; one: string; many: string }
+  /**
+   * The number of people in a repeating group: it answers the yes/no and the group's "is there another?" questions.
+   * `min` 1: a count with no yes/no in front of it (the items claimed for), which starts at one and saves only the
+   * "is there another?" answers.
+   */
+  | { kind: 'stepper'; group: string; label: string; none: string; one: string; many: string; min?: number }
   /** An amount in rand. */
   | { kind: 'amount'; label?: string; bare?: boolean; placeholder?: string }
   /** A box for what can't be tapped: a name, a registration. `half`: shares a row with the next. */
@@ -66,7 +79,7 @@ const SEEN_FROM = ['Home', 'Work', 'A shop'];
 const ROOM_IN = ['Front door', 'Back door', 'Window', 'Garage', 'Roof'];
 const ARMED = ['Fidelity ADT', 'Chubb', 'Beagle Watch'];
 const CAR_MAKES = ['Alfa Romeo', 'Aston Martin', 'Audi', 'Bentley', 'BMW', 'BYD', 'Chana', 'Changan', 'Chery', 'Chevrolet', 'Chrysler', 'Citroen', 'Daihatsu', 'Datsun', 'Dodge', 'DFSK', 'Ferrari', 'Fiat', 'Ford', 'Foton', 'GAC', 'Geely', 'GWM', 'Haval', 'Honda', 'Hummer', 'Hyundai', 'Infiniti', 'Isuzu', 'Iveco', 'JAC', 'Jaguar', 'Jeep', 'Jetour', 'Kia', 'Lamborghini', 'Land Rover', 'Lexus', 'Mahindra', 'Maserati', 'Mazda', 'McLaren', 'Mercedes-Benz', 'MG', 'Mini', 'Mitsubishi', 'Nissan', 'Omoda', 'Opel', 'Peugeot', 'Porsche', 'Proton', 'Renault', 'Rolls-Royce', 'Saab', 'Seat', 'Smart', 'Ssangyong', 'Subaru', 'Suzuki', 'Tata', 'Tesla', 'Toyota', 'Volkswagen (VW)', 'Volvo'];
-const COLOURS = ['White', 'Silver', 'Grey', 'Black', 'Red'];
+const COLOURS = ['White', 'Silver', 'Grey', 'Black', 'Red', 'Blue'];
 const SHOPS = ['A gift', 'Apple Store', 'Builders', 'Cash Crusaders', 'Dis-Chem', 'Game', 'Hi-Fi Corp', 'Incredible', 'iStore', 'Jet', 'Makro', 'Mr Price', 'Pick n Pay', 'Sportsmans Warehouse', 'Takealot', 'Woolworths'];
 const ITEMS = ['Appliance', 'Bicycle', 'Camera', 'Cellphone', 'Clothing', 'Furniture', 'Gaming console', 'Jewellery', 'Laptop', 'Power tool', 'Sound system', 'Sunglasses', 'Tablet', 'TV', 'Watch'];
 const itemControl = (): FormControl => combo(ITEMS, { label: 'What is the item?', placeholder: 'Choose or type the item', detail: { placeholder: 'Make and model, e.g. Samsung 55 inch', joiner: ': ' } });
@@ -75,10 +88,16 @@ const makeAndModel = (label: string): FormControl => combo(CAR_MAKES, { label, p
 const REPAIRER = ['Dealer', 'Workshop'];
 const LIVES_AT = ['At work', 'On holiday', 'Out shopping', 'Visiting someone'];
 const BUILDING_PARTS = ['Roof', 'Ceilings', 'Walls', 'Floors', 'Windows', 'Doors', 'Gate motor', 'Garage door'];
+/** The banks and finance houses that finance cars in South Africa, as people know them. */
+const FINANCE_HOUSES = ['Absa Vehicle Finance', 'BMW Financial Services', 'Capitec', 'FNB', 'Ford Credit', 'Investec', 'Mercedes-Benz Financial Services', 'MFC (Nedbank)', 'Nedbank', 'SA Taxi Finance', 'Standard Bank', 'Toyota Financial Services', 'Volkswagen Financial Services', 'WesBank'];
+/** The parts the car drawing names (the page draws each). */
+export const CAR_PARTS = ['Front bumper', 'Rear bumper', 'Bonnet', 'Boot', 'Windscreen', 'Rear window', 'Left side', 'Right side', 'Headlights', 'Tail lights', 'Roof'] as const;
+const CAR: FormControl = { kind: 'car', options: CAR_PARTS, none: 'No damage', other: true, label: 'Where is the car damaged? Tap each part on the drawing.' };
 
 export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   // ---- the generic list's general questions: what Tina's walkthrough asks on chat, filled in from it when she has
   description: { kind: 'long', label: 'What happened? Tell us in your own words.' },
+  injuryDetails: { kind: 'long', label: 'Who was hurt, and how? Type or record it.' },
   incidentCause: pills(['An accident', 'Theft or burglary', 'Fire', 'Storm or flood', 'Burst pipe or geyser'], { other: true }),
   incidentAt: { kind: 'datetime', label: 'When did it happen?' },
   place: short('e.g. 12 Oak Avenue, Durbanville', { label: 'Where did it happen?' }),
@@ -102,8 +121,8 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   vehicleUse: pills(['Private trip', 'Driving to work', 'Business'], { other: true }),
   vehicleMarks: yesText('Does the car have any marks, scratches or dents?', 'What and where?', { long: true }),
   vehicleFeatures: yesText('Does the car have anything that makes it easy to recognise, like stickers, a roof rack or special wheels?', 'Please describe it', { long: true }),
-  vehicleExtras: yesText('Did the car have any extras added after you bought it?', 'Which ones? e.g. mag wheels or a tow bar'),
-  accessoriesStolen: multi(['Radio', 'Mag wheels', 'Tow bar', 'Spare wheel', 'Canopy'], { other: true }),
+  vehicleExtras: yesText('Did the car have any extras added after you bought it?', 'Which ones? e.g. mag wheels, a tow bar or a sound system. Type or record it', { long: true }),
+  accessoriesStolen: multi(['Radio', 'Mag wheels', 'Tow bar', 'Spare wheel', 'Canopy'], { say: 'Anything else, or more about them? Type or record it' }),
   engineNumber: NAME,
   vinNumber: NAME,
   stickersWhere: multi(WHERE_ON_CAR, { other: true }),
@@ -144,14 +163,14 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   roadSurface: pills(['Dry', 'Wet', 'Gravel', 'Potholes', 'Oil / diesel']),
   precautions: multi(['Braked', 'Swerved', 'Hooted', 'Nothing was possible'], { other: true }),
   additionalInfo: yesText('Is there anything else the insurer should know?', 'Please tell us', { long: true }),
-  damageDescription: multi(['No damage', 'Front bumper', 'Rear bumper', 'Bonnet', 'Boot', 'Windscreen', 'Left side', 'Right side', 'Headlights', 'Tail lights', 'Roof'], { other: true, label: 'Which parts of the car are damaged?' }),
-  damagedParts: multi(['No damage', 'Front bumper', 'Rear bumper', 'Bonnet', 'Boot', 'Windscreen', 'Left side', 'Right side', 'Headlights', 'Tail lights', 'Roof'], { other: true, label: 'Which parts of the car are damaged?' }),
+  damageDescription: CAR,
+  damagedParts: CAR,
 
   // ---- the other vehicle and the people in it
   otherVehicle: makeAndModel('What make and model was the other car?'),
   otherVehicleMake: makeAndModel('What make and model was the other car?'),
   otherRegistration: card('Registration number'),
-  otherContact: card('Phone number or email'),
+  otherContact: card("Other driver's phone number or email"),
   otherInsurer: insurer('Which insurance company is the other driver with?'),
   otherInsurance: insurer('Which insurance company is the other driver with?'),
   otherInsuranceDetails: insurer('Which insurance company are they with?'),
@@ -181,7 +200,7 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   witnessRelationship: pills(['Stranger', 'Family', 'Friend', 'Colleague'], { bare: true }),
 
   // ---- finance, tracking, keys and history
-  financeInstitution: pills(['WesBank', 'MFC (Nedbank)', 'Absa Vehicle Finance', 'Standard Bank'], { other: true }),
+  financeInstitution: combo(FINANCE_HOUSES, { label: 'Which bank or finance company is it with?', placeholder: 'Choose or type the bank or finance company' }),
   financeAgreementType: pills(['Instalment sale', 'Lease', 'Balloon payment'], { label: 'What kind of finance is it?' }),
   financeAccountNumber: NAME,
   financeSettlementAmount: AMOUNT,
@@ -313,6 +332,84 @@ export const FORM_STEPPERS: Readonly<Record<string, Extract<FormControl, { kind:
   injuries: { kind: 'stepper', group: 'injured', label: 'How many people were hurt?', none: 'Nobody', one: 'person', many: 'people' },
   hadWitnesses: { kind: 'stepper', group: 'witnesses', label: 'How many witnesses were there?', none: 'No witnesses', one: 'witness', many: 'witnesses' },
 };
+
+/**
+ * The count of a repeating group with no yes/no in front of it: the items a client claims for. At least one, so the
+ * first card shows straight away.
+ */
+export const FORM_COUNTERS: Readonly<Record<string, Extract<FormControl, { kind: 'stepper' }>>> = Object.fromEntries(
+  ['items', 'contentsItems', 'specifiedItems', 'unspecifiedItems'].map((group) => [group, {
+    kind: 'stepper', group, label: 'How many items are you claiming for?', none: 'items', one: 'item', many: 'items', min: 1,
+  } as const]),
+);
+/** The count's key on the page. It is never saved: what it answers is the group's "is there another?" questions. */
+export const counterKey = (group: string) => `${group}.count`;
+
+/**
+ * One kind of claim's own words for a question whose key another kind uses for something else: on a motor form
+ * otherInsuranceDetails is the other driver's insurer, on a household form it's the client's other policy.
+ */
+const BY_MASTER: Partial<Record<MasterFormId, Readonly<Record<string, FormControl>>>> = {
+  property: {
+    otherInsuranceDetails: combo(INSURERS, { label: 'Which insurance company is it insured with?', placeholder: 'Choose or type the insurer', detail: { placeholder: 'Policy number (if you have it)', joiner: ', policy ' } }),
+  },
+};
+const STEPPERS_BY_MASTER: Partial<Record<MasterFormId, Readonly<Record<string, Extract<FormControl, { kind: 'stepper' }>>>>> = {
+  'motor-accident': {
+    thirdParties: { kind: 'stepper', group: 'otherParties', label: 'How many other cars were involved?', none: 'No other cars', one: 'other car', many: 'other cars' },
+  },
+};
+/** The control of a question on one kind of claim's form. */
+export const formControl = (master: MasterFormId, key: string): FormControl | undefined => BY_MASTER[master]?.[key] ?? FORM_CONTROLS[key];
+export const formStepper = (master: MasterFormId, key: string) => STEPPERS_BY_MASTER[master]?.[key] ?? FORM_STEPPERS[key];
+
+/**
+ * A line under a question that only makes sense with an example: the question's own example sentence never shows on
+ * the form (formPrompt keeps the question and nothing else).
+ */
+const NOTES: Partial<Record<MasterFormId, Readonly<Record<string, string>>>> = {
+  property: {
+    otherInterest: 'For example: you still owe a bank or a store money on it, you are paying it off on credit or a lease, or it belongs partly to someone else, like your spouse or a business partner.',
+    otherInsurance: 'For example: a laptop that is also covered by your work\'s insurance, or jewellery on a separate policy with another insurer.',
+  },
+};
+export const formNote = (master: MasterFormId, key: string): string | undefined => NOTES[master]?.[key];
+
+/**
+ * What would help, under a photo or document the client may not know what to send for. Examples, never a promise of
+ * what the insurer accepts. Keyed by the kind of claim, then the evidence key; `other` is the "Anything else" row.
+ */
+const EVIDENCE_HELP: Record<MasterFormId, Readonly<Record<string, string>>> = {
+  'motor-accident': {
+    scenePhotos: 'For example: both cars where they stopped, the damage on each car, the other car\'s number plate, skid marks or broken glass on the road.',
+    damagePhotos: 'For example: each damaged part close up, and the whole car from each corner.',
+    thirdPartyPhotos: 'For example: the other car\'s number plate, its damage, and the other driver\'s licence.',
+    quotes: 'A written quote from each panelbeater, with their name and the price.',
+    repairQuote: 'A written quote from a panelbeater, with their name and the price.',
+    other: 'For example: dashcam or CCTV footage, photos of the road, traffic lights or road signs, or messages with the other driver.',
+  },
+  'motor-theft': {
+    vehiclePhotos: 'For example: any recent photo that shows the car clearly, its number plate, mag wheels or stickers. Photos from your phone\'s gallery or an advert are fine.',
+    damagePhotos: 'For example: each damaged part close up, broken glass or a forced lock.',
+    damageReport: 'A report from the panelbeater saying what is damaged.',
+    repairQuote: 'A written quote from a panelbeater, with their name and the price.',
+    settlementLetter: 'Your bank or finance company can send it to you. A PDF from their app or email is fine.',
+    other: 'For example: CCTV footage, photos of broken glass where the car was parked, the spare keys, or a report from the tracking company.',
+  },
+  property: {
+    damagePhotos: 'For example: the damaged item close up and from further away, a burst geyser, water marks on the ceiling, broken glass or a forced lock.',
+    quotes: 'A written quote from a shop or repairer, with their name and the price.',
+    damageReport: 'For example: a letter or job card from the repairer or plumber saying what broke and why.',
+    proofOfOwnership: 'For example: a till slip, the purchase on a bank statement, the box with the serial number, or a photo with the item in it.',
+    other: 'For example: CCTV footage, photos of broken glass, a forced lock or window, or a report from your alarm or armed response company.',
+  },
+  generic: {
+    damagePhotos: 'For example: the damage close up and from further away, broken glass, or a forced lock.',
+    quotes: 'A written quote from a repairer or shop, with their name and the price.',
+    other: 'For example: CCTV footage, photos of broken glass or damage, or a letter about what happened.',
+  },
+};
+export const evidenceHelp = (master: MasterFormId, key: string): string | undefined => EVIDENCE_HELP[master][key];
 
 /** Evidence the client can draw with a finger on the form, as well as add as a photo. */
 export const FORM_DRAWINGS: ReadonlySet<string> = new Set(['accidentSketch']);

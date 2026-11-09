@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit ff8e5de). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 7cb9533). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -17,8 +17,10 @@ import {
 import { emailProblem, formatProblem, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
 import { DEPARTMENT } from './claim';
-import { FORM_CONTROLS, FORM_DRAWINGS, formHint, formPrompt, FORM_STEPPERS, type FormControl } from './formcontrols';
-import { factColumns, plumberAsked, plumberDetail, withFacts } from './formfacts';
+import {
+  counterKey, evidenceHelp, FORM_CONTROLS, FORM_COUNTERS, FORM_DRAWINGS, formControl, formHint, formNote, formPrompt, formStepper, FORM_STEPPERS, type FormControl,
+} from './formcontrols';
+import { BURST_KEY, factColumns, plumberAsked, plumberDetail, withFacts } from './formfacts';
 import { FORM_TERMS } from './templates';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
@@ -33,8 +35,8 @@ export const TERMS_KEY = 'guidedTermsAccepted';
 /** An answer that changes a CRM value on the form: `crm:<table>.<column>`. The CRM itself is never written (fill-dataverse.ts). */
 export const isDetailKey = (key: string) => key.startsWith('crm:contact.') || key.startsWith('crm:riivo_policy.');
 
-/** A condition the page can test on the answers it holds: all of a field's must hold. */
-export interface GuidedCondition { key: string; oneOf: ReadonlyArray<string | number | boolean> }
+/** A condition the page can test on the answers it holds: all of a field's must hold. `not`: holds unless the value is one of them. */
+export interface GuidedCondition { key: string; oneOf: ReadonlyArray<string | number | boolean>; not?: boolean }
 
 export interface GuidedField {
   /** The question key, `<key>.<n>` for the n-th entry of a repeating group. */
@@ -47,6 +49,8 @@ export interface GuidedField {
   required: boolean;
   /** What shows in an empty box: the question's example. */
   hint?: string;
+  /** A line under the question, for one that needs an example to make sense (formcontrols.ts formNote). */
+  note?: string;
   /** Input hints for the phone's keyboard. */
   keyboard?: 'tel' | 'email';
   /** Answered by the group's stepper, so it isn't asked itself: "is there another?" under a count of people. */
@@ -79,6 +83,8 @@ export interface GuidedEvidence {
   draw?: boolean;
   when: readonly GuidedCondition[];
   count: number;
+  /** Examples of what would help, where it isn't obvious what to send (formcontrols.ts evidenceHelp). */
+  help?: string;
 }
 
 export interface GuidedView {
@@ -92,6 +98,8 @@ export interface GuidedView {
   terms?: { title: string; lines: readonly string[]; agree: string };
   screens: GuidedScreen[];
   evidence: GuidedEvidence[];
+  /** Examples for the "Anything else that may help" row. */
+  otherHelp?: string;
   /** Everything known so far, for the conditions and to fill the boxes. */
   answers: Record<string, string | number | boolean>;
   /** Questions the client said they don't know or don't have yet. */
@@ -178,10 +186,10 @@ const fieldType = (item: QuestionItem): GuidedField['type'] =>
   item.answerType === 'number' || item.answerType === 'date' || item.answerType === 'yes/no' || item.answerType === 'choice' ? item.answerType : 'text';
 
 /** How a question is answered: the form's own choices or yes/no as they are, anything else as formcontrols.ts says. */
-function controlFor(item: QuestionItem, baseKey: string): GuidedControl {
+function controlFor(item: QuestionItem, baseKey: string, master: MasterForm): GuidedControl {
   if (item.answerType === 'yes/no') return { kind: 'yes-no' };
   if (item.answerType === 'choice') return { kind: 'pills', options: item.choices ?? [] };
-  const c = FORM_CONTROLS[baseKey];
+  const c = formControl(master.id, baseKey);
   if (c) return c;
   return item.answerType === 'date' ? { kind: 'date' } : item.answerType === 'number' ? { kind: 'number' } : { kind: 'short' };
 }
@@ -222,6 +230,16 @@ const asGuided = (form: ClaimForm, claim: Pick<FollowOnClaim, 'claimType' | 'fac
 
 const POLICE_HELP = "Not reported yet? Please do, and leave this blank. Tina will ask for it later.";
 
+/** The key whose answer says a burst geyser or pipe damaged the home: then the loss was damage, so it isn't asked. */
+const LOSS_KIND_KEY = 'lossKind';
+const DAMAGED = 'Damaged';
+const burstAsked = (form: ClaimForm) =>
+  form.questionList.some((q) => q.key === BURST_KEY) && form.questionList.some((q) => q.key === LOSS_KIND_KEY && (q.choices ?? []).includes(DAMAGED));
+
+/** A group whose "is there another?" questions a count answers: a count of people (FORM_STEPPERS) or of items (FORM_COUNTERS). */
+const countedGroup = (form: ClaimForm, group: string) =>
+  !!FORM_COUNTERS[group] || Object.entries(FORM_STEPPERS).some(([lead, x]) => x.group === group && form.questionList.some((q) => q.key === lead));
+
 /** One topic's screen per topic of the form, in the order the form's list reaches them (AC 2). */
 function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly ClaimAnswers[], sapsRequired: boolean): GuidedScreen[] {
   const master = masterFormFor(form);
@@ -245,7 +263,7 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     // A question no master form places yet still shows, under its own section, so a new question is never lost.
     const place = masterPlace(master, baseKey);
     const groupPlace = isMore ? (form.questionList.find((q) => q.group === item.group && masterPlace(master, q.key)) ?? null) : null;
-    const stepper = FORM_STEPPERS[baseKey];
+    const stepper = formStepper(master.id, baseKey);
     const hasGroup = !!stepper && form.questionList.some((q) => q.group === stepper.group);
     // A count of people sits right above their cards, and "Was it reported?" above the case number.
     const leads = hasGroup ? form.questionList.find((q) => q.group === stepper.group) : baseKey === 'saps' ? { key: SAPS_CASE_KEY } : undefined;
@@ -262,12 +280,16 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     const held = variants?.find((v) => v.cond === true);
     const known = answers[item.key]?.status === 'answered';
     const pre = !known && !item.group ? earlierValue(item, master, earlier) : undefined;
-    const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey);
-    const hidden = isMore && Object.entries(FORM_STEPPERS).some(([lead, x]) => x.group === item.group && form.questionList.some((q) => q.key === lead));
+    const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey, master);
+    const hidden = isMore && countedGroup(form, item.group!);
+    // A burst geyser or pipe is damage: "stolen, lost or damaged?" is answered for them (applyGuidedSave).
+    if (baseKey === LOSS_KIND_KEY && burstAsked(form)) when.push({ key: BURST_KEY, oneOf: [true], not: true });
+    const note = formNote(master.id, baseKey);
     screen.fields[added(item) ? 'unshift' : 'push']({
       key: item.key,
       prompt: formPrompt(held?.prompt ?? item.prompt, wordedFor(control)),
       ...(formHint(item.prompt, wordedFor(control)) ? { hint: formHint(item.prompt, wordedFor(control)) } : {}),
+      ...(note ? { note } : {}),
       type: fieldType(item),
       control,
       ...(hidden ? { hidden: true } : {}),
@@ -278,7 +300,7 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
         variants: variants.filter((v): v is { cond: GuidedCondition; prompt: string } => typeof v.cond === 'object').map((v) => ({ when: v.cond, prompt: formPrompt(v.prompt, wordedFor(control)) })),
       } : {}),
       ...(item.group && n ? { entry: entryHeading(item.group, n) } : {}),
-      ...(item.group && Object.entries(FORM_STEPPERS).some(([lead, x]) => x.group === item.group && form.questionList.some((q) => q.key === lead)) ? { counted: true } : {}),
+      ...(item.group && countedGroup(form, item.group) ? { counted: true } : {}),
       ...(pre !== undefined ? { prefill: pre } : {}),
     });
   }
@@ -287,6 +309,18 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
   if (police && police[0]?.key === SAPS_STATION_KEY && police[1]?.key === SAPS_CASE_KEY) [police[0], police[1]] = [police[1], police[0]];
   const lead = police?.findIndex((f) => f.key === 'saps') ?? -1;
   if (police && lead > 0) police.unshift(...police.splice(lead, 1));
+  // A count of items, where the list has no yes/no in front of them: it goes where the first item's card is, and shows
+  // when that card would. It is the page's own: it saves nothing but the "is there another?" answers.
+  for (const g of form.questionGroups ?? []) {
+    const counter = FORM_COUNTERS[g.key];
+    const first = form.questionList.find((q) => q.group === g.key);
+    if (!counter || !first) continue;
+    for (const s of screens.values()) {
+      const card = s.fields.find((f) => f.key === `${first.key}.1`);
+      if (!card) continue;
+      s.fields.splice(s.fields.indexOf(card), 0, { key: counterKey(g.key), prompt: counter.label, type: 'number', control: counter, required: false, when: card.when });
+    }
+  }
   // A count of people has their cards right under it, on one step. What else hangs on the count comes after the cards.
   for (const s of screens.values()) {
     for (const lead of s.fields.filter((f) => f.control.kind === 'stepper')) {
@@ -368,8 +402,13 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
   const { answers, notKnown } = knownValues(form, claim);
   const evidence: GuidedEvidence[] = form.questionList.filter((q) => q.kind === 'evidence' && (q.onHand !== false || FORM_DRAWINGS.has(q.key))).flatMap((q) => {
     const when = conditionsFor(q, form, facts);
-    return when ? [{ key: q.key, prompt: FORM_DRAWINGS.has(q.key) ? 'A drawing of the accident' : q.prompt, kind: evidenceKind(q), required: q.required, ...(FORM_DRAWINGS.has(q.key) ? { draw: true } : {}), when, count: filesFor(q, claim.evidence) }] : [];
+    const help = evidenceHelp(master.id, q.key);
+    return when ? [{
+      key: q.key, prompt: FORM_DRAWINGS.has(q.key) ? 'A drawing of the accident' : q.prompt, kind: evidenceKind(q), required: q.required,
+      ...(FORM_DRAWINGS.has(q.key) ? { draw: true } : {}), when, count: filesFor(q, claim.evidence), ...(help ? { help } : {}),
+    }] : [];
   });
+  const otherHelp = evidenceHelp(master.id, 'other');
   const open = guidedOpen(form, claim, policeOpen(claim));
   const startAt = screens.findIndex((s) => s.fields.some((f) => open.includes(f.key)));
   const detailsConfirmed = claim.answers[DETAILS_CONFIRMED_KEY]?.status === 'answered';
@@ -382,6 +421,7 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     ...(claim.answers[TERMS_KEY]?.status === 'answered' ? {} : { terms: { title: FORM_TERMS.title, lines: FORM_TERMS.lines, agree: FORM_TERMS.agree } }),
     screens,
     evidence,
+    ...(otherHelp ? { otherHelp } : {}),
     answers,
     notKnown,
     startAt: startAt < 0 ? screens.length : startAt,
@@ -519,6 +559,13 @@ export function applyGuidedSave(
     answers[key] = record;
   }
   dropEndedEntries(form, answers);
+
+  // A burst geyser or pipe: the loss was damage, so the page doesn't ask (screensFor). A no later shows the question again,
+  // with Damaged still picked for the client to change.
+  if (burstAsked(form) && answers[BURST_KEY]?.status === 'answered' && answers[BURST_KEY].value === true && answers[LOSS_KIND_KEY]?.value !== DAMAGED) {
+    const item = list().find((i) => i.key === LOSS_KIND_KEY);
+    if (item && applies(item, answers, facts)) answers[LOSS_KIND_KEY] = { value: DAMAGED, status: 'answered', at, source: 'form' };
+  }
 
   // Worked out, not asked: the total of the amounts, and whether a phone or tablet was among the items.
   for (const t of computedTotals(form, answers, facts, sapsRequired)) {

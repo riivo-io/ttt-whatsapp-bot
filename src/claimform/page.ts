@@ -85,11 +85,40 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .mic[disabled] { opacity:.5; }
 @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(180,72,60,.45); } 70% { box-shadow:0 0 0 12px rgba(180,72,60,0); } 100% { box-shadow:0 0 0 0 rgba(180,72,60,0); } }
 .micnote { font-size:13px; color:var(--muted); }
-.range { display:grid; gap:6px; }
-.range input { width:100%; height:28px; accent-color:var(--accent); }
+.range { display:grid; gap:4px; }
+.range input { -webkit-appearance:none; appearance:none; width:100%; height:48px; margin:0; background:transparent; cursor:pointer; touch-action:pan-y; --fill:0%; }
+.range input::-webkit-slider-runnable-track { height:14px; border-radius:99px; background:linear-gradient(to right,var(--accent) 0,var(--accent) var(--fill),var(--line) var(--fill),var(--line) 100%); }
+.range input::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:36px; height:36px; margin-top:-11px; border-radius:50%; background:#fff; border:4px solid var(--accent); box-shadow:0 2px 10px rgba(11,15,20,.25); transition:transform .12s; }
+.range input:active::-webkit-slider-thumb { transform:scale(1.15); }
+.range input::-moz-range-track { height:14px; border-radius:99px; background:var(--line); }
+.range input::-moz-range-progress { height:14px; border-radius:99px; background:var(--accent); }
+.range input::-moz-range-thumb { width:28px; height:28px; border-radius:50%; background:#fff; border:4px solid var(--accent); box-shadow:0 2px 10px rgba(11,15,20,.25); }
+.range input:focus-visible { outline:none; }
+.range input:focus-visible::-webkit-slider-thumb { box-shadow:0 0 0 4px var(--accent-soft),0 2px 10px rgba(11,15,20,.25); }
 .rv { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
-.rv b { color:var(--ink); font-weight:500; font-variant-numeric:tabular-nums; flex:none; font-size:14px; }
-.rv b.unset { color:var(--faint); font-weight:400; }
+.rv b { color:var(--accent-deep); font-weight:600; font-variant-numeric:tabular-nums; flex:none; font-size:20px; letter-spacing:-.01em; }
+.rv b.unset { color:var(--faint); font-weight:400; font-size:15px; }
+.rv b.bump { animation:bump .18s ease; }
+@keyframes bump { 50% { transform:scale(1.08); } }
+.ends { display:flex; justify-content:space-between; font-size:12px; color:var(--faint); font-variant-numeric:tabular-nums; margin-top:-4px; }
+.qn { margin:-2px 0 2px; font-size:13px; color:var(--muted); line-height:1.4; }
+.up .eg { display:block; font-size:12.5px; color:var(--muted); line-height:1.4; margin:2px 0 3px; }
+.car { display:grid; gap:10px; }
+.car-pic { display:grid; justify-items:center; gap:2px; }
+.car-pic small { font:500 10.5px/1 var(--mono); letter-spacing:.08em; text-transform:uppercase; color:var(--faint); }
+.car svg { display:block; height:min(360px,48vh); width:auto; overflow:visible; }
+.car .pt { fill:#fff; stroke:var(--line-strong); stroke-width:1.6; cursor:pointer; transition:fill .12s,stroke .12s; outline:none; }
+.car .pt.glass { fill:#EEF3F7; }
+.car .pt.lamp { fill:#FFF9E8; }
+.car .pt.on { fill:var(--accent); stroke:var(--accent-deep); }
+.car .pt:focus-visible { stroke:var(--accent-deep); stroke-width:3; }
+.car .tyre { fill:#3A4450; pointer-events:none; }
+.car text { font:500 10px var(--sans); fill:var(--muted); pointer-events:none; text-anchor:middle; dominant-baseline:middle; }
+.car text.on { fill:#fff; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; min-height:30px; align-items:center; }
+.chip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--accent); background:var(--accent-soft); color:var(--accent-deep); border-radius:99px; padding:4px 6px 4px 11px; font-size:13px; font-weight:500; cursor:pointer; }
+.chip i { font-style:normal; width:18px; height:18px; border-radius:50%; display:grid; place-items:center; background:var(--accent); color:#fff; font-size:11px; line-height:1; }
+.chips .help { font-size:13px; }
 .step-n { display:flex; align-items:center; gap:14px; }
 .step-n button { width:44px; height:44px; border-radius:50%; border:1px solid var(--line-strong); background:var(--bg); cursor:pointer; font-size:20px; color:var(--ink); }
 .step-n b { font:400 26px/1 var(--sans); color:var(--ink); min-width:22px; text-align:center; font-variant-numeric:tabular-nums; }
@@ -205,7 +234,7 @@ const SCRIPT = String.raw`
 
   var V = null, A = {}, NK = {}, here = null, draft = {}, errors = {}, checked = {}, busy = false, extra = 0;
   /** Which "Other" box is open, which "Earlier" date picker is open. */
-  var otherOpen = {}, earlierOpen = {}, FIELD = {}, PRE = {}, editing = {};
+  var otherOpen = {}, earlierOpen = {}, FIELD = {}, PRE = {}, editing = {}, lastTenth = {};
   /** What's on the page now, whether more of this step comes after it, and the height a step has to fit in. */
   var page = [], morePages = false, pageH = 0;
 
@@ -229,9 +258,10 @@ const SCRIPT = String.raw`
     var v = value(c.key);
     // A case number says the police were involved, before anyone asks.
     if (c.key === 'saps' && filled(value('sapsCaseNumber'))) v = true;
-    if (!filled(v)) return false;
-    for (var i = 0; i < c.oneOf.length; i++) if (sameStrict(v, c.oneOf[i])) return true;
-    return false;
+    var hit = false;
+    if (filled(v)) for (var i = 0; i < c.oneOf.length; i++) if (sameStrict(v, c.oneOf[i])) hit = true;
+    // "not": shows unless the answer is one of them, so a question nobody has answered yet doesn't hide it.
+    return c.not ? !hit : hit;
   }
   function shows(f) {
     for (var i = 0; i < f.when.length; i++) if (!holds(f.when[i])) return false;
@@ -437,8 +467,10 @@ const SCRIPT = String.raw`
   function closeSheet() { picking = null; $('sheet').hidden = true; render(); }
   function fmtNumber(n) { return Number(n).toLocaleString('en-ZA'); }
   function sliderShown(c, v) { return filled(v) ? fmtNumber(v) + ' ' + c.unit : 'Not set'; }
+  function sliderFill(c, v) { return (filled(v) ? Math.max(0, Math.min(100, (Number(v) - c.min) / Math.max(1, c.max - c.min) * 100)) : 0) + '%'; }
   function stepCount(f, c) {
-    if (value(f.key) !== true) return 0;
+    // A count with no yes/no in front of it (the items claimed for) starts at its minimum.
+    if (!c.min && value(f.key) !== true) return 0;
     var n = 1;
     while (value(c.group + '.more.' + n) === true) n++;
     return n;
@@ -457,6 +489,55 @@ const SCRIPT = String.raw`
     return String(v).slice(pillBase(c, v).length + c.detail.joiner.length);
   }
   function isOption(c, s) { return (c.options || []).some(function (o) { return same(o, s); }); }
+  /** A multi's or the car's value, split: the options tapped, and the rest in the client's own words. */
+  function partsOf(c, v) {
+    var picked = filled(v) ? String(v).split(', ') : [];
+    return {
+      known: picked.filter(function (p) { return isOption(c, p); }),
+      none: !!c.none && picked.some(function (p) { return same(p, c.none); }),
+      more: picked.filter(function (p) { return !isOption(c, p) && !(c.none && same(p, c.none)); }).join(', '),
+    };
+  }
+  /** The words typed or recorded in a multi's or the car's own box, kept after what's tapped. */
+  function setMother(key, text) {
+    var c = FIELD[key].control, cur = partsOf(c, value(key)).known;
+    if (String(text || '').trim()) cur = cur.concat(String(text).trim());
+    draft[key] = cur.join(', ');
+  }
+
+  // ---- the car, from above: each part a shape to tap. Front at the top, so the car's left is on the left. ----------
+  var CAR_SHAPES = [
+    ['Front bumper', 'M34 30 Q100 6 166 30 L166 44 L34 44 Z', ''],
+    ['Headlights', 'M38 48 L66 48 L60 64 L38 62 Z M162 48 L134 48 L140 64 L162 62 Z', 'lamp'],
+    ['Bonnet', 'M70 48 L130 48 L152 72 L154 138 L46 138 L48 72 Z', ''],
+    ['Left side', 'M24 66 Q24 56 34 56 L40 56 L40 322 L34 322 Q24 322 24 312 Z', ''],
+    ['Right side', 'M176 66 Q176 56 166 56 L160 56 L160 322 L166 322 Q176 322 176 312 Z', ''],
+    ['Windscreen', 'M46 142 L154 142 L142 180 L58 180 Z', 'glass'],
+    ['Roof', 'M58 184 L142 184 L142 246 L58 246 Z', ''],
+    ['Rear window', 'M58 250 L142 250 L154 276 L46 276 Z', 'glass'],
+    ['Boot', 'M46 280 L154 280 L152 318 L134 334 L66 334 L48 318 Z', ''],
+    ['Tail lights', 'M38 324 L58 334 L58 346 L38 344 Z M162 324 L142 334 L142 346 L162 344 Z', 'lamp'],
+    ['Rear bumper', 'M34 350 L166 350 L166 362 Q100 384 34 362 Z', ''],
+  ];
+  var CAR_TEXT = { Bonnet: [100, 98], Windscreen: [100, 161], Roof: [100, 215], 'Rear window': [100, 263], Boot: [100, 305] };
+  function carHtml(f, c, v) {
+    var k = f.key, p = partsOf(c, v), on = otherOpen[k] || !!p.more;
+    var picked = function (name) { return p.known.some(function (x) { return same(x, name); }); };
+    var shapes = CAR_SHAPES.map(function (s) {
+      var lit = picked(s[0]);
+      return '<path class="pt' + (s[2] ? ' ' + s[2] : '') + (lit ? ' on' : '') + '" d="' + s[1] + '" data-part="' + esc(s[0]) + '" data-car="' + q(k) + '" role="button" tabindex="0" aria-pressed="' + lit + '" aria-label="' + esc(s[0]) + '"><title>' + esc(s[0]) + '</title></path>';
+    }).join('');
+    var words = Object.keys(CAR_TEXT).map(function (n) { return '<text x="' + CAR_TEXT[n][0] + '" y="' + CAR_TEXT[n][1] + '"' + (picked(n) ? ' class="on"' : '') + '>' + esc(n) + '</text>'; }).join('');
+    var tyres = '<rect class="tyre" x="14" y="80" width="10" height="40" rx="4"/><rect class="tyre" x="176" y="80" width="10" height="40" rx="4"/><rect class="tyre" x="14" y="262" width="10" height="40" rx="4"/><rect class="tyre" x="176" y="262" width="10" height="40" rx="4"/>';
+    var list = p.none ? '<span class="help">' + esc(c.none) + '</span>' : p.known.length
+      ? p.known.map(function (x) { return '<button type="button" class="chip" data-part="' + esc(x) + '" data-car="' + q(k) + '" aria-label="Remove ' + esc(x) + '">' + esc(x) + '<i aria-hidden="true">×</i></button>'; }).join('')
+      : '<span class="help">Nothing picked yet</span>';
+    return '<div class="car"><div class="car-pic"><small>Front</small><svg viewBox="0 0 200 384" role="group" aria-label="The car from above">' + tyres + shapes + words + '</svg><small>Back</small></div>'
+      + '<div class="chips" aria-live="polite">' + list + '</div>'
+      + '<div class="opts">' + optBtn('data-carnone="' + q(k) + '"', c.none, p.none) + (c.other ? optBtn('data-other="' + q(k) + '" data-multi="1"', 'Something else', on) : '') + '</div>'
+      + (on ? '<input class="inp" autocomplete="off" id="f-' + q(k) + '" data-mother="' + q(k) + '" placeholder="What else is damaged?" value="' + esc(p.more) + '">' : '')
+      + '</div>';
+  }
 
   function controlHtml(f) {
     var c = f.control, v = value(f.key), k = f.key;
@@ -483,14 +564,15 @@ const SCRIPT = String.raw`
         return '<div class="tiles t1">' + tile(k, 'Tap to choose or type', base, 'data-combo="' + q(k) + '"') + '</div>' + then2;
       }
       case 'multi': {
-        var picked = filled(v) ? String(v).split(', ') : [];
-        var known = picked.filter(function (p) { return isOption(c, p); });
-        var more = picked.filter(function (p) { return !isOption(c, p); }).join(', ');
+        var mp = partsOf(c, v), known = mp.known, more = mp.more;
         var on = otherOpen[k] || !!more;
-        return '<div class="opts' + (c.options.length > 6 ? ' tight' : '') + '">' + c.options.map(function (o) { return optBtn('data-m="' + q(k) + '" data-v="' + esc(o) + '"', o, known.some(function (p) { return same(p, o); })); }).join('')
-          + (c.other ? optBtn('data-other="' + q(k) + '" data-multi="1"', 'Other', on) : '') + '</div>'
-          + (on ? '<input class="inp" autocomplete="off" data-mother="' + q(k) + '" placeholder="Please tell us" value="' + esc(more) + '">' : '');
+        var taps = '<div class="opts' + (c.options.length > 6 ? ' tight' : '') + '">' + c.options.map(function (o) { return optBtn('data-m="' + q(k) + '" data-v="' + esc(o) + '"', o, known.some(function (p) { return same(p, o); })); }).join('')
+          + (c.other ? optBtn('data-other="' + q(k) + '" data-multi="1"', 'Other', on) : '') + '</div>';
+        // Their own words, typed or recorded, under the taps: always open.
+        if (c.say) return taps + longBox(k, more, 'data-mother="' + q(k) + '"', c.say);
+        return taps + (on ? '<input class="inp" autocomplete="off" data-mother="' + q(k) + '" placeholder="Please tell us" value="' + esc(more) + '">' : '');
       }
+      case 'car': return carHtml(f, c, v);
       case 'yes-text': {
         var no = c.no || 'No', isNo = filled(v) && same(v, no), isYes = filled(v) && !isNo, text = isYes && !same(v, 'Yes') ? v : '';
         var then = '';
@@ -500,7 +582,8 @@ const SCRIPT = String.raw`
       case 'slider':
         return '<div class="range"><div class="rv">' + (c.bare ? '<span class="ql">' + esc(promptOf(f)) + '</span>' : '<label class="ql" for="f-' + q(k) + '">' + esc(promptOf(f)) + '</label>')
           + '<b id="rv-' + q(k) + '"' + (filled(v) ? '' : ' class="unset"') + '>' + esc(sliderShown(c, v)) + '</b></div>'
-          + '<input type="range" id="f-' + q(k) + '" data-range="' + q(k) + '" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '" value="' + (filled(v) ? Number(v) : c.min) + '"></div>';
+          + '<input type="range" id="f-' + q(k) + '" data-range="' + q(k) + '" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '" value="' + (filled(v) ? Number(v) : c.min) + '" style="--fill:' + sliderFill(c, v) + '">'
+          + '<div class="ends" aria-hidden="true"><span>' + fmtNumber(c.min) + '</span><span>' + fmtNumber(c.max) + ' ' + esc(c.unit) + '</span></div></div>';
       case 'date': {
         if (!c.recent) return whenTile(k, c, v);
         var today = daysAgo(0), yest = daysAgo(1), early = earlierOpen[k] || (filled(v) && v !== today && v !== yest);
@@ -523,12 +606,13 @@ const SCRIPT = String.raw`
     var c = f.control;
     if (c.bare || c.kind === 'slider') return '';
     var text = c.kind === 'stepper' ? c.label : promptOf(f);
-    var tappable = ['yes-no', 'pills', 'combo', 'multi', 'yes-text', 'date', 'time', 'datetime', 'year', 'stepper'].indexOf(c.kind) >= 0;
+    var tappable = ['yes-no', 'pills', 'combo', 'multi', 'car', 'yes-text', 'date', 'time', 'datetime', 'year', 'stepper'].indexOf(c.kind) >= 0;
     var need = f.required && c.kind !== 'stepper' ? '<span class="req">Required</span>' : '';
     return tappable ? '<div class="ql">' + esc(text) + need + '</div>' : '<label class="ql" for="f-' + q(f.key) + '">' + esc(text) + need + '</label>';
   }
   function fieldHtml(f) {
-    return '<div class="q" data-q="' + q(f.key) + '">' + labelHtml(f) + controlHtml(f) + (errors[f.key] ? '<div class="err" role="alert">' + esc(errors[f.key]) + '</div>' : '') + '</div>';
+    var note = f.note ? '<p class="qn">' + esc(f.note) + '</p>' : '';
+    return '<div class="q" data-q="' + q(f.key) + '">' + labelHtml(f) + note + controlHtml(f) + (errors[f.key] ? '<div class="err" role="alert">' + esc(errors[f.key]) + '</div>' : '') + '</div>';
   }
   // ---- a step shows what fits ---------------------------------------------------------------------------------------
   function err(k) { return errors[k] ? '<div class="err" role="alert">' + esc(errors[k]) + '</div>' : ''; }
@@ -546,7 +630,7 @@ const SCRIPT = String.raw`
   function visibleBlocks(step) {
     if (step.id === 'photos') {
       return V.evidence.filter(shows).map(function (e) { return { key: e.key, ev: e }; })
-        .concat([{ key: '__other', ev: { key: '', prompt: 'Anything else that may help', kind: 'photo', count: extra, required: false } }]);
+        .concat([{ key: '__other', ev: { key: '', prompt: 'Anything else that may help', help: V.otherHelp, kind: 'photo', count: extra, required: false } }]);
     }
     return blocksOf(V.screens[step.i].fields.filter(function (f) { return shows(f) && !f.hidden; }));
   }
@@ -624,7 +708,7 @@ const SCRIPT = String.raw`
     var mine = uploads.filter(function (u) { return u.key === key; }), going = mine.filter(function (u) { return u.state === 'up'; }).length;
     var need = e.required && !count && !going;
     var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : count ? count + ' added' : need ? 'We need this for your claim. No problem if you don\'t have it now: you can add it later.' : 'Not added yet';
-    return '<div class="up' + (need ? ' need' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + (e.required && !count ? '<span class="req">Required</span>' : '') + '</b><small id="st-' + q(id) + '">' + note + '</small></div>'
+    return '<div class="up' + (need ? ' need' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + (e.required && !count ? '<span class="req">Required</span>' : '') + '</b>' + (e.help ? '<span class="eg">' + esc(e.help) + '</span>' : '') + '<small id="st-' + q(id) + '">' + note + '</small></div>'
       + '<div class="up-acts">' + (e.draw ? '<button type="button" class="addb draw" data-draw="' + q(key) + '">Draw</button>' : '') + '<label class="addb" for="' + q(id) + '">' + (e.draw ? 'Photo' : 'Add') + '</label></div><input class="sr" type="file" id="' + q(id) + '" data-up="' + q(key) + '" accept="' + accept + '" multiple>'
       + (mine.length ? '<div class="thumbs">' + mine.map(thumbHtml).join('') + '</div>' : '') + '</div>';
   }
@@ -699,7 +783,7 @@ const SCRIPT = String.raw`
         var v = value(f.key);
         if (f.control.kind === 'stepper') {
           // Passing the count with nobody added says there was nobody. "Is there another?" goes with it.
-          if (!filled(v)) v = false;
+          if (!filled(v) && !f.control.min) v = false;
           Object.keys(draft).forEach(function (k) {
             if (k.indexOf(f.control.group + '.more.') !== 0) return;
             if (filled(draft[k])) answers.push({ key: k, value: draft[k] });
@@ -709,7 +793,9 @@ const SCRIPT = String.raw`
           // "is there another?" after the last card is a no. Without it the server holds that question open and
           // Submit keeps sending them back to this step.
           var n = stepCount(f, f.control), last = f.control.group + '.more.' + n;
-          if (v === true && n < stepMax(f.control) && !filled(value(last))) answers.push({ key: last, value: false });
+          if ((v === true || f.control.min) && n < stepMax(f.control) && !filled(value(last))) answers.push({ key: last, value: false });
+          // A count of items is the page's own: only the "is there another?" answers are saved.
+          if (f.control.min) return;
         }
         if (filled(v)) {
           if (v !== A[f.key] || NK[f.key]) answers.push({ key: f.key, value: v });
@@ -1004,7 +1090,11 @@ const SCRIPT = String.raw`
           micBtn(k).disabled = false;
           var b = $('f-' + k);
           if (b) { b.readOnly = false; b.classList.remove('live'); }
-          if (text !== null) { draft[k] = text; if (b) b.value = text; }
+          if (text !== null) {
+            var fk = FIELD[k] && FIELD[k].control.kind;
+            if (fk === 'multi' || fk === 'car') setMother(k, text); else draft[k] = text;
+            if (b) b.value = text;
+          }
           micNote(k, note);
           checkIdle();
         };
@@ -1131,8 +1221,8 @@ const SCRIPT = String.raw`
   // ---- taps and typing ---------------------------------------------------------------------------------------------
   function setCount(f, c, n) {
     var max = stepMax(c);
-    n = Math.max(0, Math.min(max, n));
-    draft[f.key] = n > 0;
+    n = Math.max(c.min || 0, Math.min(max, n));
+    if (!c.min) draft[f.key] = n > 0;
     for (var k = 1; k < max; k++) draft[c.group + '.more.' + k] = k < n ? true : k === n ? false : '';
   }
   function joinMulti(key, c) {
@@ -1164,6 +1254,21 @@ const SCRIPT = String.raw`
       var has = list.some(function (p) { return same(p, opt); });
       draft[mk] = (has ? list.filter(function (p) { return !same(p, opt); }) : list.concat(opt)).join(', ');
       if (mf) delete errors[mk];
+      return render();
+    }
+    var part = e.target.closest('[data-part]');
+    if (part) {
+      var ck = part.getAttribute('data-car'), cf = FIELD[ck], name = part.getAttribute('data-part'), cp = partsOf(cf.control, value(ck));
+      var lit = cp.known.some(function (p) { return same(p, name); });
+      draft[ck] = (lit ? cp.known.filter(function (p) { return !same(p, name); }) : cp.known.concat(name)).concat(cp.more ? [cp.more] : []).join(', ');
+      delete errors[ck];
+      return render();
+    }
+    var cn = e.target.closest('[data-carnone]');
+    if (cn) {
+      var nk = cn.dataset.carnone, nc = FIELD[nk].control;
+      draft[nk] = partsOf(nc, value(nk)).none ? '' : nc.none;
+      delete otherOpen[nk]; delete errors[nk];
       return render();
     }
     var yt = e.target.closest('[data-ytb]');
@@ -1212,6 +1317,13 @@ const SCRIPT = String.raw`
       if (input) input.focus();
     }
   });
+  // A part of the car takes Enter and Space, as a button does.
+  $('body').addEventListener('keydown', function (e) {
+    var part = e.target.closest && e.target.closest('[data-part]');
+    if (!part || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    part.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
   $('body').addEventListener('input', function (e) {
     var t = e.target, d = t.dataset;
     if (d.bind) {
@@ -1223,15 +1335,19 @@ const SCRIPT = String.raw`
       var c = FIELD[d.detail].control, b = pillBase(c, value(d.detail));
       draft[d.detail] = t.value.trim() ? b + c.detail.joiner + t.value : b;
     } else if (d.mother) {
-      var mc2 = FIELD[d.mother].control, cur = filled(value(d.mother)) ? String(value(d.mother)).split(', ').filter(function (p) { return isOption(mc2, p); }) : [];
-      if (t.value.trim()) cur = cur.concat(t.value.trim());
-      draft[d.mother] = cur.join(', ');
+      setMother(d.mother, t.value);
     } else if (d.yt) {
       draft[d.yt] = t.value.trim() ? t.value : 'Yes';
     } else if (d.range) {
       var f = FIELD[d.range];
       draft[d.range] = Number(t.value);
-      var rv = $('rv-' + d.range); if (rv) { rv.textContent = sliderShown(f.control, draft[d.range]); rv.className = ''; }
+      t.style.setProperty('--fill', sliderFill(f.control, draft[d.range]));
+      var rv = $('rv-' + d.range);
+      if (rv) { rv.textContent = sliderShown(f.control, draft[d.range]); rv.className = ''; void rv.offsetWidth; rv.className = 'bump'; }
+      // A small tick under the thumb on a phone that can, every tenth of the way.
+      var tenth = Math.floor((draft[d.range] - f.control.min) / Math.max(1, f.control.max - f.control.min) * 10);
+      if (tenth !== lastTenth[d.range] && navigator.vibrate) { try { navigator.vibrate(6); } catch (x) { /* not allowed */ } }
+      lastTenth[d.range] = tenth;
     }
   });
   $('body').addEventListener('change', function (e) {

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit ff8e5de). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 7cb9533). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed and every required item is in, the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -33,7 +33,7 @@ import type { ClaimAnswers, ClaimForm, QuestionItem } from './contracts';
 import { formatText, type CrmValues } from './fill';
 import { CLAIM_TO_INSURER_TEMPLATE } from './templates';
 import type { ClaimStatus, SignatureStatus } from './followon';
-import { applies, evidenceIn, formItems, itemName, type ClaimFacts, type ReceivedEvidence } from './progress';
+import { applies, entryWord, evidenceIn, formItems, itemName, type ClaimFacts, type ReceivedEvidence } from './progress';
 import { sha256 } from './signing';
 import { drawBlocks, fitSize, paragraph, sectionedRows, summaryRows, type SummaryRow } from './summarysheet';
 
@@ -391,6 +391,33 @@ const asLabel = (name: string) => {
 /** riivo_blankfields' lines without the field-map key: "Engine number [crm:…]: no answer" -> "Engine number: no answer". */
 const blankLines = (text: string | null) => (text ?? '').split('\n').map((l) => l.replace(/\s*\[[^\]]*\]:/, ':').trim()).filter(Boolean);
 
+/** The summary page's section for people and items the insurer's form has no row for. */
+export const PAST_THE_FORM = 'More than the claim form has room for';
+
+/**
+ * The entries of a repeating group past the rows the insurer's form prints (a fourth passenger on a form with three
+ * rows): one row each, with what the client gave. The generic row prints nothing itself; its summary sheet holds them all.
+ */
+export function pastTheForm(form: ClaimForm, answers: ClaimAnswers): PackSummaryRow[] {
+  if (!form.fieldMap.length) return [];
+  const rows: PackSummaryRow[] = [];
+  for (const g of form.questionGroups ?? []) {
+    const members = form.questionList.filter((q) => q.group === g.key && q.kind === 'question').map((q) => q.key);
+    const printed = (n: number) => members.some((k) => form.fieldMap.some((e) => e.source === `answer:${k}.${n}`));
+    for (let n = 1; n <= g.max; n++) {
+      if (printed(n)) continue;
+      const parts = members.flatMap((k) => {
+        const a = answers[`${k}.${n}`];
+        return a?.status === 'answered' && a.value !== null && a.value !== '' ? [typeof a.value === 'boolean' ? (a.value ? 'Yes' : 'No') : String(a.value)] : [];
+      });
+      if (!parts.length) continue;
+      const word = entryWord(g.key);
+      rows.push({ section: PAST_THE_FORM, label: `${word.charAt(0).toUpperCase()}${word.slice(1)} ${n}`, value: parts.join(', ') });
+    }
+  }
+  return rows;
+}
+
 /**
  * AC 5: the rows of the summary page. The client, policy and claim rows of the summary sheet (summarysheet.ts, the
  * same `crm:` sources), every evidence document with its date, and the blank fields. Never the score or a flag.
@@ -398,6 +425,8 @@ const blankLines = (text: string | null) => (text ?? '').split('\n').map((l) => 
 export function packSummaryRows(claim: PackClaim, evidence: PackEvidence[]): PackSummaryRow[] {
   // The summary sheet's own client, policy and claim rows; the answers are on the signed form.
   const rows: PackSummaryRow[] = summaryRows(claim.form, claim.answers, claim.crm).rows.filter((r) => r.section !== 'Your answers');
+  // The answers are on the signed form, except anyone past its rows: they go here, or the insurer never sees them.
+  rows.push(...pastTheForm(claim.form, claim.answers));
   if (!evidence.length) rows.push({ section: 'Evidence', label: 'Documents', value: 'None received' });
   for (const e of evidence) {
     const date = e.receivedOn ? formatText(e.receivedOn, 'date') : null;
