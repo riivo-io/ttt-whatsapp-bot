@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 697309c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit edef23f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5172: claim form configs and their validator (TTTFG-5251 steps 5 and 9).
 //
@@ -42,6 +42,11 @@ export const ClaimFormFileSchema = z.object({
   name: z.string().min(1),
   /** riivo_provider.riivo_providername; null for the generic list. */
   provider: z.string().min(1).nullable(),
+  /**
+   * More providers that use the same form (Quicksure is in the CRM three times: Hollard, Omi and Santam). The loader
+   * writes a copy of each row for each, named "<name> - <claim type> (<provider>)". Not on the row itself.
+   */
+  alsoProviders: z.array(z.string().min(1)).optional(),
   /** The blank PDF's path in TTT's "Insurance Claims Forms" SharePoint library; null for the generic list. */
   formPdf: z.string().min(1).nullable(),
   /** The claim types this form serves (one row each); null for the generic list (one row, every claim type). */

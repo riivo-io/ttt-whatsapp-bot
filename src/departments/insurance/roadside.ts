@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit 697309c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit edef23f). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299: roadside help on WhatsApp. A client whose car has broken down gets their insurer's assist number from the
 // CRM straight away, at any hour, with no person involved; the broker sees in My Day that their client needed help.
