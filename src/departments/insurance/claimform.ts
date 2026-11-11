@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit edef23f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimform.ts (commit 60aee91). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5172: claim form configs and their validator (TTTFG-5251 steps 5 and 9).
 //
@@ -336,6 +336,11 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
         else if (ref.entry < 1 || ref.entry > max) err(`${where}: "${e.source}" is entry ${ref.entry}, but group "${q.group}" has ${max}`);
       } else if (!plain) err(`${where}: "${e.source}" names question key "${e.source.slice('answer:'.length)}", which is not in the question list`);
       if (q && q.kind === 'evidence') err(`${where}: "${e.source}" is an evidence item; evidence goes in the pack, not on the form`);
+      if (q && e.options) {
+        const answers = q.answerType === 'choice' ? q.choices ?? [] : q.answerType === 'yes/no' ? ['Yes', 'No'] : undefined;
+        if (!answers) err(`${where}: options are for a choice or yes/no question, and "${q.key}" is neither`);
+        else for (const word of Object.keys(e.options)) if (!answers.includes(word)) err(`${where}: options names "${word}", which is not an answer to "${q.key}"`);
+      }
       if (q && e.format === 'tick' && e.tickWhen !== undefined) {
         if (q.answerType === 'choice' && !(q.choices ?? []).includes(String(e.tickWhen))) err(`${where}: tickWhen "${String(e.tickWhen)}" is not one of the choices of "${q.key}"`);
         if (q.answerType === 'yes/no' && typeof e.tickWhen !== 'boolean') err(`${where}: tickWhen on yes/no question "${q.key}" must be true or false`);
@@ -350,6 +355,8 @@ export function validateClaimForm(input: unknown, ctx: ValidationContext): Valid
     if (e.dateFormat && e.sign !== 'date') err(`${where}: dateFormat is for a sign "date" box`);
     if (e.format === 'tick' && e.tickWhen === undefined && e.source !== 'none') err(`${where}: a tick needs tickWhen`);
     if (e.format === 'char' && e.charIndex === undefined) err(`${where}: format "char" needs charIndex`);
+    if (e.options && !('pdfField' in t)) err(`${where}: options are for a radio group or drop-down, so the target must be a pdfField`);
+    if (e.options && e.source === 'none') err(`${where}: options need an answer as the source`);
 
     if ('pdfField' in t) {
       const kind = fieldKinds.get(t.pdfField);

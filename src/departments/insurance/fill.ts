@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit edef23f). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 60aee91). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: fill an insurer's claim form from its field map (TTTFG-5172), the client's answers (riivo_answers,
 // TTTFG-5176) and the CRM rows. Pure: PDF bytes, config and values in; filled PDF bytes and the blank boxes out.
@@ -407,7 +407,10 @@ export async function fillClaimForm(pdf: Uint8Array, form: ClaimForm, answers: C
         // is left for the broker rather than guessed.
         if (raw === null) { blank('unreadable'); continue; }
         if (raw === '') continue;
-        const option = field.getOptions().find((o) => o.trim().toLowerCase() === raw.trim().toLowerCase());
+        // `options` says which option an answer word picks when the box's own options are something else (Choice1).
+        const word = entry.options ? Object.keys(entry.options).find((k) => k.trim().toLowerCase() === raw.trim().toLowerCase()) : undefined;
+        const wanted = entry.options ? (word === undefined ? undefined : entry.options[word]) : raw;
+        const option = wanted === undefined ? undefined : field.getOptions().find((o) => o.trim().toLowerCase() === wanted.trim().toLowerCase());
         if (option === undefined) { blank('unreadable'); continue; }
         field.select(option);
         continue;
