@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 6a4dbbc). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -264,6 +264,13 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     const when = conditionsFor(item, form, facts);
     if (!when) continue;
     if (added(item) && !sapsRequired) when.push({ key: 'saps', oneOf: [true] });
+    // TTTFG-5734: a claim that must have a case never asks whether there is one (below), so the case number and station
+    // can't wait on that answer, even where the insurer's list (the generic one) puts them under "reported? yes". Otherwise
+    // the box never shows while signing still needs it (BEFORE_SIGNING), and Submit holds the client on nothing they can see.
+    if (sapsRequired && isSaps(item.key)) {
+      const free = when.filter((w) => w.key !== 'saps');
+      when.splice(0, when.length, ...free);
+    }
     const isMore = !!item.group && item.key.startsWith(`${item.group}.more.`);
     // A question no master form places yet still shows, under its own section, so a new question is never lost.
     const place = masterPlace(master, baseKey);
@@ -559,7 +566,9 @@ export function applyGuidedSave(
     more = false;
     for (const [key, v] of [...given]) {
       const item = list().find((i) => i.key === key);
-      if (!item || item.kind !== 'question' || !applies(item, answers, facts)) continue;
+      // TTTFG-5734: the case number and station of a claim that must have a case are kept whatever the list's "reported?"
+      // says, as screensFor shows them: that question is never asked on such a claim.
+      if (!item || item.kind !== 'question' || !(applies(item, answers, facts) || (sapsRequired && isSaps(key)))) continue;
       given.delete(key);
       more = true;
       // "Yes" with nothing typed, where the box wants the thing itself: a blank, so "Yes" never prints as an ID number.
