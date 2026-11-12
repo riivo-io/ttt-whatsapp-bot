@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 62f588b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed and every required item is in, the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -11,10 +11,11 @@
 // it), by updateClaimPack: Tina's follow-on calls it after a turn that filed something, and the email agent
 // (TTTFG-5188) calls it after it links an email's files to a claim.
 //
-// The pack (AC 1, 4, 5) is one PDF: the signed form, the summary page, then every evidence PDF received. Photos and
-// videos stay separate files: the Review item links them (TTTFG-5256 step 5). An evidence PDF that won't open (a
-// password, a broken file) is linked the same way rather than dropped. The pack goes to the claim folder and gets its
-// own riivo_clientdocument row, document type "Claim pack".
+// The pack (AC 1, 4, 5) is the signed form, the claim pack summary and every evidence file received, each its own file:
+// the insurer gets them as separate attachments (the user's call, 9 Nov 2026; until then the form, the summary and the
+// evidence PDFs were merged into one PDF and photos weren't sent). Only the summary is made here: it goes to the claim
+// folder as "Claim pack summary - <reference>.pdf" and gets its own riivo_clientdocument row, document type "Claim pack".
+// The Review item lists the signed form and the evidence by their links (TTTFG-5256 step 5), and submit.ts attaches them.
 //
 // The one wrong turn to avoid (TTTFG-5256): no signature, no pack, whatever else the claim holds (SPEC-04 user story
 // 14: no claim goes to an insurer without the client's signature and the broker's approval). The pack goes to the
@@ -27,7 +28,7 @@
 // TTTFG-5060's panel shows it. Making the item sets the claim to Pack complete and stamps riivo_packcompleteon (AC 3),
 // which TTTFG-5267's 3-working-hour clock reads. A pack made again (a new signature, AC 9) closes the claim's earlier
 // live pack items as Superseded first, so the broker never sees two.
-import { PDFDocument, StandardFonts, type PDFPage } from 'pdf-lib';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { DEPARTMENT, PACK_FOLLOW_UP, type AgentActionRow, type Owner } from './claim';
 import type { ClaimAnswers, ClaimForm, QuestionItem } from './contracts';
 import { formatText, type CrmValues } from './fill';
@@ -140,11 +141,14 @@ export interface PackContext {
   /** The checklist items not received, by name. */
   missing: string[];
   flags: ClaimFlag[];
+  /** The claim pack summary PDF. Before 9 Nov 2026 it was the merged pack (signed form, summary, evidence PDFs). */
   pack: { documentId: string; fileName: string; fileRef: string };
+  /** The signed claim form, sent as its own file. Absent on an item made before 9 Nov 2026: its form is in the pack. */
+  signedForm?: { fileName: string; fileRef: string };
   evidence: PackEvidence[];
   /** The same in one paragraph, for a pane that shows text. */
   text: string;
-  /** TTTFG-5204 AC 8: for an insurer that takes claims by email. The pack above is its attachment. */
+  /** TTTFG-5204 AC 8: for an insurer that takes claims by email. The signed form, the summary and the evidence are its attachments. */
   insurerEmail?: InsurerEmail;
 }
 
@@ -221,15 +225,20 @@ export interface PackEvidence {
   fileName: string;
   fileRef: string;
   receivedOn: string | null;
-  /** In the pack PDF; false for a photo, a video or a PDF that won't open, which the Review item links. */
+  /**
+   * Inside the pack PDF. Always false since 9 Nov 2026: every file goes as its own, and the Review item links it. Older
+   * items have it true for the evidence PDFs merged into their pack, which submit.ts doesn't attach a second time.
+   */
   inPack: boolean;
 }
 
 export interface BuiltPack {
+  /** The summary's riivo_clientdocument row, file name and link. */
   documentId: string;
   fileName: string;
   fileRef: string;
   size: number;
+  signedForm: { fileName: string; fileRef: string };
   evidence: PackEvidence[];
 }
 
@@ -300,52 +309,31 @@ export async function updateClaimPack(ports: ClaimPackPorts, claimId: string, at
   }
 }
 
-const isPdf = (fileName: string) => /\.pdf$/i.test(fileName);
 const clean = (s: string) => s.replace(/["*:<>?/\\|#%]/g, '-').replace(/\s+/g, ' ').trim();
 
-/** `Claim pack - CLM-000300.pdf`: one file per claim, replaced when the pack is built again. */
-export const packFileName = (reference: string) => `Claim pack - ${clean(reference)}.pdf`;
+/** `Claim pack summary - CLM-000300.pdf`: one file per claim, replaced when the pack is built again. */
+export const packFileName = (reference: string) => `Claim pack summary - ${clean(reference)}.pdf`;
 
-/** The pack PDF: the signed form, the summary page, the evidence PDFs that open. Saved and filed. */
+/**
+ * The pack: the claim pack summary, saved and filed, beside the signed form and the evidence files as they are. The signed
+ * form is read once here, so a form missing from the claim folder fails the build (the owner's Follow-up) rather than the
+ * broker's approval.
+ */
 export async function buildPack(ports: ClaimPackPorts, claim: PackClaim): Promise<BuiltPack> {
-  if (!claim.signedForm) throw new Error('there is no signed claim form on the claim');
-  const out = await PDFDocument.create();
-  out.setTitle(`Claim pack - ${claim.reference}`);
-  const append = async (bytes: Uint8Array, o: { ignoreEncryption?: boolean } = {}) => {
-    const src = await PDFDocument.load(bytes, o);
-    for (const page of await out.copyPages(src, src.getPageIndices())) out.addPage(page);
-  };
-  // The signed form is the package's own PDF, filled from the insurer's blank (fill.ts reads those the same way).
-  await append(await ports.readFile(claim.signedForm.fileRef), { ignoreEncryption: true });
-
+  if (!claim.signedForm?.fileRef) throw new Error('there is no signed claim form on the claim');
+  await ports.readFile(claim.signedForm.fileRef);
   // As the checklist is: an entry of a repeating group is filed as `<key>.<n>`.
   const byItem = new Map(formItems(claim.form, claim.answers, claim.facts, claim.sapsRequired).map((q) => [q.key, q]));
-  const evidence: PackEvidence[] = [];
-  const copied: PDFPage[][] = [];
-  for (const d of claim.documents) {
+  const evidence: PackEvidence[] = claim.documents.map((d) => {
     const item = byItem.get(d.itemKey);
-    const e: PackEvidence = { name: item ? itemName(item) : d.itemKey, fileName: d.fileName, fileRef: d.fileRef, receivedOn: d.receivedOn, inPack: false };
-    if (isPdf(d.fileName) && d.fileRef) {
-      // A read that fails (SharePoint throttling, say) fails the build, so the next run tries again: the pack is final
-      // once made. A password or a broken file is linked instead. pdf-lib loads leniently, so a broken file can load
-      // and then fail to copy: its pages are copied here, and added after the summary page.
-      const bytes = await ports.readFile(d.fileRef);
-      try {
-        const src = await PDFDocument.load(bytes);
-        copied.push(await out.copyPages(src, src.getPageIndices()));
-        e.inPack = true;
-      } catch { /* linked on the Review item */ }
-    }
-    evidence.push(e);
-  }
-  await append(await packSummary(claim, evidence));
-  for (const page of copied.flat()) out.addPage(page);
-
-  const bytes = await out.save();
+    return { name: item ? itemName(item) : d.itemKey, fileName: d.fileName, fileRef: d.fileRef, receivedOn: d.receivedOn, inPack: false };
+  });
+  const bytes = await packSummary(claim, evidence);
   const fileName = packFileName(claim.reference);
   const { fileRef } = await ports.saveToClaimFolder(claim, fileName, bytes);
   const { id } = await ports.filePackDocument({ claimId: claim.id, contactId: claim.contactId, fileName, fileRef, fileHash: sha256(bytes) });
-  return { documentId: id, fileName, fileRef, size: bytes.length, evidence };
+  const signedForm = { fileName: claim.signedForm.fileName, fileRef: claim.signedForm.fileRef };
+  return { documentId: id, fileName, fileRef, size: bytes.length, signedForm, evidence };
 }
 
 /** AC 6, 7: what the broker reads beside the pack. The flags are here, and only here: never in the pack. */
@@ -374,7 +362,7 @@ export function packContext(claim: Pick<PackClaim, 'id' | 'reference'>, c: Compl
   ].join(' ');
   return {
     kind: 'claim-pack', version: 1, claimId: claim.id, reference: claim.reference, score: c.score, missing, flags,
-    pack: { documentId: pack.documentId, fileName: pack.fileName, fileRef: pack.fileRef }, evidence: pack.evidence, text,
+    pack: { documentId: pack.documentId, fileName: pack.fileName, fileRef: pack.fileRef }, signedForm: pack.signedForm, evidence: pack.evidence, text,
   };
 }
 
@@ -420,18 +408,19 @@ export function pastTheForm(form: ClaimForm, answers: ClaimAnswers): PackSummary
 
 /**
  * AC 5: the rows of the summary page. The client, policy and claim rows of the summary sheet (summarysheet.ts, the
- * same `crm:` sources), every evidence document with its date, and the blank fields. Never the score or a flag.
+ * same `crm:` sources), the signed form and every evidence document with its date, and the blank fields. Never the score
+ * or a flag.
  */
-export function packSummaryRows(claim: PackClaim, evidence: PackEvidence[]): PackSummaryRow[] {
+export function packSummaryRows(claim: Pick<PackClaim, 'form' | 'answers' | 'crm' | 'blankFields' | 'signedForm'>, evidence: PackEvidence[]): PackSummaryRow[] {
   // The summary sheet's own client, policy and claim rows; the answers are on the signed form.
   const rows: PackSummaryRow[] = summaryRows(claim.form, claim.answers, claim.crm).rows.filter((r) => r.section !== 'Your answers');
   // The answers are on the signed form, except anyone past its rows: they go here, or the insurer never sees them.
   rows.push(...pastTheForm(claim.form, claim.answers));
+  if (claim.signedForm) rows.push({ section: 'Evidence', label: 'Signed claim form', value: `${claim.signedForm.fileName}, sent as a separate file` });
   if (!evidence.length) rows.push({ section: 'Evidence', label: 'Documents', value: 'None received' });
   for (const e of evidence) {
     const date = e.receivedOn ? formatText(e.receivedOn, 'date') : null;
-    const where = e.inPack ? 'in this pack' : !e.fileRef ? 'no file on record'
-      : isPdf(e.fileName) ? 'sent as a separate file (it could not be added to this pack)' : 'sent as a separate file';
+    const where = e.fileRef ? 'sent as a separate file' : 'no file on record';
     rows.push({ section: 'Evidence', label: asLabel(e.name), value: `${e.fileName}${date ? `, received ${date}` : ''}, ${where}` });
   }
   const blanks = blankLines(claim.blankFields);
@@ -449,6 +438,7 @@ export async function packSummary(claim: PackClaim, evidence: PackEvidence[]): P
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  doc.setTitle(`Claim pack summary - ${claim.reference}`);
   const blocks = [paragraph(`Claim pack summary - ${claim.reference}`, bold, 1.6), ...sectionedRows(packSummaryRows(claim, evidence), font, bold)];
   drawBlocks(doc, blocks, fitSize(blocks));
   return doc.save();

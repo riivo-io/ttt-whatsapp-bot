@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 62f588b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -587,7 +587,10 @@ export async function resumeTurn(
     case 'start-new': {
       if (d.dispute) await ports.createAgentAction(notTheirsRow(await ports.loadClaim(d.dispute.claimId), d.dispute.said, at));
       if (d.held.length) await sendText(ports, conv, heldFilesKept(d.held.length), null, at);
-      const t = await claimTurn(ports, conv, null, { kind: 'start', facts: d.facts }, now);
+      // The user (12 Nov 2026): a client with a claim already open gets the form for the new one too. Without `guided`
+      // here, a yes to "Is this a new claim?" got the whole walkthrough on WhatsApp first, and the link only after it.
+      const guided = !!settings.guidedForm && !!ports.guidedFormLink;
+      const t = await claimTurn(ports, conv, null, { kind: 'start', facts: d.facts, ...(guided ? { guided: true } : {}) }, now);
       return { route: 'new-claim', walkthrough: t.state, held: d.held };
     }
 

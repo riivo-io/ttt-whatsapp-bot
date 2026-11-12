@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 62f588b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -285,12 +285,12 @@ export interface ClaimToInsurerVars {
  */
 export const CLAIM_TO_INSURER_TEMPLATE = {
   name: 'Claim to insurer',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
   subject: (v: Pick<ClaimToInsurerVars, 'clientName' | 'policyNumber' | 'reference'>) =>
     (v.policyNumber ? `New claim: ${v.clientName} – policy ${v.policyNumber}` : `New claim: ${v.clientName} (${v.reference})`),
   render: (v: ClaimToInsurerVars) => [
-    `Please find attached a new claim for ${v.clientName}. The pack holds the signed claim form, a summary of the claim and the client's supporting documents.`,
+    `Please find attached a new claim for ${v.clientName}: the signed claim form, a summary of the claim and the client's supporting documents, each as a separate file.`,
     [
       `Policy number: ${v.policyNumber ?? 'not on file'}`,
       `Claim type: ${v.claimType}`,

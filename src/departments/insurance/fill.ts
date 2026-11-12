@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 62f588b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: fill an insurer's claim form from its field map (TTTFG-5172), the client's answers (riivo_answers,
 // TTTFG-5176) and the CRM rows. Pure: PDF bytes, config and values in; filled PDF bytes and the blank boxes out.
@@ -25,7 +25,7 @@
 //
 // Text goes through Helvetica (WinAnsi), so a character it can't encode is reduced to its base letter (ğ to g) or, for
 // emoji and the like, dropped. Either way the client sees the result before signing.
-import { PDFCheckBox, PDFDocument, PDFTextField, StandardFonts, type PDFFont } from 'pdf-lib';
+import { PDFArray, PDFCheckBox, PDFDict, PDFDocument, PDFDropdown, PDFName, PDFRadioGroup, PDFTextField, StandardFonts, type PDFFont } from 'pdf-lib';
 import type { ClaimAnswers, ClaimForm, Condition, FieldMapEntry, QuestionItem } from './contracts';
 
 /** The CRM tables a `crm:` source may read. The rows are passed in, so the fill stays pure. Policy data is read-only. */
@@ -336,9 +336,37 @@ export function addBlank(list: BlankField[], b: BlankField) {
   if (!list.some((x) => x.key === b.key && x.reason === b.reason && (!perBox || x.label === b.label))) list.push(b);
 }
 
+/**
+ * Some insurer PDFs (Echelon's "-min" files) list an empty entry in the form's field list, which makes pdf-lib refuse to
+ * read the form at all, and carry boxes that aren't in the field list. Drop both so the form opens; the PDF is
+ * otherwise untouched. A PDF with a sound field list is returned as it is.
+ */
+export async function repairAcroForm(pdf: Uint8Array): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(pdf);
+  const acro = doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
+  const fields = acro?.lookupMaybe(PDFName.of('Fields'), PDFArray);
+  if (!fields) return pdf;
+  let removed = 0;
+  for (let i = fields.size() - 1; i >= 0; i--) {
+    if (!(doc.context.lookup(fields.get(i)) instanceof PDFDict)) { fields.remove(i); removed++; }
+  }
+  if (!removed) return pdf;
+  const sound = await PDFDocument.load(await doc.save());
+  const known = new Set<PDFDict>();
+  for (const f of sound.getForm().getFields()) for (const w of f.acroField.getWidgets()) known.add(w.dict);
+  for (const page of sound.getPages()) {
+    const annots = page.node.Annots();
+    for (let i = (annots?.size() ?? 0) - 1; i >= 0; i--) {
+      const a = sound.context.lookup(annots!.get(i));
+      if (a instanceof PDFDict && String(a.get(PDFName.of('Subtype'))) === '/Widget' && !known.has(a)) annots!.remove(i);
+    }
+  }
+  return sound.save();
+}
+
 /** Fills `pdf` from the form's field map. The PDF is the insurer's blank form; the generic row has none (summarysheet.ts). */
 export async function fillClaimForm(pdf: Uint8Array, form: ClaimForm, answers: ClaimAnswers, crm: CrmValues): Promise<FillResult> {
-  const doc = await PDFDocument.load(pdf);
+  const doc = await PDFDocument.load(form.formPdf ? await repairAcroForm(pdf) : pdf);
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const acro = doc.getForm();
   const blankFields: BlankField[] = [];
@@ -372,6 +400,19 @@ export async function fillClaimForm(pdf: Uint8Array, form: ClaimForm, answers: C
       const field = acro.getFieldMaybe(entry.target.pdfField);
       if (field instanceof PDFCheckBox) {
         if (tickState(r.value, entry.tickWhen)) field.check(); else field.uncheck();
+        continue;
+      }
+      if (field instanceof PDFRadioGroup || field instanceof PDFDropdown) {
+        // A choice box: the answer's words must be one of the box's own options (Yes/No, Full/Learner); otherwise it
+        // is left for the broker rather than guessed.
+        if (raw === null) { blank('unreadable'); continue; }
+        if (raw === '') continue;
+        // `options` says which option an answer word picks when the box's own options are something else (Choice1).
+        const word = entry.options ? Object.keys(entry.options).find((k) => k.trim().toLowerCase() === raw.trim().toLowerCase()) : undefined;
+        const wanted = entry.options ? (word === undefined ? undefined : entry.options[word]) : raw;
+        const option = wanted === undefined ? undefined : field.getOptions().find((o) => o.trim().toLowerCase() === wanted.trim().toLowerCase());
+        if (option === undefined) { blank('unreadable'); continue; }
+        field.select(option);
         continue;
       }
       const more = (entry.overflow ?? []).map((n) => acro.getFieldMaybe(n));

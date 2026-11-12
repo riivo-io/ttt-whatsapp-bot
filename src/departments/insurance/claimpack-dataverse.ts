@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit 62f588b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack's ports (claimpack.ts ClaimPackPorts) against Dataverse, in the style of
 // signing-dataverse.ts: the host passes its Dataverse call (`Dv`) and the claim folder, so this file runs unchanged in
@@ -210,7 +210,7 @@ export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPack
         riivo_heldbackaction: JSON.stringify(row.context),
         // TTTFG-5204 AC 8: the email My Day shows on the item (TTTFG-5060).
         ...(row.context.insurerEmail ? { riivo_recipient: row.context.insurerEmail.to, riivo_subject: row.context.insurerEmail.subject.slice(0, 400), riivo_drafttext: row.context.insurerEmail.text } : {}),
-        // My Day lists the pack like an email's files (src/core/attachments.ts); the evidence links are in the context.
+        // My Day lists the summary like an email's files (src/core/attachments.ts); the signed form and evidence links are in the context.
         riivo_attachments: JSON.stringify([{ name: row.pack.fileName.slice(0, 200), contentType: 'application/pdf', size: row.pack.size }]),
         riivo_duedate: twoWorkingHours(row.at),
         riivo_urgency: URGENT,
