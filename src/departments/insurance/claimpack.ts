@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit e7a8dfa). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit f12db18). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed (13 Nov 2026: whatever is still missing), the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -33,7 +33,7 @@ import { DEPARTMENT, PACK_FOLLOW_UP, type AgentActionRow, type Owner } from './c
 import type { ClaimAnswers, ClaimForm, QuestionItem } from './contracts';
 import { formatText, type CrmValues } from './fill';
 import { CLAIM_TO_INSURER_TEMPLATE } from './templates';
-import type { ClaimStatus, SignatureStatus } from './followon';
+import { registerNotes, type ClaimStatus, type SignatureStatus } from './followon';
 import { applies, entryWord, evidenceIn, formItems, itemName, type ClaimFacts, type ReceivedEvidence } from './progress';
 import { sha256 } from './signing';
 import { drawBlocks, fitSize, paragraph, sectionedRows, summaryRows, type SummaryRow } from './summarysheet';
@@ -146,6 +146,11 @@ export interface PackContext {
   /** The signed claim form, sent as its own file. Absent on an item made before 9 Nov 2026: its form is in the pack. */
   signedForm?: { fileName: string; fileRef: string };
   evidence: PackEvidence[];
+  /**
+   * The user (13 Nov 2026): what the broker needs to register the claim with the insurer (followon.ts registerNotes), in
+   * place of the ready-to-register Follow-up. Absent on items made before.
+   */
+  register?: { insurer: string; blank: string[]; forTtt: string[]; deadline?: string };
   /** The same in one paragraph, for a pane that shows text. */
   text: string;
   /** TTTFG-5204 AC 8: for an insurer that takes claims by email. The signed form, the summary and the evidence are its attachments. */
@@ -268,7 +273,8 @@ export async function updateClaimPack(ports: ClaimPackPorts, claimId: string, at
     const pack = await buildPack(ports, claim);
     fileName = pack.fileName;
     const flags = await ports.openFlags(claim.id);
-    const context = packContext(claim, c, flags, pack);
+    const notes = registerNotes(claim.form, { ...claim, facts: claim.facts ?? base.facts }, new Date(at));
+    const context = packContext(claim, c, flags, pack, { insurer: claim.insurer, ...notes });
     const email = insurerEmailFor(claim);
     if (email) context.insurerEmail = email;
     // AC 9: the earlier item first, so a failure in between never leaves two live pack items. Without a pack complete
@@ -355,15 +361,23 @@ export function insurerEmailFor(claim: Pick<PackClaim, 'insurerRoute' | 'contact
   return { to, subject: CLAIM_TO_INSURER_TEMPLATE.subject(vars), text: CLAIM_TO_INSURER_TEMPLATE.render(vars) };
 }
 
-export function packContext(claim: Pick<PackClaim, 'id' | 'reference'>, c: Completeness, flags: ClaimFlag[], pack: BuiltPack): PackContext {
+export function packContext(
+  claim: Pick<PackClaim, 'id' | 'reference'>, c: Completeness, flags: ClaimFlag[], pack: BuiltPack, register?: PackContext['register'],
+): PackContext {
   const missing = [...new Set(c.missing.map(itemName))];
   const text = [
+    ...(register ? [
+      `Ready to register with ${register.insurer}: the client has signed the claim form.`,
+      ...(register.blank.length ? [`Left blank on the form: ${register.blank.join(', ')}. Tina won't ask the client for it; please get it from them if the insurer needs it.`] : []),
+      ...(register.forTtt.length ? [`Not asked of the client, for TTT to get: ${register.forTtt.join(', ')}.`] : []),
+      ...(register.deadline ? [register.deadline] : []),
+    ] : []),
     `Completeness ${c.score}%.`,
     missing.length ? `Missing: ${missing.join(', ')}.` : 'Every checklist item is in.',
     flags.length ? `Open flags: ${flags.map((f) => `${f.type}: ${f.detail}`).join('; ')}.` : 'No open flags.',
   ].join(' ');
   return {
-    kind: 'claim-pack', version: 1, claimId: claim.id, reference: claim.reference, score: c.score, missing, flags,
+    kind: 'claim-pack', version: 1, claimId: claim.id, reference: claim.reference, score: c.score, missing, flags, ...(register ? { register } : {}),
     pack: { documentId: pack.documentId, fileName: pack.fileName, fileRef: pack.fileRef }, signedForm: pack.signedForm, evidence: pack.evidence, text,
   };
 }

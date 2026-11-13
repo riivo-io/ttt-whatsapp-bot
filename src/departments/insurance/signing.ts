@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit e7a8dfa). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit f12db18). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -26,7 +26,6 @@ import { createHash } from 'node:crypto';
 import { PDFDocument, type PDFPage, type PDFRef } from 'pdf-lib';
 import { DEPARTMENT, PACK_FOLLOW_UP, type AgentActionRow, type Owner } from './claim';
 import type { ClaimForm, SignatureResult } from './contracts';
-import { READY_TO_REGISTER, readyToRegister } from './followon';
 import type { ClaimForFill, SigningStep, UnsignedDocument } from './signature-fill';
 import { claimFormFileName } from './signature-fill';
 import { SIGN_FORM_TEMPLATE } from './templates';
@@ -356,11 +355,8 @@ export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallb
     ...actionBase, kind: 'Created',
     detail: `The client signed the claim form for ${claim.reference} on the signing page (link sent on ${CHANNEL_NAME[cb.audit.channel]} to ${cb.audit.sentTo}).`,
   });
-  // TTTFG-4830 (C3, 29 Oct 2026): the broker hears again once the form is signed ("Form signed: yes"), the claim's cue to
-  // register it. Before Signed, like the rest; the callback that comes again after Signed doesn't send it twice.
-  await ports.createAgentAction({
-    ...actionBase, kind: 'Follow-up', detail: readyToRegister(claim, [], 'Signed'), template: { name: READY_TO_REGISTER.name, version: READY_TO_REGISTER.version },
-  });
+  // The user (13 Nov 2026): no ready-to-register Follow-up here any more (TTTFG-4830 C3). The pack made right after the
+  // signature is the broker's cue to register the claim, and its Review item says what they need (followon.ts registerNotes).
   await ports.markSigned(claim.id, cb.audit.signedAt, JSON.stringify(cb.audit));
   await packAfterSigned(ports, claim, cb.audit.signedAt);
   return { filed: { fileRef, documentId: id } };
@@ -378,7 +374,7 @@ async function packAfterSigned(ports: ClaimSignedPorts, claim: SignedClaim, at: 
     const msg = String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').slice(0, 300);
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
-      detail: `${PACK_FOLLOW_UP}${claim.reference}: the client signed, but the agent could not check whether the pack is due: ${msg}. Please check the claim, and put the pack together by hand if every required item is in.`,
+      detail: `${PACK_FOLLOW_UP}${claim.reference}: the client signed, but the agent could not check whether the pack is due: ${msg}. Please check the claim, and put the pack together by hand.`,
     });
   }
 }
