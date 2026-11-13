@@ -683,6 +683,34 @@ export class DynamicsService {
     }
 
     /**
+     * Service routing (docs/PLAN-service-routing.md): every active contact on this WhatsApp number, plus the resolved
+     * contact by id (a cached session may hold a contact whose number has changed), with its Client Type
+     * (riivo_clienttypenew) and how many active policies it holds. Throws when Dataverse fails: the caller treats a
+     * failed read as "both sides", never as tax only.
+     */
+    async getRoutingContactsForPhone(phoneNumber: string, resolvedContactId: string): Promise<{ id: string; clientTypes: number[]; activePolicies: number }[]> {
+        const guid = (id: string) => id.replace(/[^0-9a-fA-F-]/g, '');
+        const contacts = await this.webApi<{ value: { contactid: string; riivo_clienttypenew?: string | null }[] }>('GET',
+            `contacts?$select=contactid,riivo_clienttypenew&$top=20&$filter=statecode eq 0 and ((${this.phoneOrFilter('mobilephone', phoneNumber)}) or contactid eq ${guid(resolvedContactId)})`);
+        const rows = contacts.value ?? [];
+        if (rows.length === 0) return [];
+        // riivo_policy_status 463630000 = Active.
+        const holders = rows.map((r) => `_riivo_policyholderid_value eq ${guid(r.contactid)}`).join(' or ');
+        const policies = await this.webApi<{ value: { _riivo_policyholderid_value?: string }[] }>('GET',
+            `riivo_policies?$select=_riivo_policyholderid_value&$top=500&$filter=riivo_policy_status eq 463630000 and (${holders})`);
+        const count = new Map<string, number>();
+        for (const p of policies.value ?? []) {
+            const id = (p._riivo_policyholderid_value ?? '').toLowerCase();
+            if (id) count.set(id, (count.get(id) ?? 0) + 1);
+        }
+        return rows.map((r) => ({
+            id: r.contactid,
+            clientTypes: String(r.riivo_clienttypenew ?? '').split(',').map((v) => v.trim()).filter(Boolean).map(Number).filter((n) => Number.isInteger(n)),
+            activePolicies: count.get(r.contactid.toLowerCase()) ?? 0,
+        }));
+    }
+
+    /**
      * Look up by email across contacts and leads — used by the email-relay
      * flow (TTT staff forwards a client email to tina-bot@; we need to find
      * that client's WhatsApp number).

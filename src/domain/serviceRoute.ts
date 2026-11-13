@@ -165,7 +165,11 @@ export function decideServiceRoute(input: RouteInput, model?: SideAnswer): Route
 
     // 6. Tax only: tax, unless the message is about insurance.
     if (taxOnly) {
-        if (document) return { kind: 'tax', why: 'tax client, file' };
+        if (document) {
+            return side === 'insurance'
+                ? { kind: 'insurance', why: 'tax client, file after accepting the offer' }
+                : { kind: 'tax', why: 'tax client, file' };
+        }
         if (side === 'insurance') {
             // They said yes to the offer this session: more messages go to the same hand-over, unless they turn to tax.
             if (!hasTaxWords(text)) return { kind: 'insurance', why: 'tax client, after accepting the offer' };
