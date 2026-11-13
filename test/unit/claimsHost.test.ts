@@ -236,3 +236,16 @@ test('TTTFG-4830: CLAIMS_CONTACT_NUMBER is trimmed; unset or blank is no number 
     assert.deepEqual(claimsConversation(PHONE, 'req-1', 'https://ttt.example/signup', '021 555 0100'),
         { phone: PHONE, requestId: 'req-1', signUpLink: 'https://ttt.example/signup', contactNumber: '021 555 0100' });
 });
+
+test('service routing: force starts a claim without the claim check; wordFilter false asks Claude about any message', async () => {
+    const w = world({ isClaim: false });
+    assert.deepEqual(await claimFromClient(w.deps, PHONE, JANE, 'when does my policy renew', NOW), { handled: false });
+    assert.equal(w.intentCalls(), 0, 'no claim words: no model call, as before');
+    assert.deepEqual(await claimFromClient(w.deps, PHONE, JANE, 'when does my policy renew', NOW, { wordFilter: false }), { handled: false });
+    assert.equal(w.intentCalls(), 1, 'word filter off: Claude decides');
+
+    const forced = await claimFromClient(w.deps, PHONE, JANE, 'I want to report an insurance claim.', NOW, { force: true });
+    assert.equal(forced.handled, true);
+    assert.equal(w.intentCalls(), 1, 'force: no claim check');
+    assert.deepEqual(w.requests, ['I want to report an insurance claim.']);
+});
