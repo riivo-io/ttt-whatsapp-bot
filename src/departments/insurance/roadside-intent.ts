@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-intent.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-intent.ts (commit e7a8dfa). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299 AC 1 and 8: a client whose car has broken down, needs a tow or is stuck on the road is routed to roadside
 // help (roadside.ts), not to a claim. Like the claim intent (intent.ts), one message in, a route or nothing out.

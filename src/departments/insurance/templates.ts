@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit e7a8dfa). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -193,6 +193,35 @@ export const FORM_LINK_EMAIL_TEMPLATE = {
   subject: (v: Pick<FormLinkEmailVars, 'reference'>) => `Your claim form (${v.reference})`,
   render: (v: FormLinkEmailVars) => [
     `Hi ${v.firstName}, please complete the form below so that we can submit your claim.`,
+    v.link,
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
+export interface FormReminderVars {
+  firstName: string;
+  /** The claim as Tina names it: "motor accident claim (CLM-000486)". */
+  claim: string;
+  /** A fresh link to the claim's form. The answers already given are kept, so the client carries on where they stopped. */
+  link: string;
+}
+
+/**
+ * The user (13 Nov 2026): on WhatsApp, the morning reminder for a claim whose form went out and hasn't been submitted
+ * (reminder.ts) is REMINDER_TEMPLATE, the template Meta has already approved, with this as its {{3}}: "… we still need
+ * you to finish your claim form here: <link>." No second template to approve.
+ */
+export const formStillNeeded = (link: string) => `you to finish your claim form here: ${link}`;
+
+/** The same reminder for a claim that came in by email, from the claim owner's mailbox (no Meta template on email). */
+export const FORM_REMINDER_EMAIL_TEMPLATE = {
+  name: 'Claim - form not finished (reminder email)',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<FormReminderVars, 'claim'>) => `Your ${v.claim}: the form isn't finished yet`,
+  render: (v: FormReminderVars) => [
+    `Good morning ${v.firstName},`,
+    `The form for your ${v.claim} isn't finished yet. Please complete it below so that we can submit your claim. What you've already filled in is kept.`,
     v.link,
     'Kind regards,\nTTT',
   ].join('\n\n'),

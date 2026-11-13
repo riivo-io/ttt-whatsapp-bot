@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit e7a8dfa). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -14,7 +14,7 @@ import type { ClaimAnswers, AnswerRecord, ClaimForm, Condition, QuestionItem } f
 import {
   accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, type FollowOnClaim, type FollowOnPorts, type ClientFile,
 } from './followon';
-import { emailProblem, formatProblem, phoneProblem } from './formats';
+import { emailProblem, formatProblem, isCaseNumber, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
 import { DEPARTMENT } from './claim';
 import {
@@ -444,9 +444,10 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
 /**
  * The user (9 Nov 2026): the bare minimum the broker needs to send the claim pack, so the client can't sign (or submit)
  * without it, even though any other question may be left blank: when and where it happened, what happened in their own
- * words, and the police case number when the police were involved.
+ * words, and the police case number when the police were involved. The user (13 Nov 2026): the police station too (it is
+ * on the same slip), and a case number with no digit in it ("....") doesn't count.
  */
-export const BEFORE_SIGNING: readonly string[] = ['incidentAt', 'place', 'description', SAPS_CASE_KEY];
+export const BEFORE_SIGNING: readonly string[] = ['incidentAt', 'place', 'description', SAPS_CASE_KEY, SAPS_STATION_KEY];
 
 /** BEFORE_SIGNING as this form asks it: never a question the client has no box for. */
 const beforeSigningOn = (screens: readonly GuidedScreen[]) =>
@@ -458,10 +459,12 @@ export function missingBeforeSigning(form: ClaimForm, claim: FollowOnClaim, saps
   const police = sapsRequired || policeOpen(claim);
   const has = (k: string) => {
     const a = claim.answers[k];
-    return (a?.status === 'answered' && a.value !== null && a.value !== '') || factFor(k, facts) !== undefined;
+    const v = a?.status === 'answered' && a.value !== null && a.value !== '' ? a.value : factFor(k, facts);
+    if (v === undefined || v === null || v === '') return false;
+    return k !== SAPS_CASE_KEY || isCaseNumber(String(v));
   };
   return beforeSigningOn(screensFor(asGuided(form, claim), claim, [], sapsRequired))
-    .filter((k) => (k !== SAPS_CASE_KEY || police) && !has(k));
+    .filter((k) => (!isSaps(k) || police) && !has(k));
 }
 
 /** Whether the police case's own questions are open on the form: the claim needs them, or the client said it was reported. */

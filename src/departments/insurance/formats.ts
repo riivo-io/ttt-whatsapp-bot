@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit e7a8dfa). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830: answers that don't look right. A phone number with a digit too many, an email address without its "@" or
 // an ID number with a wrong check digit is almost always a typo, and on a claim form it means the insurer can't reach a
@@ -13,12 +13,13 @@
 // usual length (8 to 15 digits).
 import type { QuestionItem } from './contracts';
 
-export type AnswerFormat = 'phone' | 'email' | 'sa-id' | 'contact';
+export type AnswerFormat = 'phone' | 'email' | 'sa-id' | 'contact' | 'saps-case';
 
 /** The format a free-text question's answer should have, from its key (group entries `<key>.<n>` included). */
 export function formatOf(item: Pick<QuestionItem, 'key' | 'kind' | 'answerType' | 'prompt'>): AnswerFormat | undefined {
   if (item.kind !== 'question' || item.answerType !== 'text') return undefined;
   const key = item.key.replace(/\.\d+$/, '');
+  if (key === 'sapsCaseNumber') return 'saps-case';
   if (/IdNumber$/.test(key)) return 'sa-id';
   if (/Phone$/.test(key)) return 'phone';
   if (/Email$/i.test(key)) return 'email';
@@ -81,6 +82,18 @@ export function idProblem(typed: string): string | null {
   return null;
 }
 
+/**
+ * The user (13 Nov 2026): a SAPS case number has digits ("CAS 123/10/2026"). Anything without one ("....", "n/a",
+ * "dont have") isn't a case number at all, so the form can't be signed with it (guided.ts missingBeforeSigning). One with
+ * digits but an unusual shape is the client's to give, and goes through.
+ */
+export const isCaseNumber = (typed: string) => /\d/.test(typed);
+
+function sapsCaseProblem(typed: string): string | null {
+  return isCaseNumber(typed) ? null
+    : 'That doesn\'t look like a case number. It\'s on the slip the police station gave you, for example CAS 123/10/2026.';
+}
+
 /** Phone numbers inside free text: a run of digits (spaces, dashes and brackets allowed) at least 7 digits long. */
 const PHONE_IN_TEXT = /\+?\(?\d[\d\s()-]{5,}\d/g;
 
@@ -95,6 +108,8 @@ export function formatProblem(item: Pick<QuestionItem, 'key' | 'kind' | 'answerT
       return emailProblem(value);
     case 'sa-id':
       return idProblem(value);
+    case 'saps-case':
+      return sapsCaseProblem(value);
     case 'contact': {
       for (const token of value.split(/[\s,;]+/).filter((x) => x.includes('@'))) {
         const p = emailProblem(token);

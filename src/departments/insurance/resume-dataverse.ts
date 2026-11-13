@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit e7a8dfa). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
@@ -6,9 +6,9 @@
 // email agent.
 import { dataverseClaimPorts } from './dataverse';
 import { CLAIM_STATUSES, CLAIM_TYPE_VALUES, dataverseFollowOnPorts, type FollowOnDataverseOptions } from './followon-dataverse';
-import { BROKER_STEPS, REMINDED_STATUSES, REMINDER_SETTING_VARIABLES, type ReminderPorts, type ReminderSettings } from './reminder';
+import { BROKER_STEPS, FORM_STAGES, REMINDED_STATUSES, REMINDER_SETTING_VARIABLES, type ReminderPorts, type ReminderSettings } from './reminder';
 import { CANCEL_REQUEST, CANCEL_WITHDRAWN, NOT_THEIRS, OPEN_CLAIM_STATUSES, THEIRS, type OpenClaim, type OpenClaimsPort, type ResumePorts } from './resume';
-import { REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
+import { FORM_REMINDER_EMAIL_TEMPLATE, REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 const OPT = 463630000;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -110,7 +110,7 @@ export function lastReminderPort(dv: FollowOnDataverseOptions['dv']): Pick<Remin
     return r.value[0]?.createdon ?? null;
   };
   return {
-    lastReminderOn: (claimId) => lastNamed(claimId, REMINDER_TEMPLATE.name, REMINDER_EMAIL_TEMPLATE.name),
+    lastReminderOn: (claimId) => lastNamed(claimId, REMINDER_TEMPLATE.name, REMINDER_EMAIL_TEMPLATE.name, FORM_REMINDER_EMAIL_TEMPLATE.name),
     lastBrokerStepOn: (claimId, step) => lastNamed(claimId, BROKER_STEPS[step].name),
   };
 }
@@ -143,7 +143,8 @@ export async function reminderSettingsFromDataverse(dv: FollowOnDataverseOptions
 
 /** TTTFG-5212 AC 2: the clients with an email claim at a reminded status, each once. */
 export async function emailClaimClients(dv: FollowOnDataverseOptions['dv']): Promise<string[]> {
-  const statuses = REMINDED_STATUSES.map((s) => `riivo_claimstatus eq ${OPT + CLAIM_STATUSES.indexOf(s)}`).join(' or ');
+  // The user (13 Nov 2026): FORM_STAGES too, for a form that went out and was never submitted (reminder.ts remindForm).
+  const statuses = [...REMINDED_STATUSES, ...FORM_STAGES].map((s) => `riivo_claimstatus eq ${OPT + CLAIM_STATUSES.indexOf(s)}`).join(' or ');
   const r = await dv<{ value: { _riivo_contact_value: string | null }[] }>('GET',
     `riivo_claims?$select=_riivo_contact_value&$filter=statecode eq 0 and riivo_channel eq ${CLAIM_CHANNEL_EMAIL} and (${statuses})`);
   return [...new Set(r.value.map((c) => c._riivo_contact_value).filter((id): id is string => !!id))];

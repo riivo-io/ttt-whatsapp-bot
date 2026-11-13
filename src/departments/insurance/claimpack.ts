@@ -1,6 +1,6 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit e7a8dfa). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
-// TTTFG-5200: the claim pack. Once the client has signed and every required item is in, the agent puts the claim
+// TTTFG-5200: the claim pack. Once the client has signed (13 Nov 2026: whatever is still missing), the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
 //
 // The score (AC 6) is the share of the claim form's evidence checklist received: evidence items received over every
@@ -198,19 +198,21 @@ export interface ClaimPackPorts {
 export { PACK_FOLLOW_UP };
 
 /** Why a claim gets no pack now. */
-export type NoPack = 'not-signed' | 'evidence-incomplete' | 'past-pack' | 'already-packed';
+export type NoPack = 'not-signed' | 'past-pack' | 'already-packed';
 
 /** The statuses a pack may still be made in: after submission, the insurer has the claim. */
 const PACK_STAGES: readonly ClaimStatus[] = ['FNOL logged', 'Cover verified', 'Form sent', 'Awaiting client docs', 'Pack complete'];
 
 /**
- * AC 4: a pack only for a signed claim with every required item in, before it goes to the insurer. AC 9: one pack per
- * signature. A pack made at or after the signature is this signature's: a late optional item only lifts the score,
- * and the callback run again finds its pack made. A new signature (riivo_signedon later than the pack) makes a new one.
+ * AC 4: a pack only for a signed claim, before it goes to the insurer. The user (13 Nov 2026): every signature makes a
+ * pack, whatever is still blank. The form already stops the client signing without what they always have (guided.ts
+ * finishGuided), and anything else missing is listed on the broker's Review item, never a reason to hold the claim:
+ * until then a claim signed with a gap sat at FNOL logged with no pack, no clock and nobody chasing it.
+ * AC 9: one pack per signature. A pack made at or after the signature is this signature's: a late item only lifts the
+ * score, and the callback run again finds its pack made. A new signature (riivo_signedon later than the pack) makes a new one.
  */
-export function noPack(claim: Pick<ScoreClaim, 'signatureStatus' | 'evidenceComplete' | 'status' | 'signedOn' | 'packCompleteOn'>): NoPack | null {
+export function noPack(claim: Pick<ScoreClaim, 'signatureStatus' | 'status' | 'signedOn' | 'packCompleteOn'>): NoPack | null {
   if (claim.signatureStatus !== 'Signed') return 'not-signed';
-  if (!claim.evidenceComplete) return 'evidence-incomplete';
   if (!PACK_STAGES.includes(claim.status)) return 'past-pack';
   if (claim.packCompleteOn && (!claim.signedOn || Date.parse(claim.packCompleteOn) >= Date.parse(claim.signedOn))) return 'already-packed';
   // Pack complete with no time: a person set it after a run that couldn't stamp it (its Follow-up asks them to). The
@@ -296,7 +298,7 @@ export async function updateClaimPack(ports: ClaimPackPorts, claimId: string, at
     // A failure that repeats (a file that can't be read) would otherwise raise one on every evidence turn.
     if (!(await ports.packFollowUpOpen(base.id))) {
       const what = {
-        build: `the client signed and every required item is in, but the agent could not build the pack: ${msg}. Please put the pack together by hand, or ask riivo to run it again.`,
+        build: `the client signed, but the agent could not build the pack: ${msg}. Please put the pack together by hand, or ask riivo to run it again.`,
         item: `the agent built the pack (${fileName} in the claim folder) but could not put it in My Day: ${msg}. Please review the pack from the claim folder, or ask riivo to run it again.`,
         status: `the pack is in My Day, but the agent could not set the claim to Pack complete: ${msg}. Please set Pack complete on the claim.`,
       }[stage];
