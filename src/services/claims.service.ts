@@ -173,7 +173,25 @@ export async function handleClientClaimMessage(from: string, text: string, entit
     return out.handled;
 }
 
-async function contactFirstName(entity: CrmEntity): Promise<string> {
+/**
+ * Service routing (docs/PLAN-service-routing.md): a message the router sent to insurance, for the number's insurance
+ * contact (which may not be the contact Tina resolved: a shared number). `force`: the client tapped Report a claim.
+ * The claim check runs without the word filter. True when the claims flow answered it.
+ */
+export async function handleInsuranceClaimMessage(
+    from: string, text: string, contact: { id: string; fullname: string }, sessionId: string, o: { force?: boolean } = {},
+): Promise<boolean> {
+    if (!claimsEnabled()) return false;
+    const entity: CrmEntity = { id: contact.id, type: 'client', fullname: contact.fullname };
+    const limits: RateLimitError[] = [];
+    const firstName = await contactFirstName(entity);
+    const out = await guarded(limits, () => claimFromClient(deps(from, sessionId, entity, limits), from, { id: entity.id, firstName }, text, new Date(),
+        { force: !!o.force, wordFilter: false }));
+    if (out.handled) console.log(`[Claims] ${from} ${out.kind}${out.reference ? ` ${out.reference}` : ''} (service routing)`);
+    return out.handled;
+}
+
+export async function contactFirstName(entity: CrmEntity): Promise<string> {
     try {
         const c = await dynamicsService.webApi<{ firstname?: string }>('GET', `contacts(${entity.id})?$select=firstname`);
         if (c.firstname?.trim()) return c.firstname.trim();

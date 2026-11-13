@@ -158,9 +158,15 @@ export async function claimFromUnknownNumber(deps: ClaimsHostDeps, phone: string
     return { handled: true, kind: 'unknown-number' };
 }
 
-/** An inbound from a known client. */
+/**
+ * An inbound from a known client.
+ * Service routing (docs/PLAN-service-routing.md): `force` starts a claim without the claim check (the client tapped
+ * Report a claim); `wordFilter: false` asks Claude about every message (an insurance client's message, as on the demo
+ * numbers). Neither changes a walkthrough or roadside conversation in progress.
+ */
 export async function claimFromClient(
     deps: ClaimsHostDeps, phone: string, contact: { id: string; firstName: string }, text: string, now: Date,
+    o: { force?: boolean; wordFilter?: boolean } = {},
 ): Promise<ClaimsOutcome> {
     if (!deps.enabled) return NOT_MINE;
     let stored = await deps.load(phone);
@@ -170,7 +176,7 @@ export async function claimFromClient(
     }
 
     // TTTFG-5299: a roadside conversation in progress, or a new one (asked before the claim route).
-    if (roadsideOn(deps) && (!stored || isRoadside(stored.state))) {
+    if (roadsideOn(deps) && (stored ? isRoadside(stored.state) : !o.force)) {
         const out = await roadsideTurn(deps, phone, contact, text, now, stored);
         if (out) return out;
     }
@@ -188,7 +194,7 @@ export async function claimFromClient(
         return persist(deps, phone, contact.id, stored.requestId, r.state, r.lastSent ?? stored.lastSent, r.claim?.reference, 'continued');
     }
 
-    if (!(await claimRoute(deps.intentModel, text))) return NOT_MINE;
+    if (!o.force && !(await claimRoute(deps.intentModel, text, { wordFilter: o.wordFilter }))) return NOT_MINE;
     const requestId = await deps.openRequest(contact.id, phone, text);
     // Without a request there is nothing to hang the follow-ups and messages on. Tina's normal path answers instead,
     // and the error is in the log; better than a claim conversation the CRM can't see.

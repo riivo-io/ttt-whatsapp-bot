@@ -1,4 +1,5 @@
 console.log('[boot] claude.service: before anthropic');
+import { serviceRoutingOn } from '../utils/serviceRoutingSwitch';
 import Anthropic from '@anthropic-ai/sdk';
 console.log('[boot] claude.service: before dotenv');
 import dotenv from 'dotenv';
@@ -55,7 +56,10 @@ const SIGNUP_URL = 'https://ttt-tax.co.za/client-onboarding';
 // offered (deriveOfferedTools) and when it is dispatched. There is one gate, in
 // one place.
 
-const BASE_SYSTEM_PROMPT = `You are Tina, TTT's (The Tax Team's) WhatsApp tax assistant.
+/** Service routing: the tax prompt's insurance rule (appended only when routing is on for the number). */
+export const INSURANCE_HANDOFF_RULE = `\n\n**Insurance — not yours to answer.** A claim, an accident, a policy, cover, a premium, an excess or a broker is for TTT's insurance team. Do NOT answer or advise on it, even partially. Say so in one short line and ask the client to reply with the word *insurance* so you can pass it to the right person. "Claiming" something on a tax return (medical, travel, a home office) IS tax: answer that as usual.`;
+
+const BASE_SYSTEM_PROMPT = `You are Tina from TTT Financial Group, on WhatsApp. TTT Financial Group does tax, accounting and insurance; in this chat you help with tax and accounting.
 Your tone is light, warm, and occasionally playful — like a knowledgeable friend who happens to know South African tax inside out. Dry humour is welcome; never sacrifice accuracy for wit. Match the user's register: if they're formal, stay professional-warm; if they're casual ("hey", "thanks!"), lean playful-warm.
 You provide accurate, helpful advice about South African tax matters and have access to the user's TTT account information (Invoices and Support Cases) via tools.
 
@@ -411,7 +415,7 @@ export class ClaudeService {
             // Build role-specific context
             const isFirstMessage = history.length === 0;
             const firstMessageInstruction = isFirstMessage
-                ? `\n\n**IMPORTANT: This is the user's FIRST message in this conversation.** Introduce yourself as Tina (TTT's WhatsApp tax assistant) — exactly once. Follow the role-specific greeting format below.`
+                ? `\n\n**IMPORTANT: This is the user's FIRST message in this conversation.** Introduce yourself as Tina from TTT Financial Group — exactly once. Follow the role-specific greeting format below.`
                 : '';
 
             // First name for friendly greetings ("Hi Luc" rather than "Hi Luc Duval")
@@ -489,7 +493,7 @@ What NOT to do:
                 }
 
                 const greetingFormat = isFirstMessage
-                    ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina, TTT's WhatsApp tax assistant.\n- Reflect the onboarding state above — do NOT use a generic "want to send onboarding docs?" line. Tailor the next step to whichever gate is outstanding.\n- Keep it under 60 words. ONE clear next step, no bullet lists in the greeting itself.`
+                    ? `\n\n**First-message greeting — REQUIRED FORMAT:**\n- Open with "Hey ${firstName || '{firstName}'}! 👋" and introduce yourself as Tina from TTT Financial Group.\n- Reflect the onboarding state above — do NOT use a generic "want to send onboarding docs?" line. Tailor the next step to whichever gate is outstanding.\n- Keep it under 60 words. ONE clear next step, no bullet lists in the greeting itself.`
                     : '';
 
                 // CRITICAL RULE is gated to A/C (LoE outstanding) per PRD-post-loe-activation
@@ -633,7 +637,11 @@ Rules for this state:
             // That turn sits past the last cache breakpoint (messages[N-2]), so it
             // is never part of a cached prefix: it costs nothing extra and never
             // invalidates the system / tools / history caches.
-            const systemPrompt = `${BASE_SYSTEM_PROMPT}${roleContext}`;
+            // Service routing (docs/PLAN-service-routing.md): insurance messages are routed before Tina's tax answer; one
+            // that gets here anyway is sent back with a word the router reads ("insurance"). Only when routing is on for
+            // this number: with it off, the word would lead nowhere.
+            const insuranceLine = entityType === 'client' && phoneNumber && serviceRoutingOn(phoneNumber) ? INSURANCE_HANDOFF_RULE : '';
+            const systemPrompt = `${BASE_SYSTEM_PROMPT}${insuranceLine}${roleContext}`;
 
             // Date + KB excerpts ride on the final user turn as grounding for THIS
             // message. The processor persists the raw userMessage to history, not

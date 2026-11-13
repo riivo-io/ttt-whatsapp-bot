@@ -41,6 +41,8 @@ import {
     AUTO_REPLY_CLARIFICATION,
 } from '../utils/autoReply';
 import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
+import { routeClientMessage, serviceRoutingOn } from '../services/serviceRouting.service';
+import { ROUTE_IDS } from '../domain/serviceRoute';
 import { claimsDemoContact, handleClaimsDemoBatchCheck, handleClaimsDemoMessage, handleClaimsFormDone, handleClaimsDemoReminder } from '../services/claimsDemo.service';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
@@ -259,8 +261,8 @@ function parseIncoming(metaMessage: any): IncomingMessage | null {
     return null;
 }
 
-async function sendClientWelcomeMenu(to: string, firstName: string): Promise<{ body: string; wamid: string | null }> {
-    const body = `Hey ${firstName || 'there'}! 👋 Tina here, your TTT tax sidekick.\n\nWhat can I help with today?`;
+async function sendClientWelcomeMenu(to: string, firstName: string, o: { insurance?: boolean } = {}): Promise<{ body: string; wamid: string | null }> {
+    const body = `Hey ${firstName || 'there'}! 👋 Tina from TTT Financial Group here.\n\nWhat can I help with today?`;
     const wamid = await metaWhatsAppService.sendListMessage(
         to,
         body,
@@ -278,6 +280,8 @@ async function sendClientWelcomeMenu(to: string, firstName: string): Promise<{ b
             {
                 title: 'Get help',
                 rows: [
+                    // Service routing: a client with both sides (or not known) can pick insurance here.
+                    ...(o.insurance ? [{ id: ROUTE_IDS.MENU_INSURANCE, title: '🛡️ Insurance', description: 'Claims and your policies' }] : []),
                     { id: CLIENT_MENU_IDS.REFERRAL, title: '🎁 Refer a friend', description: 'Get your referral link' },
                     { id: CLIENT_MENU_IDS.OTHER, title: '💬 Something else', description: 'Ask me anything' },
                 ],
@@ -779,7 +783,9 @@ async function evaluateBadDebt(
 }
 
 async function processMessage(incoming: IncomingMessage, outboundPrefix?: string): Promise<void> {
-    const { from, text, interactiveId, document, audio, flowResponse, wamid } = incoming;
+    const { from, text, document, audio, flowResponse, wamid } = incoming;
+    // Service routing may consume a tap (Insurance / Tax / the offer) and replay the message it was waiting on.
+    let interactiveId = incoming.interactiveId;
 
     // TTTFG-4830 claims demo: a number in CLAIMS_DEMO_NUMBERS talks only to the claims flow, against the demo CRM
     // (TTT DEV). Nothing below runs for it. Every other number skips this (unset: no demo numbers at all).
@@ -1025,9 +1031,28 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         }
     }
 
-    // TTTFG-5168: a claim walkthrough in progress, or a new claim report, takes the message before every other branch:
-    // the walkthrough's order (policy, hurt or in danger, then the facts) is the point. Off unless CLAIMS_ENABLED=true.
-    if (crmEntity.type === 'client' && !document && await handleClientClaimMessage(from, effectiveText, crmEntity, session.id)) return;
+    // Service routing (docs/PLAN-service-routing.md, SERVICE_ROUTING_ENABLED): tax or insurance, before every other
+    // branch. It owns the claim walkthrough's turn too. Insurance, the Insurance/Tax question and the offer are answered
+    // there; the tax side carries on below, with a waiting message replayed when the client tapped Tax.
+    let routedInsurance = false;
+    if (crmEntity.type === 'client' && serviceRoutingOn(from)) {
+        const routed = await routeClientMessage({
+            from, entity: crmEntity, session, text: effectiveText, tapId: interactiveId, wamid,
+            file: document && documentBuffer ? { name: document.filename, mimeType: documentMime || document.mimeType, bytes: documentBuffer } : null,
+        });
+        if (routed.handled) {
+            if (document) clearPendingUpload(from);
+            return;
+        }
+        routedInsurance = routed.lines.insurance;
+        if (routed.tapConsumed) interactiveId = undefined;
+        if (routed.text !== undefined) effectiveText = routed.text;
+    } else if (crmEntity.type === 'client' && !document && await handleClientClaimMessage(from, effectiveText, crmEntity, session.id)) {
+        // TTTFG-5168: a claim walkthrough in progress, or a new claim report, takes the message before every other
+        // branch: the walkthrough's order (policy, hurt or in danger, then the facts) is the point. Off unless
+        // CLAIMS_ENABLED=true.
+        return;
+    }
 
     // Bad-debt detection (PRD-bad-debt-collection.md §6.2). Runs on the first
     // client inbound of the session, caches on the session, and fires the
@@ -1217,7 +1242,7 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             }
 
             const firstName = (crmEntity.fullname || '').trim().split(/\s+/)[0] || '';
-            const { body: menuBody, wamid: menuWamid } = await sendClientWelcomeMenu(from, firstName);
+            const { body: menuBody, wamid: menuWamid } = await sendClientWelcomeMenu(from, firstName, { insurance: routedInsurance });
             await supabaseService.saveMessage(session.id, 'assistant', menuBody);
             try {
                 await dynamicsService.logMessage(crmEntity, menuBody, 'Outgoing', from, null, menuWamid);
