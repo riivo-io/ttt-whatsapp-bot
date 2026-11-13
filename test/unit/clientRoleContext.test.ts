@@ -31,7 +31,7 @@ test('first message: greeting keeps its shape', () => {
     const greeting = greetingBlock(ctx);
     assert.ok(greeting, 'greeting block present on first message');
     assert.match(greeting, /Hey Luc! 👋/);
-    assert.match(greeting, /TTT tax sidekick/);
+    assert.match(greeting, /Tina from TTT Financial Group/);
     assert.match(greeting, /What do you need today\?/);
     // The four emoji-signposted capabilities stay. Consultant callbacks are NOT
     // advertised as a capability (proactive consultant handoffs are off — Tina

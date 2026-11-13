@@ -260,7 +260,7 @@ function parseIncoming(metaMessage: any): IncomingMessage | null {
 }
 
 async function sendClientWelcomeMenu(to: string, firstName: string): Promise<{ body: string; wamid: string | null }> {
-    const body = `Hey ${firstName || 'there'}! 👋 Tina here, your TTT tax sidekick.\n\nWhat can I help with today?`;
+    const body = `Hey ${firstName || 'there'}! 👋 Tina from TTT Financial Group here.\n\nWhat can I help with today?`;
     const wamid = await metaWhatsAppService.sendListMessage(
         to,
         body,
