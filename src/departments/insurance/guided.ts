@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit f12db18). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit c765f2e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -12,7 +12,7 @@
 // topics; the screens come in the order the form's list first reaches each topic, and a topic's questions in list order.
 import type { ClaimAnswers, AnswerRecord, ClaimForm, Condition, QuestionItem } from './contracts';
 import {
-  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, type FollowOnClaim, type FollowOnPorts, type ClientFile,
+  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, QUOTE_ITEMS, type FollowOnClaim, type FollowOnPorts, type ClientFile,
 } from './followon';
 import { emailProblem, formatProblem, isCaseNumber, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
@@ -20,7 +20,7 @@ import { DEPARTMENT } from './claim';
 import {
   counterKey, evidenceHelp, FORM_CONTROLS, FORM_COUNTERS, FORM_DRAWINGS, formControl, formHint, formNote, formPrompt, formStepper, FORM_STEPPERS, type FormControl,
 } from './formcontrols';
-import { BURST_KEY, factColumns, plumberAsked, plumberDetail, withFacts } from './formfacts';
+import { BURST_KEY, CONTRACTOR_KEY, factColumns, INSURERS_PLUMBER, plumberAsked, plumberDetail, withFacts } from './formfacts';
 import { FORM_TERMS } from './templates';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
@@ -85,7 +85,22 @@ export interface GuidedEvidence {
   count: number;
   /** Examples of what would help, where it isn't obvious what to send (formcontrols.ts evidenceHelp). */
   help?: string;
+  /**
+   * The user (13 Nov 2026): a quote the client may not have yet (followon.ts QUOTE_ITEMS). Never required to sign; the
+   * page outlines it and shows the badge, and the words say how to send it later, by WhatsApp (`text`) or, on an
+   * email claim's form, by email (`textEmail`).
+   */
+  later?: { badge: string; text: string; textEmail: string };
 }
+
+/** The user (13 Nov 2026): the words on a quote the client may send after signing (GuidedEvidence.later). */
+export const QUOTE_LATER = {
+  badge: 'Needed later',
+  text: "Add it now if you have it. If you don't have it yet, you can still sign and submit: just send it to Tina here on WhatsApp "
+    + "as soon as you get it. We'll remind you each morning until it's in.",
+  textEmail: "Add it now if you have it. If you don't have it yet, you can still sign and submit: just reply to our email with it "
+    + "attached, or send it to Tina on WhatsApp, as soon as you get it. We'll remind you each morning until it's in.",
+} as const;
 
 export interface GuidedView {
   reference: string;
@@ -412,12 +427,18 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
   const sapsRequired = !!claim.sapsRequired;
   const screens = screensFor(form, claim, earlier, sapsRequired);
   const { answers, notKnown } = knownValues(form, claim);
-  const evidence: GuidedEvidence[] = form.questionList.filter((q) => q.kind === 'evidence' && (q.onHand !== false || FORM_DRAWINGS.has(q.key))).flatMap((q) => {
+  // The user (13 Nov 2026): a quote shows too, never required, unless the insurer appoints the repairer: never on a
+  // windscreen, and on a burst geyser or pipe only when the client chose their own plumber.
+  const quote = (q: { key: string; onHand?: boolean }) => QUOTE_ITEMS.has(q.key) && q.onHand === false && facts.claimType !== 'Windscreen';
+  const ownPlumber: GuidedCondition[] = form.questionList.some((q) => q.key === CONTRACTOR_KEY) ? [{ key: CONTRACTOR_KEY, oneOf: [INSURERS_PLUMBER], not: true }] : [];
+  const evidence: GuidedEvidence[] = form.questionList.filter((q) => q.kind === 'evidence' && (q.onHand !== false || FORM_DRAWINGS.has(q.key) || quote(q))).flatMap((q) => {
     const when = conditionsFor(q, form, facts);
     const help = evidenceHelp(master.id, q.key);
+    const later = quote(q);
     return when ? [{
-      key: q.key, prompt: FORM_DRAWINGS.has(q.key) ? 'A drawing of the accident' : q.prompt, kind: evidenceKind(q), required: q.required,
-      ...(FORM_DRAWINGS.has(q.key) ? { draw: true } : {}), when, count: filesFor(q, claim.evidence), ...(help ? { help } : {}),
+      key: q.key, prompt: FORM_DRAWINGS.has(q.key) ? 'A drawing of the accident' : q.prompt, kind: evidenceKind(q), required: later ? false : q.required,
+      ...(FORM_DRAWINGS.has(q.key) ? { draw: true } : {}), when: later ? [...when, ...ownPlumber] : when, count: filesFor(q, claim.evidence), ...(help ? { help } : {}),
+      ...(later ? { later: { badge: QUOTE_LATER.badge, text: QUOTE_LATER.text, textEmail: QUOTE_LATER.textEmail } } : {}),
     }] : [];
   });
   const otherHelp = evidenceHelp(master.id, 'other');

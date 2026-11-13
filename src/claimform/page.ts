@@ -162,6 +162,9 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .center { text-align:center; padding:48px 18px; display:grid; gap:12px; justify-items:center; }
 .req { display:inline-block; margin-left:6px; padding:1px 8px; border-radius:99px; background:var(--warn-soft); color:var(--warn); font:600 11px/1.6 var(--sans); vertical-align:1px; white-space:nowrap; }
 .up.need { border-color:#E2BC85; background:#FFFBF4; }
+.up.later { border:2px solid var(--accent); background:var(--accent-soft); }
+.later-badge { display:inline-block; margin-left:6px; padding:1px 9px; border-radius:99px; background:var(--accent); color:#fff; font:600 11px/1.6 var(--sans); vertical-align:1px; white-space:nowrap; }
+.up .later-note { display:block; font-size:13px; color:var(--accent-deep); line-height:1.45; margin:4px 0 3px; }
 .up-acts { display:grid; gap:6px; justify-items:stretch; }
 .up-acts .addb { justify-content:center; }
 .addb.draw { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -736,8 +739,10 @@ const SCRIPT = String.raw`
     var key = e.key, count = key ? e.count : extra, id = 'up-' + (key || 'other'), accept = e.kind === 'video' ? 'video/*' : 'image/*,application/pdf';
     var mine = uploads.filter(function (u) { return u.key === key; }), going = mine.filter(function (u) { return u.state === 'up'; }).length;
     var need = e.required && !count && !going;
+    // The user (13 Nov 2026): a quote the client may not have yet. Never required; outlined, with a badge and how to send it later.
+    var later = e.later && !count;
     var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : count ? count + ' added' : need ? (V.sign ? 'We need this before you can sign.' : 'We need this for your claim. No problem if you don\'t have it now: you can add it later.') : 'Not added yet';
-    return '<div class="up' + (need ? ' need' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + (e.required && !count ? '<span class="req">Required</span>' : '') + '</b>' + (e.help ? '<span class="eg">' + esc(e.help) + '</span>' : '') + '<small id="st-' + q(id) + '">' + note + '</small></div>'
+    return '<div class="up' + (need ? ' need' : '') + (later ? ' later' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + (e.required && !count ? '<span class="req">Required</span>' : '') + (later ? '<span class="later-badge">' + esc(e.later.badge) + '</span>' : '') + '</b>' + (e.help ? '<span class="eg">' + esc(e.help) + '</span>' : '') + (later ? '<span class="later-note">' + esc(V.emailed ? e.later.textEmail : e.later.text) + '</span>' : '') + '<small id="st-' + q(id) + '">' + note + '</small></div>'
       + '<div class="up-acts">' + (e.draw ? '<button type="button" class="addb draw" data-draw="' + q(key) + '">Draw</button>' : '') + '<label class="addb" for="' + q(id) + '">' + (e.draw ? 'Photo' : 'Add') + '</label></div><input class="sr" type="file" id="' + q(id) + '" data-up="' + q(key) + '" accept="' + accept + '" multiple>'
       + (mine.length ? '<div class="thumbs">' + mine.map(thumbHtml).join('') + '</div>' : '') + '</div>';
   }

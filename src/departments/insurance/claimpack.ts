@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit f12db18). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit c765f2e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed (13 Nov 2026: whatever is still missing), the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -150,7 +150,7 @@ export interface PackContext {
    * The user (13 Nov 2026): what the broker needs to register the claim with the insurer (followon.ts registerNotes), in
    * place of the ready-to-register Follow-up. Absent on items made before.
    */
-  register?: { insurer: string; blank: string[]; forTtt: string[]; deadline?: string };
+  register?: { insurer: string; blank: string[]; forTtt: string[]; quotes?: string[]; deadline?: string };
   /** The same in one paragraph, for a pane that shows text. */
   text: string;
   /** TTTFG-5204 AC 8: for an insurer that takes claims by email. The signed form, the summary and the evidence are its attachments. */
@@ -198,6 +198,13 @@ export interface ClaimPackPorts {
   createAgentAction(row: AgentActionRow): Promise<unknown>;
   /** Whether the claim owner already has an open claim pack Follow-up (PACK_FOLLOW_UP) on this claim. */
   packFollowUpOpen(claimId: string): Promise<boolean>;
+  /**
+   * The user (13 Nov 2026): the claim's pack item while the broker hasn't acted on it yet (Open or Sent back), with its
+   * context, or null. Absent: a late document is never added (the host can't change an item).
+   */
+  unsentPackItem?(claimId: string): Promise<{ id: string; context: PackContext } | null>;
+  /** The item's context and title, rewritten. */
+  updatePackItem?(itemId: string, row: { title: string; context: PackContext }): Promise<void>;
 }
 
 export { PACK_FOLLOW_UP };
@@ -253,7 +260,9 @@ export type PackOutcome =
   | { score: number; built: BuiltPack & { itemId: string; superseded: string[] } }
   | { score: number; skipped: NoPack }
   /** The pack couldn't be built (a file unreadable, say); the claim owner has a Follow-up. */
-  | { score: number; failed: string };
+  | { score: number; failed: string }
+  /** The user (13 Nov 2026): documents that came after the pack were added to its item, before the broker sent it. */
+  | { score: number; added: string[]; itemId: string };
 
 /**
  * The one hook for "evidence reached this claim" and "the client signed": the score is worked out again and written
@@ -264,6 +273,10 @@ export async function updateClaimPack(ports: ClaimPackPorts, claimId: string, at
   const c = completeness(base.form, base.answers, base.evidence, { facts: base.facts, sapsRequired: base.sapsRequired });
   if (base.completenessScore !== c.score) await ports.setCompletenessScore(claimId, c.score);
   const why = noPack(base);
+  if (why === 'already-packed' && base.status === 'Pack complete') {
+    const added = await addLateDocuments(ports, base, c, at).catch(() => null);
+    if (added) return { score: c.score, ...added };
+  }
   if (why) return { score: c.score, skipped: why };
   // What is done when a step fails, for the owner's Follow-up.
   let stage: 'build' | 'item' | 'status' = 'build';
@@ -344,6 +357,45 @@ export async function buildPack(ports: ClaimPackPorts, claim: PackClaim): Promis
   return { documentId: id, fileName, fileRef, size: bytes.length, signedForm, evidence };
 }
 
+/**
+ * The user (13 Nov 2026): a document that reaches the claim after its pack was made (the quote the client sent to Tina
+ * a day later) joins the pack's item, while the broker hasn't acted on it yet, so it goes to the insurer with the rest
+ * (submit.ts packFiles reads the item's list). The summary page stays as it was made. Once the broker has approved or
+ * sent the pack, nothing here changes: Tina's Follow-up tells them to send it on (followon.ts allInDetail).
+ */
+async function addLateDocuments(ports: ClaimPackPorts, base: ScoreClaim, c: Completeness, at: string): Promise<{ added: string[]; itemId: string } | null> {
+  if (!ports.unsentPackItem || !ports.updatePackItem) return null;
+  const live = await ports.unsentPackItem(base.id);
+  if (!live) return null;
+  const claim = await ports.packClaim(base);
+  const known = new Set([...live.context.evidence.map((e) => e.fileRef), live.context.pack.fileRef, live.context.signedForm?.fileRef]);
+  const late = claim.documents.filter((d) => !known.has(d.fileRef));
+  if (!late.length) return null;
+  const byItem = new Map(formItems(claim.form, claim.answers, claim.facts, claim.sapsRequired).map((q) => [q.key, q]));
+  const evidence: PackEvidence[] = [...live.context.evidence, ...late.map((d) => {
+    const item = byItem.get(d.itemKey);
+    return { name: item ? itemName(item) : d.itemKey, fileName: d.fileName, fileRef: d.fileRef, receivedOn: d.receivedOn, inPack: false };
+  })];
+  const flags = await ports.openFlags(claim.id);
+  const notes = registerNotes(claim.form, { ...claim, facts: claim.facts ?? base.facts }, new Date(at));
+  const pack = { documentId: live.context.pack.documentId, fileName: live.context.pack.fileName, fileRef: live.context.pack.fileRef, size: 0,
+    signedForm: live.context.signedForm ?? { fileName: '', fileRef: '' }, evidence };
+  const context: PackContext = {
+    ...packContext(claim, c, flags, pack, { insurer: claim.insurer, ...notes }),
+    ...(live.context.insurerEmail ? { insurerEmail: live.context.insurerEmail } : {}),
+  };
+  // An item from before 9 Nov 2026 has its form inside the pack PDF, and no signed form of its own.
+  if (!live.context.signedForm) delete context.signedForm;
+  const title = `Claim pack ${claim.reference}: ${c.score}% complete${flags.length ? `, ${flags.length} open flag${flags.length === 1 ? '' : 's'}` : ''}`;
+  await ports.updatePackItem(live.id, { title, context });
+  const names = [...new Set(late.map((d) => evidence.find((e) => e.fileRef === d.fileRef)!.name))];
+  await ports.createAgentAction({
+    kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
+    detail: `Added to the claim pack for ${claim.reference} before it went to the insurer: ${names.join(', ')}.`,
+  });
+  return { added: names, itemId: live.id };
+}
+
 /** AC 6, 7: what the broker reads beside the pack. The flags are here, and only here: never in the pack. */
 /**
  * TTTFG-5204 AC 8: the email for an insurer that takes claims by email, or null. The address is the insurer's record's, by
@@ -369,6 +421,7 @@ export function packContext(
     ...(register ? [
       `Ready to register with ${register.insurer}: the client has signed the claim form.`,
       ...(register.blank.length ? [`Left blank on the form: ${register.blank.join(', ')}. Tina won't ask the client for it; please get it from them if the insurer needs it.`] : []),
+      ...(register.quotes?.length ? [`Still to come from the client: ${register.quotes.join(', ')}. They're reminded each morning and can send it to Tina or by email; it needn't hold up registering the claim.`] : []),
       ...(register.forTtt.length ? [`Not asked of the client, for TTT to get: ${register.forTtt.join(', ')}.`] : []),
       ...(register.deadline ? [register.deadline] : []),
     ] : []),
