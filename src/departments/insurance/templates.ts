@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 511947c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -198,6 +198,35 @@ export const FORM_LINK_EMAIL_TEMPLATE = {
   ].join('\n\n'),
 } as const;
 
+export interface FormReminderVars {
+  firstName: string;
+  /** The claim as Tina names it: "motor accident claim (CLM-000486)". */
+  claim: string;
+  /** A fresh link to the claim's form. The answers already given are kept, so the client carries on where they stopped. */
+  link: string;
+}
+
+/**
+ * The user (13 Nov 2026): on WhatsApp, the morning reminder for a claim whose form went out and hasn't been submitted
+ * (reminder.ts) is REMINDER_TEMPLATE, the template Meta has already approved, with this as its {{3}}: "… we still need
+ * you to finish your claim form here: <link>." No second template to approve.
+ */
+export const formStillNeeded = (link: string) => `you to finish your claim form here: ${link}`;
+
+/** The same reminder for a claim that came in by email, from the claim owner's mailbox (no Meta template on email). */
+export const FORM_REMINDER_EMAIL_TEMPLATE = {
+  name: 'Claim - form not finished (reminder email)',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<FormReminderVars, 'claim'>) => `Your ${v.claim}: the form isn't finished yet`,
+  render: (v: FormReminderVars) => [
+    `Good morning ${v.firstName},`,
+    `The form for your ${v.claim} isn't finished yet. Please complete it below so that we can submit your claim. What you've already filled in is kept.`,
+    v.link,
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
 /**
  * The user (9 Nov 2026): what the client hears once they submit the guided form, the same words on WhatsApp
  * (followon.ts formClosingText) and by email (FORM_DONE_EMAIL_TEMPLATE). The sign line only when the signature from the
@@ -206,7 +235,17 @@ export const FORM_LINK_EMAIL_TEMPLATE = {
 export const FORM_THANKS = 'Thank you!';
 export const FORM_CLOSING = 'A consultant from TTT will be in touch with you shortly. We will keep you updated on the status of your claim.';
 
-export interface FormDoneEmailVars { reference: string; /** A signing link went, as the signature from the form couldn't be used. */ linkSent: boolean }
+export interface FormDoneEmailVars {
+  reference: string;
+  /** A signing link went, as the signature from the form couldn't be used. */
+  linkSent: boolean;
+  /** The user (13 Nov 2026): the quote is still to come from the client (followon.ts quotesToCome). */
+  quote?: boolean;
+}
+
+/** The user (13 Nov 2026): the thank-you's line when the client still has to send the quote, on WhatsApp and by email. */
+export const QUOTE_LATER_WHATSAPP = 'When you get the quote, please send it to me here on WhatsApp.';
+export const QUOTE_LATER_EMAIL = 'When you get the quote, please reply to this email with it attached, or send it to Tina on WhatsApp.';
 
 /** The user (9 Nov 2026): the email claim's last email, once the form is submitted and signed: WhatsApp's thank-you. */
 export const FORM_DONE_EMAIL_TEMPLATE = {
@@ -215,7 +254,7 @@ export const FORM_DONE_EMAIL_TEMPLATE = {
   approved: false,
   subject: (v: Pick<FormDoneEmailVars, 'reference'>) => `Your claim is submitted (${v.reference})`,
   render: (v: FormDoneEmailVars) => [
-    [FORM_THANKS, v.linkSent ? 'Please check and sign the form using the link we emailed you.' : '', FORM_CLOSING].filter(Boolean).join(' '),
+    [FORM_THANKS, v.linkSent ? 'Please check and sign the form using the link we emailed you.' : '', FORM_CLOSING, v.quote ? QUOTE_LATER_EMAIL : ''].filter(Boolean).join(' '),
     'Kind regards,\nTTT',
   ].join('\n\n'),
 } as const;

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-turn.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-turn.ts (commit 511947c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299: what the host calls for roadside help. One message in: a known client (roadside.ts) or an unknown number
 // (roadside-unknown.ts), first message or a reply. The state the host keeps says which.

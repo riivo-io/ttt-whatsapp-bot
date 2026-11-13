@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 511947c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -9,8 +9,8 @@
 //
 // Per open claim of the client, a reminder goes out when (AC 1, 8):
 // - the claim is at Awaiting client docs or Additional info requested (REMINDED_STATUSES). Tina sets Awaiting client
-//   docs when she starts on the evidence, so a client who stopped part way through the form's questions (FNOL logged)
-//   isn't reminded. A claim stays there when the signing link goes with something still to come: Form sent is for a
+//   docs when she starts on the evidence; a client who stopped part way through the form (FNOL logged) gets the form's
+//   reminder instead (remindForm, below). A claim stays there when the signing link goes with something still to come: Form sent is for a
 //   claim with nothing left to come (followon.ts proceed), and gets no message but the link;
 // - something is still needed (missingItems): the items the client can get, by name; on a claim the client left half
 //   way, the questions still open, counted. A claim marked evidence complete (riivo_evidencecomplete) is finished as far
@@ -21,6 +21,13 @@
 // - the client hasn't said the claim isn't theirs (TTTFG-4830: OpenClaim.disputed, while the broker checks it). Such a
 //   claim gets no reminder and no broker step: the broker already has an urgent Follow-up on it;
 // - the claim wasn't reminded already today (its Created agent action), so a second run the same day sends nothing.
+//
+// The user (13 Nov 2026): a claim whose form went out and was never submitted is reminded too (FORM_STAGES, remindForm).
+// It sits at FNOL logged with nothing signed, so the rules above would pass it over and nobody would ever hear of it. It
+// gets the same clock, Sundays and broker steps, but its reminder is a fresh link to the form (the answers already saved
+// are kept, so the client carries on where they stopped): on WhatsApp the approved REMINDER_TEMPLATE with the link as
+// what's still needed (formStillNeeded), by email FORM_REMINDER_EMAIL_TEMPLATE. Saving a screen of the form counts as the
+// client's activity, so a client who is busy on it isn't reminded or reported to the broker.
 //
 // On the claim's own channel only (AC 2), as a fixed template filled with CRM values (AC 9):
 // - a WhatsApp claim: the approved WhatsApp template (REMINDER_TEMPLATE), whatever the 24-hour window, the list in one
@@ -44,12 +51,13 @@
 // state is left alone and a reply goes through "which claim?".
 import { DEPARTMENT, type Conversation, type Owner } from './claim';
 import {
-  CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
+  CLAIM_SETTINGS_DEFAULTS, list, quotesToCome, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
   type StoredClaimForm,
 } from './followon';
 import { chased } from './progress';
-import { claimWords, isOpenClaim, NO_RESUME_STATE, type ResumePorts, type ResumeState } from './resume';
-import { REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
+import { claimWords, isOpenClaim, NO_RESUME_STATE, type OpenClaim, type ResumePorts, type ResumeState } from './resume';
+import type { ClaimAnswers } from './contracts';
+import { FORM_REMINDER_EMAIL_TEMPLATE, formStillNeeded, REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 export interface ReminderSettings extends ClaimSettings {
   /** The first reminder goes on this calendar day after the client's last message (a test by hand: 0, today). */
@@ -75,6 +83,20 @@ export const REMINDER_SETTING_VARIABLES = {
 export const REMINDED_STATUSES = ['Awaiting client docs', 'Additional info requested'] as const satisfies readonly ClaimStatus[];
 const isReminded = (status: ClaimStatus) => (REMINDED_STATUSES as readonly string[]).includes(status);
 
+/** The user (13 Nov 2026): where a claim sits while its form is out and not submitted. remindForm decides from the claim. */
+export const FORM_STAGES = ['FNOL logged', 'Cover verified'] as const satisfies readonly ClaimStatus[];
+const atFormStage = (status: ClaimStatus) => (FORM_STAGES as readonly string[]).includes(status);
+
+/** The user (13 Nov 2026): where a signed claim may sit while its quote is still to come (remindQuote). */
+export const QUOTE_STAGES = [...FORM_STAGES, 'Pack complete', 'Submitted to insurer', 'Under assessment'] as const satisfies readonly ClaimStatus[];
+const atQuoteStage = (status: ClaimStatus) => (QUOTE_STAGES as readonly string[]).includes(status);
+
+/** The latest the client did anything on a claim: wrote to TTT (`heard`), or saved a screen of its form. */
+export function lastActivity(heard: string | undefined, answers: ClaimAnswers): string | undefined {
+  const saved = Object.values(answers).flatMap((a) => (a?.source === 'form' && a.at ? [a.at] : []));
+  return [heard, ...saved].filter((d): d is string => !!d).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
+}
+
 /** The broker's two Follow-ups: `alert` on day 5, `call` on the stop day. */
 export type BrokerStep = 'alert' | 'call';
 
@@ -82,7 +104,8 @@ export type BrokerStep = 'alert' | 'call';
 export interface ReminderEmailPort {
   /** The client's first name, or null when they can't be emailed (no address, Do Not Email). */
   contact(contactId: string): Promise<{ firstName: string } | null>;
-  send(contactId: string, message: { subject: string; text: string }, claim: { id: string; owner: Owner }): Promise<void>;
+  /** `template`: the wording sent, when it isn't REMINDER_EMAIL_TEMPLATE (the form reminder's). */
+  send(contactId: string, message: { subject: string; text: string; template?: { name: string; version: string } }, claim: { id: string; owner: Owner }): Promise<void>;
 }
 
 export interface ReminderPorts extends ResumePorts {
@@ -96,7 +119,7 @@ export interface ReminderPorts extends ResumePorts {
 
 export type ReminderSkip =
   | 'nothing-needed' | 'wrote-today' | 'quiet-too-long' | 'no-message-yet' | 'reminded-today' | 'no-template' | 'question-open'
-  | 'sunday' | 'disputed' | 'status' | 'no-email-sender' | 'no-email-address';
+  | 'sunday' | 'disputed' | 'status' | 'no-email-sender' | 'no-email-address' | 'no-form-link';
 /** `broker`: the claim's owner got that step's Follow-up this run. */
 export type ReminderOutcome =
   | { reference: string; sent: 'template' | 'email'; lines: string[]; broker?: BrokerStep }
@@ -129,6 +152,25 @@ export const BROKER_STEPS = {
       + `and the morning reminders have stopped. Still needed: ${v.lines.join('; ')}.`,
   },
 } as const satisfies Record<BrokerStep, { name: string; version: string; render: (v: BrokerVars) => string }>;
+
+/**
+ * The user (13 Nov 2026): the same two Follow-ups for a claim whose form isn't submitted. Same names as BROKER_STEPS, so
+ * lastBrokerStepOn finds either and a claim never gets both kinds for one step.
+ */
+export const FORM_BROKER_STEPS = {
+  alert: {
+    name: BROKER_STEPS.alert.name,
+    version: 'form-draft-1',
+    render: (v: Omit<BrokerVars, 'lines'>) => `Claim ${v.reference}: the client hasn't finished the claim form in ${v.days} days. They get a fresh `
+      + `link each morning. If it isn't submitted by day ${v.stopAfterDays}, the morning reminders stop and you get a follow-up to phone them.`,
+  },
+  call: {
+    name: BROKER_STEPS.call.name,
+    version: 'form-draft-1',
+    render: (v: Omit<BrokerVars, 'lines'>) => `Claim ${v.reference}: please phone the client. They haven't finished the claim form in ${v.days} days, `
+      + `and the morning reminders have stopped. The claim can't go to the insurer until the form is submitted and signed.`,
+  },
+} as const satisfies Record<BrokerStep, { name: string; version: string; render: (v: Omit<BrokerVars, 'lines'>) => string }>;
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -191,7 +233,21 @@ export async function remindTurn(
     const email = o.channel === 'Email';
     if (settings.emailOnly && !email) continue;
     if (o.disputed) { outcomes.push({ reference: o.reference, skipped: 'disputed' }); continue; }
-    if (!isReminded(o.status)) { outcomes.push({ reference: o.reference, skipped: 'status' }); continue; }
+    if (atFormStage(o.status)) {
+      const r = await remindForm(ports, conv, state, contactId, o, now, settings, heard);
+      if (r) {
+        outcomes.push(r.outcome);
+        if (r.sent) lastSent = r.sent;
+        continue;
+      }
+    }
+    if (!isReminded(o.status)) {
+      // The user (13 Nov 2026): a signed claim whose quote is still to come, before and after it went to the insurer.
+      const r = atQuoteStage(o.status) ? await remindQuote(ports, conv, state, contactId, o, now, settings, heard) : null;
+      outcomes.push(r?.outcome ?? { reference: o.reference, skipped: 'status' });
+      if (r?.sent && r.reminded) { lastSent = r.sent; reminded.push(r.reminded); }
+      continue;
+    }
     const when: Today = !today.ok ? today
       : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
       // Tina asked "which claim?" or "is this a new claim?" and is waiting: a reminder now would cross it.
@@ -267,6 +323,152 @@ export async function remindTurn(
     return { state: { followOn, pending: null }, outcomes, lastSent };
   }
   return { state, outcomes, lastSent };
+}
+
+/**
+ * The user (13 Nov 2026): one claim at a FORM_STAGES status. Its form is out when nothing is signed or on its way to be
+ * signed and the claim isn't complete; otherwise it was submitted (or the claim was answered on chat) and is left alone,
+ * as before. The clock is this claim's own: the client's last message or the last screen they saved on the form.
+ */
+async function remindForm(
+  ports: ReminderPorts, conv: Conversation, state: ResumeState, contactId: string, o: OpenClaim, now: Date, settings: ReminderSettings,
+  heard: string | undefined,
+): Promise<{ outcome: ReminderOutcome; sent?: string } | null> {
+  const at = now.toISOString();
+  const email = o.channel === 'Email';
+  const claim = await ports.loadClaim(o.id);
+  // Submitted (signed, or a signing link out) or complete: not a form that is out. A signed claim may still owe its quote.
+  if (claim.signatureStatus !== 'Not sent' || claim.evidenceComplete) return null;
+  const mine = lastActivity(heard, claim.answers);
+  const today = reminderToday(mine, now, settings);
+  const step = brokerStep(mine, now, settings);
+  const when: Today = !today.ok ? today
+    : !ports.guidedFormLink ? { ok: false, skipped: 'no-form-link' }
+    : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
+    : state.pending ? { ok: false, skipped: 'question-open' }
+    : !settings.template ? { ok: false, skipped: 'no-template' }
+    : today;
+  const due = step && (await brokerDue(ports, o.id, step, mine!)) ? step : undefined;
+  if (!when.ok && !due) return { outcome: { reference: o.reference, skipped: when.skipped } };
+
+  const channel = email ? 'Email' as const : 'WhatsApp' as const;
+  const base = { department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, channel, at } as const;
+  if (due) {
+    const wording = FORM_BROKER_STEPS[due];
+    await ports.createAgentAction({
+      ...base, kind: 'Follow-up',
+      detail: wording.render({ reference: claim.reference, days: quietDays(mine!, now), stopAfterDays: settings.stopAfterDays ?? REMINDER_SETTINGS_DEFAULTS.stopAfterDays }),
+      template: { name: wording.name, version: wording.version },
+    });
+  }
+  const broker = due ? { broker: due } : {};
+  if (!when.ok) return { outcome: { reference: o.reference, skipped: when.skipped, ...broker } };
+  const last = await ports.lastReminderOn(o.id);
+  if (last && sastDate(last) === sastDate(at)) return { outcome: { reference: o.reference, skipped: 'reminded-today', ...broker } };
+
+  const label = `${claimWords(claim.claimType)} claim (${claim.reference})`;
+  const row = { ...base, kind: 'Created' } as const;
+  const lines = ['the claim form'];
+  // Who it goes to first: a new link stops the one the client has, so none is made for a reminder that can't go.
+  const contact = email ? await ports.email!.contact(contactId) : undefined;
+  if (email && !contact) return { outcome: { reference: o.reference, skipped: 'no-email-address', ...broker } };
+  let link: string;
+  try {
+    link = (await ports.guidedFormLink!(claim.id)).url;
+  } catch {
+    // Tried again the next morning; the broker steps above still go.
+    return { outcome: { reference: o.reference, skipped: 'no-form-link', ...broker } };
+  }
+  if (email) {
+    const t = FORM_REMINDER_EMAIL_TEMPLATE;
+    const vars = { firstName: contact!.firstName, claim: label, link };
+    await ports.email!.send(contactId, { subject: t.subject(vars), text: t.render(vars), template: { name: t.name, version: t.version } }, { id: claim.id, owner: claim.owner });
+    // The link is the client's key to the form, so the record keeps the words without it.
+    await ports.createAgentAction({
+      ...row, detail: `Reminder email sent for claim ${claim.reference}: the claim form isn't finished, with a new link to it.`,
+      template: { name: t.name, version: t.version, text: `${t.subject(vars)}\n\n${t.render({ ...vars, link: '(the link)' })}` },
+    });
+    return { outcome: { reference: o.reference, sent: 'email', lines, ...broker } };
+  }
+  const firstName = (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there';
+  const vars = { firstName, claim: label, list: formStillNeeded(link) };
+  const text = REMINDER_TEMPLATE.render(vars);
+  await ports.send(conv.phone, { kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text, params: REMINDER_TEMPLATE.params(vars) });
+  await ports.createAgentAction({
+    ...row, detail: `Morning reminder sent on WhatsApp for claim ${claim.reference}: the claim form isn't finished, with a new link to it.`,
+    template: { name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text: REMINDER_TEMPLATE.render({ ...vars, list: formStillNeeded('(the link)') }) },
+  });
+  return { outcome: { reference: o.reference, sent: 'template', lines, ...broker }, sent: text };
+}
+
+/**
+ * The user (13 Nov 2026): one signed claim at a QUOTE_STAGES status whose quote is still to come (followon.ts
+ * quotesToCome): the client signed without it, as the form allows. The same clock, Sundays and broker steps as any
+ * reminder, from the client's last message or the last screen they saved; the same templates, with the quote as what's
+ * still needed. On WhatsApp the conversation goes back on that list (remindTurn), so the file they send is read against it.
+ */
+async function remindQuote(
+  ports: ReminderPorts, conv: Conversation, state: ResumeState, contactId: string, o: OpenClaim, now: Date, settings: ReminderSettings,
+  heard: string | undefined,
+): Promise<{ outcome: ReminderOutcome; sent?: string; reminded?: { ctx: Parameters<typeof resumeMissing>[0]; missing: ReturnType<typeof resumeMissing> } } | null> {
+  const at = now.toISOString();
+  const email = o.channel === 'Email';
+  const claim = await ports.loadClaim(o.id);
+  if (claim.signatureStatus !== 'Signed' || claim.evidenceComplete) return null;
+  const form: StoredClaimForm = claim.claimFormId
+    ? await ports.claimForm(claim.claimFormId)
+    : (await ports.activeClaimForm(claim.providerId, claim.claimType)) ?? (await ports.genericClaimForm());
+  const missing = quotesToCome(form, { answers: claim.answers, evidence: [...claim.evidence], facts: { ...claim.facts, claimType: claim.claimType } });
+  if (!missing.length) return { outcome: { reference: o.reference, skipped: 'nothing-needed' }};
+  const ctx = { claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays };
+  const mine = lastActivity(heard, claim.answers);
+  const today = reminderToday(mine, now, settings);
+  const step = brokerStep(mine, now, settings);
+  const when: Today = !today.ok ? today
+    : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
+    : state.pending ? { ok: false, skipped: 'question-open' }
+    : !settings.template ? { ok: false, skipped: 'no-template' }
+    : today;
+  const due = step && (await brokerDue(ports, o.id, step, mine!)) ? step : undefined;
+  const lines = stillNeedLines(missing, claim.answers);
+  const channel = email ? 'Email' as const : 'WhatsApp' as const;
+  const base = { department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, channel, at } as const;
+  if (due) {
+    const wording = BROKER_STEPS[due];
+    await ports.createAgentAction({
+      ...base, kind: 'Follow-up',
+      detail: wording.render({ reference: claim.reference, days: quietDays(mine!, now), lines, stopAfterDays: settings.stopAfterDays ?? REMINDER_SETTINGS_DEFAULTS.stopAfterDays }),
+      template: { name: wording.name, version: wording.version },
+    });
+  }
+  const broker = due ? { broker: due } : {};
+  const skip = (skipped: ReminderSkip) => ({ outcome: { reference: o.reference, skipped, ...broker }});
+  if (!when.ok) return skip(when.skipped);
+  const last = await ports.lastReminderOn(o.id);
+  if (last && sastDate(last) === sastDate(at)) return skip('reminded-today');
+  const label = `${claimWords(claim.claimType)} claim (${claim.reference})`;
+  const row = { ...base, kind: 'Created' } as const;
+  if (email) {
+    const contact = await ports.email!.contact(contactId);
+    if (!contact) return skip('no-email-address');
+    const vars = { firstName: contact.firstName, claim: label, lines, questionsLeft: false };
+    const message = { subject: REMINDER_EMAIL_TEMPLATE.subject(vars), text: REMINDER_EMAIL_TEMPLATE.render(vars) };
+    await ports.email!.send(contactId, message, { id: claim.id, owner: claim.owner });
+    await ports.createAgentAction({
+      ...row, detail: `Reminder email sent for claim ${claim.reference}: ${lines.join('; ')}.`,
+      template: { name: REMINDER_EMAIL_TEMPLATE.name, version: REMINDER_EMAIL_TEMPLATE.version, text: `${message.subject}\n\n${message.text}` },
+    });
+    return { outcome: { reference: o.reference, sent: 'email', lines, ...broker }};
+  }
+  const firstName = (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there';
+  const vars = { firstName, claim: label, list: list(stillNeedNames(missing, claim.answers)) };
+  const text = REMINDER_TEMPLATE.render(vars);
+  await ports.send(conv.phone, { kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text, params: REMINDER_TEMPLATE.params(vars) });
+  await ports.createAgentAction({
+    ...row, detail: `Morning reminder sent on WhatsApp for claim ${claim.reference}: ${lines.join('; ')}.`,
+    template: { name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text },
+  });
+  return { outcome: { reference: o.reference, sent: 'template', lines, ...broker }, sent: text, reminded: { ctx, missing } };
 }
 
 export interface EmailReminderPorts extends ReminderPorts {

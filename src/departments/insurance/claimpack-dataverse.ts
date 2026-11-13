@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit 511947c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack's ports (claimpack.ts ClaimPackPorts) against Dataverse, in the style of
 // signing-dataverse.ts: the host passes its Dataverse call (`Dv`) and the claim folder, so this file runs unchanged in
@@ -14,7 +14,7 @@
 //   names the claim in riivo_sourcemessageid as "riivo_claim:<id>", as every claim row does (dataverse.ts). Its due
 //   date is the SPEC-04 rule for a claim pack (src/core/urgency.ts REVIEW_RULES): Urgent, within 2 working hours.
 // - Risk flags are riivo_claimflag rows (TTTFG-4885 step 7; TTTFG-5263 raises them), open while riivo_outcome is blank.
-import { CLAIM_PACK, PACK_FOLLOW_UP, type ClaimFlag, type ClaimPackPorts, type InsurerRoute, type PackClaim, type PackFileRow, type PackItemRow, type ScoreClaim } from './claimpack';
+import { CLAIM_PACK, PACK_FOLLOW_UP, type ClaimFlag, type ClaimPackPorts, type InsurerRoute, type PackClaim, type PackContext, type PackFileRow, type PackItemRow, type ScoreClaim } from './claimpack';
 import { dataverseClaimPorts, twoWorkingHours, type Dv } from './dataverse';
 import { dataverseFillPorts, type ClaimFormFiles } from './fill-dataverse';
 import { CLAIM_STATUSES, dataverseFollowOnPorts } from './followon-dataverse';
@@ -194,6 +194,25 @@ export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPack
         + `&$filter=riivo_sourcemessageid eq 'riivo_claim:${guid(claimId)}' and riivo_kind eq ${KIND_REVIEW} and riivo_reviewreason eq ${REASON_CLAIM_PACK} and (${live})`);
       return r.value.map((a) => ({ id: a.riivo_agentactionid }));
     },
+
+    // The user (13 Nov 2026): only an item the broker hasn't acted on: Queued and Approved are on their way to the insurer.
+    async unsentPackItem(claimId) {
+      const unsent = [STATUS.Open, STATUS['Sent back']].map((s) => `riivo_status eq ${s}`).join(' or ');
+      const r = await dv<{ value: { riivo_agentactionid: string; riivo_heldbackaction: string | null }[] }>('GET',
+        'riivo_agentactions?$select=riivo_agentactionid,riivo_heldbackaction&$orderby=createdon asc,riivo_agentactionid asc&$top=1'
+        + `&$filter=riivo_sourcemessageid eq 'riivo_claim:${guid(claimId)}' and riivo_kind eq ${KIND_REVIEW} and riivo_reviewreason eq ${REASON_CLAIM_PACK} and (${unsent})`);
+      const row = r.value[0];
+      if (!row?.riivo_heldbackaction) return null;
+      try {
+        const context = JSON.parse(row.riivo_heldbackaction) as PackContext;
+        return context?.kind === 'claim-pack' ? { id: row.riivo_agentactionid, context } : null;
+      } catch {
+        return null;
+      }
+    },
+    updatePackItem: async (itemId, row) => void (await dv('PATCH', `riivo_agentactions(${guid(itemId)})`, {
+      riivo_name: row.title.slice(0, 300), riivo_heldbackaction: JSON.stringify(row.context),
+    })),
 
     supersedePackItem: async (itemId, reasonBelow100, why) => void (await dv('PATCH', `riivo_agentactions(${guid(itemId)})`, {
       riivo_status: STATUS.Done, riivo_donenote: supersededNote(reasonBelow100, why),

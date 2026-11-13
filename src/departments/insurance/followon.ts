@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 511947c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -55,7 +55,7 @@ import {
   SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
-import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, FORM_CLOSING, FORM_THANKS, itOrThem, longDate, type ClaimTemplate } from './templates';
+import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, FORM_CLOSING, FORM_THANKS, itOrThem, longDate, QUOTE_LATER_WHATSAPP, type ClaimTemplate } from './templates';
 import { factColumns, factsMissing, OPENED_FOR_FORM_KEY, plumberAsked, plumberDetail, withFacts, type FactColumns } from './formfacts';
 import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
@@ -403,7 +403,7 @@ type Out =
   | { kind: 'template'; template: ClaimTemplate; text: string }
   | { kind: 'received'; item: QuestionItem }
   /** `form` (the user, 9 Nov 2026): the client submitted the guided form, so the thank-you that ends the claim on WhatsApp. */
-  | { kind: 'closing'; form?: boolean }
+  | { kind: 'closing'; form?: boolean; /** The user (13 Nov 2026): the quote is still to come. */ quote?: boolean }
   /** `lead` (TTTFG-4830): the words in front of "Things we still need from you:" ('' for none). */
   | { kind: 'still-missing'; items: QuestionItem[]; lead: string }
   | { kind: 'save-answer'; key: string; record: AnswerRecord }
@@ -421,7 +421,7 @@ type Out =
    * `template`: the fixed wording's name and version (READY_TO_REGISTER). `withoutLink` (29 Oct 2026): the words when the
    * signing step just before it sent the client no link.
    */
-  | { kind: 'follow-up'; detail: string; template?: { name: string; version: string }; withoutLink?: string; signed?: string };
+  | { kind: 'follow-up'; detail: string; template?: { name: string; version: string }; withoutLink?: string; /** null: none when signed. */ signed?: string | null };
 
 /** `waitForMore`: ClaimSettings.waitForMore. */
 export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean; guided?: boolean }
@@ -581,6 +581,43 @@ export function forTtt(form: ClaimForm, w: Pick<Work, 'answers' | 'evidence' | '
 }
 
 /**
+ * The user (13 Nov 2026): a quote from the client's own repairer or plumber. The client seldom has it when they fill in
+ * the form, so it never stops them signing: the form shows it marked "Needed later" (guided.ts), the thank-you says to
+ * send it to Tina or by email, and the morning reminder asks for it after signing (reminder.ts). Where the insurer
+ * appoints the repairer (a windscreen, a burst geyser with the insurer's plumber) there is no quote to get.
+ */
+export const QUOTE_ITEMS: ReadonlySet<string> = new Set(['quotes', 'repairQuote']);
+
+/** The quotes the client still has to send: required on this claim, the insurer doesn't appoint, none received yet. */
+export function quotesToCome(form: ClaimForm, w: Pick<Work, 'answers' | 'evidence' | 'facts'>): QuestionItem[] {
+  return forTtt(form, w).filter((q) => QUOTE_ITEMS.has(q.key));
+}
+
+/**
+ * The user (13 Nov 2026): what the broker needs to register the claim with the insurer, on the claim pack's Review item.
+ * It was the ready-to-register Follow-up, written once on Submit and again on the signature (two identical Follow-ups,
+ * CLM-000485), next to the pack item made at the same moment. `blank`: required items the client didn't give (Tina won't
+ * ask); `forTtt`: what the form never asks the client for (repair quotes); `deadline`: the insurer's reporting date,
+ * when it's near or passed.
+ */
+export function registerNotes(
+  form: ClaimForm, claim: { insurer: string; answers: ClaimAnswers; evidence: ReceivedEvidence; facts?: ClaimFacts; sapsRequired?: boolean }, now: Date,
+  warningDays: number = CLAIM_SETTINGS_DEFAULTS.notificationWarningDays,
+): { blank: string[]; forTtt: string[]; quotes: string[]; deadline?: string } {
+  const w = { answers: claim.answers, evidence: [...claim.evidence], facts: claim.facts ?? {} };
+  const ttt = forTtt(form, w);
+  const quotes = quotesToCome(form, w);
+  const blank = missingItems(form, w.answers, w.evidence, { facts: w.facts, sapsRequired: !!claim.sapsRequired }).filter((i) => !ttt.includes(i));
+  const d = w.facts.incidentAt ? notificationDeadline(w.facts.incidentAt, form.notificationPeriodDays, now, warningDays) : null;
+  const names = (items: readonly QuestionItem[]) => [...new Set(items.map(itemName))];
+  return {
+    blank: names(blank), forTtt: names(ttt.filter((q) => !quotes.includes(q))), quotes: names(quotes),
+    ...(d ? { deadline: `${claim.insurer} asks for claims to be reported within ${form.notificationPeriodDays} days of the incident: `
+      + `${d.variant === 'upcoming' ? 'by' : 'that date was'} ${longDate(d.deadline)}.` } : {}),
+  };
+}
+
+/**
  * TTTFG-4830 (2 Nov 2026, TTT's feedback): the insurer appoints the contractor on a windscreen, and on a burst geyser
  * unless the client uses their own plumber.
  */
@@ -627,9 +664,10 @@ export function readyToRegister(
  * TTTFG-4830 (28 Oct 2026): the broker's Follow-up when the last item still to come is in. `late` (29 Oct 2026): the
  * answers that came with it (lateAnswers).
  */
-export const allInDetail = (claim: Pick<FollowOnClaim, 'reference'>, late: readonly string[] = []) =>
+export const allInDetail = (claim: Pick<FollowOnClaim, 'reference'> & { status?: ClaimStatus }, late: readonly string[] = []) =>
   `Claim ${claim.reference}: the client has now sent everything Tina listed as still to come${late.length ? `, the last of it ${list([...late])}` : ''}. `
-  + 'Please add it to the claim with the insurer.';
+  // The user (13 Nov 2026): a pack the broker hasn't sent yet takes it in (claimpack.ts addLateDocuments).
+  + (claim.status === 'Pack complete' ? "It's added to the claim pack in My Day, so it goes to the insurer with the rest." : 'Please add it to the claim with the insurer.');
 
 /** TTTFG-4830 (29 Oct 2026): the broker's Follow-up for answers still to come that came in after the end (lateAnswers). */
 export const lateDetail = (claim: Pick<FollowOnClaim, 'reference'>, late: readonly string[]) =>
@@ -1407,8 +1445,9 @@ function formEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[]): null {
   // The signing step first, so the thank-you knows whether a link went after all.
   out.push(
     { kind: 'request-signature' },
-    { kind: 'closing', form: true },
-    { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), signed: ready('Signed'), template: READY_TO_REGISTER },
+    { kind: 'closing', form: true, ...(quotesToCome(c.form, w).length ? { quote: true } : {}) },
+    // The user (13 Nov 2026): signed on the form, the pack's Review item says it all (registerNotes), so no Follow-up.
+    { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), signed: null, template: READY_TO_REGISTER },
   );
   return null;
 }
@@ -1988,8 +2027,8 @@ export function closingText(signature: SignatureStatus): string {
  */
 export { FORM_CLOSING, FORM_THANKS };
 const SIGN_WITH_LINK = 'Please check and sign the form using the link I sent.';
-export const formClosingText = (signature: SignatureStatus) =>
-  [FORM_THANKS, signature === 'Link sent' ? SIGN_WITH_LINK : '', FORM_CLOSING].filter(Boolean).join(' ');
+export const formClosingText = (signature: SignatureStatus, quote = false) =>
+  [FORM_THANKS, signature === 'Link sent' ? SIGN_WITH_LINK : '', FORM_CLOSING, quote ? QUOTE_LATER_WHATSAPP : ''].filter(Boolean).join(' ');
 
 /** "a, b and c". Names that come out the same (several missing questions of one group entry) are listed once. */
 export const list = (names: string[]) => {
@@ -2169,7 +2208,7 @@ export async function followOnTurn(
         await say(`Thanks, I've got ${itemName(o.item)}.`);
         break;
       case 'closing':
-        await say(o.form ? formClosingText(signature) : closingText(signature));
+        await say(o.form ? formClosingText(signature, o.quote) : closingText(signature));
         break;
       case 'still-missing':
         await say(stillMissingText(o.items, o.lead));
@@ -2209,10 +2248,11 @@ export async function followOnTurn(
           : `All required items are in for claim ${claim.reference} (evidence complete).`);
         break;
       case 'follow-up':
+        if (o.signed === null && signature === 'Signed') break;
         await ports.createAgentAction({
           kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId,
           // TTTFG-4830 (29 Oct 2026): the ready-to-register words when the signing step before it sent no link.
-          detail: o.signed !== undefined && signature === 'Signed' ? o.signed
+          detail: o.signed != null && signature === 'Signed' ? o.signed
             : o.withoutLink !== undefined && signature !== 'Link sent' ? o.withoutLink : o.detail, at, ...(o.template ? { template: o.template } : {}),
         });
         break;

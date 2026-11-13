@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 16408d3). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 511947c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -43,8 +43,10 @@ import type { ClaimType, Facts, WalkthroughState } from './walkthrough';
  * TTTFG-5200 recomputes the score when a late optional item arrives; Additional info requested because the insurer
  * has asked the client for more.
  */
+// The user (13 Nov 2026): Submitted to insurer and Under assessment are open too. A client who signed without their
+// quote sends it after the claim went to the insurer, and Tina must take it on that claim (reminder.ts remindQuote).
 export const OPEN_CLAIM_STATUSES = [
-  'FNOL logged', 'Cover verified', 'Form sent', 'Awaiting client docs', 'Pack complete', 'Additional info requested',
+  'FNOL logged', 'Cover verified', 'Form sent', 'Awaiting client docs', 'Pack complete', 'Submitted to insurer', 'Under assessment', 'Additional info requested',
 ] as const satisfies readonly ClaimStatus[];
 export type OpenClaimStatus = (typeof OPEN_CLAIM_STATUSES)[number];
 export const isOpenClaim = (status: ClaimStatus): status is OpenClaimStatus => (OPEN_CLAIM_STATUSES as readonly string[]).includes(status);
