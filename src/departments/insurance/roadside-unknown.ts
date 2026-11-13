@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-unknown.ts (commit c765f2e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside-unknown.ts (commit 511947c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299 AC 2: roadside help for a number that matches no client. The one thing Tina gives an unknown number
 // (decided 9 October 2026), because an insurer's assist line is not client data.
