@@ -76,6 +76,10 @@ const MORE_INSURANCE_WORDS = new RegExp([
     'insur', 'polic', 'cover', 'premium', 'excess', 'broker', 'underwrit', 'assessor', 'panel.?beat', 'quote',
     'vehicle', 'car\\b', 'cars\\b', 'bakkie', 'household', 'contents', 'buildings', 'funeral', 'life cover', 'disability',
     'gap cover', 'roadside', 'break.?down', 'broken down', 'tyre', 'tire', 'battery',
+    // Afrikaans. "eis" only as a whole word: "eish" is everyday South African English, not a claim.
+    'eis\\b', 'eise\\b', 'motor', 'kar\\b', 'karre\\b', 'gesteel', 'steel\\b', 'ongeluk', 'versekering', 'versekeraar',
+    'polis', 'inbraak', 'ingebreek', 'gekaap', 'kaping', 'skade', 'gebars', 'geiser', 'hael', 'makelaar', 'premie', 'dekking',
+    'gebreek', 'gaan staan',
 ].map((w) => `\\b${w}`).join('|'), 'i');
 
 /** Tax words: what makes a message on the insurance side worth checking again. */
@@ -84,6 +88,8 @@ const TAX_WORDS = new RegExp([
     'paye', 'uif', 'emp201', 'emp501', 'payslip', 'invoice', 'statement of account', 'consultant', 'letter of engagement',
     'loe', 'logbook', 'log book', 'travel allowance', 'deduct', 'accountant', 'accounting', 'financial statements', 'cipc',
     'annual return', 'medical aid', 'retirement annuity',
+    // Afrikaans.
+    'belasting', 'terugbetaling', 'aanslag', 'rekening',
 ].map((w) => `\\b${w}`).join('|'), 'i');
 
 export const hasInsuranceWords = (text: string) => mightBeClaim(text) || MORE_INSURANCE_WORDS.test(text);
