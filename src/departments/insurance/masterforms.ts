@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit 16408d3). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided form's master forms. One per kind of claim, each holding every unique question of every go-live
 // insurer form of that kind, grouped into the topics a client sees one screen at a time. The client only ever sees what
@@ -11,6 +11,7 @@
 // one. test/claims-guided-master.test.ts fails when a question of a go-live form is on no master form, so a new or changed
 // form can't lose a question without someone choosing its topic here.
 import type { ClaimForm } from './contracts';
+import { INSURER_EVIDENCE, INSURER_TOPICS } from './masterforms-insurers';
 
 export type MasterFormId = 'motor-accident' | 'motor-theft' | 'property' | 'generic';
 
@@ -61,7 +62,7 @@ const SAPS = 'sapsCaseNumber sapsStation sapsDateReported sapsReportedByClient s
 const VEHICLE_NOW = 'vehicleLocationName vehicleLocationAddress vehicleLocationPhone vehicleDrivable vehicleTowed towCompany towDriver towPhone towAuthorised';
 const VEHICLE_ITSELF = 'vehicleMake vehicleModel vehicleRegistration yearModel vehicleYear vehicleColour transmission vehicleOwnedByClient registeredOwner titleHolder';
 
-export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
+const BASE_MASTER_FORMS: Record<MasterFormId, MasterForm> = {
   'motor-accident': {
     id: 'motor-accident',
     title: 'Motor claim',
@@ -181,6 +182,26 @@ export const MASTER_FORMS: Record<MasterFormId, MasterForm> = {
     evidence: fields('damagePhotos quotes otherEvidence'),
   },
 };
+
+/**
+ * The base master forms plus what the claim forms of more insurers ask (masterforms-insurers.ts): their keys go on the
+ * topic of that id, and a topic the master doesn't have yet is added at the end.
+ */
+function withInsurers(base: Record<MasterFormId, MasterForm>): Record<MasterFormId, MasterForm> {
+  const out = {} as Record<MasterFormId, MasterForm>;
+  for (const id of Object.keys(base) as MasterFormId[]) {
+    const master = base[id];
+    const topics: MasterTopic[] = [...master.topics];
+    for (const add of INSURER_TOPICS[id]) {
+      const at = topics.findIndex((t) => t.id === add.id);
+      if (at >= 0) topics[at] = { ...topics[at], fields: [...topics[at].fields, ...fields(add.fields)] };
+      else topics.push(topic(add.id, add.title, add.fields));
+    }
+    out[id] = { ...master, topics, evidence: [...master.evidence, ...fields(INSURER_EVIDENCE[id])] };
+  }
+  return out;
+}
+export const MASTER_FORMS: Record<MasterFormId, MasterForm> = withInsurers(BASE_MASTER_FORMS);
 
 /** The claim types of each master form. A form with no claim type (the generic row) or another type gets the generic one. */
 const FAMILY: Record<string, MasterFormId> = {

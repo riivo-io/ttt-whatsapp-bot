@@ -1,11 +1,11 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit 16408d3). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830: answers that don't look right. A phone number with a digit too many, an email address without its "@" or
 // an ID number with a wrong check digit is almost always a typo, and on a claim form it means the insurer can't reach a
 // witness or match a driver. Tina points it out once, in plain words, and asks again; followon.ts decides what happens.
 //
 // The format comes from the question's key, which every claim form config (TTTFG-5172) names the same way: `…Phone`,
-// `…IdNumber`, `…Email`, and a contact question that asks for "phone number and email address". Only free-text
+// `…IdNumber`, `…Email`, and a contact question that asks for a "phone number" with a name, a place or an email address. Only free-text
 // questions are checked, and only what the client actually typed as a number or an address: "no", "don't know" and a
 // passport number (letters as well as digits) pass, so no question becomes impossible to answer.
 //
@@ -22,7 +22,8 @@ export function formatOf(item: Pick<QuestionItem, 'key' | 'kind' | 'answerType' 
   if (/IdNumber$/.test(key)) return 'sa-id';
   if (/Phone$/.test(key)) return 'phone';
   if (/Email$/i.test(key)) return 'email';
-  if (/phone number/i.test(item.prompt) && /email/i.test(item.prompt)) return 'contact';
+  // A question that asks for a phone number along with something else (a name, a place, an email address).
+  if (/phone number/i.test(item.prompt)) return 'contact';
   return undefined;
 }
 

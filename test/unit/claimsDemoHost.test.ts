@@ -746,14 +746,37 @@ test('TTTFG-5562: without the setting, the claim asks on WhatsApp as before', as
     assert.doesNotMatch(w.sent.join('\n'), /tap below to fill in your claim form/);
 });
 
-test('TTTFG-5562 AC 8: a client who prefers chat gets the questions on WhatsApp from the first unanswered one', async () => {
+test('12 Nov 2026: a client who asks to chat gets a new link, never the questions: claims are filled on the form only', async () => {
     const w = guidedWorld();
     const t = await openClaim(w);
     w.since();
     assert.equal(await say(w, "I'd rather just chat", tick(t, 1)), 'follow-on');
-    const after = w.store.get(PHONE)?.resume.followOn;
-    assert.notEqual(after?.phase, 'form');
-    assert.match(w.since().join('\n'), /No problem, let's do it here\./);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.deepEqual(w.since(), ["Claims are filled in on the form, so here's a new link to it. Fill out the form below to submit your claim."]);
+    assert.equal(await say(w, "the link doesn't open", tick(t, 2)), 'follow-on');
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.match(w.since().join('\n'), /here's a new link/);
+});
+
+test('12 Nov 2026 (Netasha, DEV): a client with a claim open who reports a new one gets the form after the policy, not every question first', async () => {
+    const w = guidedWorld();
+    let t = await openClaim(w);
+    w.since();
+    // "My car windscreen cracked", read as a different incident: "Is this a new claim?", then yes.
+    w.replies.push({ differentIncident: true });
+    await say(w, 'My car windscreen cracked', (t = tick(t, 60)));
+    w.replies.push({ kind: 'value', yesNo: true, valueBool: true });
+    assert.equal(await say(w, 'yes', (t = tick(t, 1))), 'new-claim');
+    assert.equal(w.store.get(PHONE)?.walk?.guided, true);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    const said = w.since().join('\n');
+    assert.match(said, /Fill out the form below to submit your claim\.$/);
+    assert.doesNotMatch(said, /Tap \*Ready\*/);
+    assert.doesNotMatch(said, /what time did it happen/i);
+    assert.doesNotMatch(said, /Here's what I have/);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
 });
 
 test('TTTFG-5562: any other message while the form is open gets a reminder of the link', async () => {

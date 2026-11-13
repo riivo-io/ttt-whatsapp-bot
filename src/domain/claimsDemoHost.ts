@@ -378,16 +378,21 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
 
     // ---- no walkthrough: which open claim is this about? ----
     const ports = deps.ports(c.requestId, sent);
-    // TTTFG-5562 (AC 8): the client has the form's link and would rather answer here: from the first unanswered question.
+    // The user (12 Nov 2026): the client has the form's link and asks to answer here, or can't open it: a new link. Claims
+    // are filled on the form only, never by chat.
     if (c.resume.followOn?.phase === 'form' && !m.file && prefersChat(m.text)) {
-        const fo = await followOnTurn(ports, conv(), c.resume.followOn, { kind: 'form-chat', wamid: m.wamid }, now);
+        const fo = await followOnTurn(ports, conv(), c.resume.followOn, { kind: 'form-again', wamid: m.wamid }, now);
         c.resume = { followOn: fo.state, pending: null };
         return done('follow-on');
     }
     const ctx = await replyContext(ports, m.contactId, c.resume, c.lastSent ?? undefined);
     const reading = await readReply(watch(deps.replyModel), ctx, m.text, m.file, m.wamid, now, { spoken });
     if (unavailable) return busy();
-    const r = await resumeTurn(ports, conv(), c.resume, reading, now, deps.scheduleBatchCheck ? { waitForMore: true } : {});
+    // The user (12 Nov 2026): with the guided form on, a client who already has a claim open gets the form for a new one
+    // too, and the link again when they come back to a claim they haven't submitted. Without it, both went on chat.
+    const r = await resumeTurn(ports, conv(), c.resume, reading, now, {
+        ...(deps.scheduleBatchCheck ? { waitForMore: true } : {}), ...(deps.guidedForm ? { guidedForm: true } : {}),
+    });
     if (r.route === 'claim') {
         c.resume = r.state;
         // TTTFG-4830: part of a batch answered: Tina waits for the rest, and lists what's open after a quiet spell. If

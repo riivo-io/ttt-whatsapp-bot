@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 0bdca86). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 16408d3). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -173,6 +173,12 @@ export const FieldMapEntrySchema = z.object({
   source: FieldSourceSchema,
   format: z.enum(FORMATS).optional(),
   tickWhen: ScalarSchema.optional(),
+  /**
+   * A radio group or drop-down whose options aren't the answer's words: each answer word (Yes or No on a yes/no
+   * question, a choice) and the option of the box it selects. A box whose options are the words themselves needs none.
+   * An answer with no entry here leaves the box for the broker. pdfField targets only.
+   */
+  options: z.record(z.string().min(1), z.string().min(1)).optional(),
   charIndex: z.number().int().min(0).optional(),
   /**
    * More AcroForm text fields, in order, that the text continues into when it does not fit the target field: the
