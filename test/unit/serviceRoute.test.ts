@@ -279,6 +279,15 @@ test('words: insurance and tax words', () => {
         assert.ok(hasTaxWords(t), t);
     }
     assert.ok(!hasTaxWords('it happened on the N1 near Paarl'));
+    // Afrikaans (the eval's "Ek wil n eis instel, my motor is gesteel" never reached the model before, 13 Nov 2026).
+    for (const t of ['Ek wil n eis instel, my motor is gesteel', 'my kar is gesteel', 'ek was in n ongeluk', 'die geiser het gebars',
+        'wat is my premie', 'my makelaar']) {
+        assert.ok(hasInsuranceWords(t), t);
+    }
+    for (const t of ['eish, when is my return due', 'Eish!', 'my steelpan', 'ek het n vraag oor my belasting']) {
+        assert.ok(!hasInsuranceWords(t), t);
+    }
+    assert.ok(hasTaxWords('wanneer kry ek my belasting terugbetaling'));
 });
 
 // ---------------------------------------------------------------------------------------------------------------
