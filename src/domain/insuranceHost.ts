@@ -106,7 +106,7 @@ export const DETAILS = {
     file: (name: string) =>
         `The client sent a file on WhatsApp (${name}). It is in the Notes on their contact. Please look at it and get back to them.`,
     offer: (text: string) =>
-        `A tax client asked on WhatsApp about insurance${text ? `: "${text}"` : ''}. They have no insurance policy with TTT and asked to be contacted.`,
+        `A tax client asked on WhatsApp about insurance${text && !/^\W*insurance\W*$/i.test(text) ? `: "${text}"` : ''}. They have no insurance policy with TTT and asked to be contacted.`,
 } as const;
 
 /** The contact an insurance message is about, and whether that is a guess (several insurance contacts on the number). */

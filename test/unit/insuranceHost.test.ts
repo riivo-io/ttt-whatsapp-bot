@@ -213,4 +213,5 @@ test('offer accepted (decision B): the Insurance and Advice team, never a broker
     assert.equal(w.followUps[0].owner, TEAM);
     assert.equal(w.followUps[0].detail, DETAILS.offer('my car was stolen'));
     assert.deepEqual(w.texts(), ["Great, I've asked our insurance team to contact you by Monday 16 November."]);
+    assert.equal(DETAILS.offer('Insurance!'), 'A tax client asked on WhatsApp about insurance. They have no insurance policy with TTT and asked to be contacted.');
 });
