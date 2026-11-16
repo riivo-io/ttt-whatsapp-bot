@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -201,13 +201,8 @@ export function claimSigningStep(ports: ClaimSigningPorts): SigningStep {
           title: `Claim form for ${claim.insurer} (${claim.reference})`, channel: claim.channel, sentTo: to,
           caller: 'claim', callerRecordId: claimId, stamps: document.stamps,
         });
-        if (await ports.signWithFormSignature!(request, onForm)) {
-          await ports.createAgentAction({
-            kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at,
-            detail: `The client signed the claim form for ${claim.reference} at the end of the guided form, so no signing link went.`,
-          }).catch(() => undefined);
-          return 'signed';
-        }
+        // The user (13 Nov 2026): no Done row for a signature. The claim's signature status and its signed form say so.
+        if (await ports.signWithFormSignature!(request, onForm)) return 'signed';
       } catch (e) {
         console.error(`Signing ${claim.reference} with the form's signature failed: ${(e as Error).message}`);
       }
@@ -351,12 +346,10 @@ export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallb
   const found = await ports.findSignedDocument(claim.id);
   if (found) await ports.updateSignedDocument?.(found.id, row);
   const { id } = found ?? await ports.createSignedDocument(row);
-  await ports.createAgentAction({
-    ...actionBase, kind: 'Created',
-    detail: `The client signed the claim form for ${claim.reference} on the signing page (link sent on ${CHANNEL_NAME[cb.audit.channel]} to ${cb.audit.sentTo}).`,
-  });
-  // The user (13 Nov 2026): no ready-to-register Follow-up here any more (TTTFG-4830 C3). The pack made right after the
-  // signature is the broker's cue to register the claim, and its Review item says what they need (followon.ts registerNotes).
+  // The user (13 Nov 2026): no Done row for the signature, however it was signed: the claim's signature status, the audit
+  // on it and the signed form say so. And no ready-to-register Follow-up here any more (TTTFG-4830 C3): the pack made
+  // right after the signature is the broker's cue to register the claim, and its Review item says what they need
+  // (followon.ts registerNotes).
   await ports.markSigned(claim.id, cb.audit.signedAt, JSON.stringify(cb.audit));
   await packAfterSigned(ports, claim, cb.audit.signedAt);
   return { filed: { fileRef, documentId: id } };

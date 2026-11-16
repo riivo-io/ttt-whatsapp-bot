@@ -736,7 +736,8 @@ test('TTTFG-5562 AC 1: with the setting on, the link goes straight after the pol
     assert.doesNotMatch(all, /all the facts that matter/);
     assert.doesNotMatch(all, /Tap \*Ready\*/);
     assert.doesNotMatch(all, /Please tell me in your own words/);
-    assert.ok(w.actions.some((a) => /Guided claim form link sent/.test(a.detail)));
+    // The user (13 Nov 2026, agent #348): no Done row for the link going out; the claim and the conversation already say so.
+    assert.ok(!w.actions.some((a) => /Guided claim form link sent/.test(a.detail)));
 });
 
 test('TTTFG-5562: without the setting, the claim asks on WhatsApp as before', async () => {

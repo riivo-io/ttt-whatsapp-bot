@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -12,15 +12,15 @@
 // topics; the screens come in the order the form's list first reaches each topic, and a topic's questions in list order.
 import type { ClaimAnswers, AnswerRecord, ClaimForm, Condition, QuestionItem } from './contracts';
 import {
-  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, QUOTE_ITEMS, type FollowOnClaim, type FollowOnPorts, type ClientFile,
+  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, type FollowOnClaim, type FollowOnPorts, type ClientFile,
 } from './followon';
-import { emailProblem, formatProblem, isCaseNumber, phoneProblem } from './formats';
+import { emailProblem, formatProblem, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
-import { DEPARTMENT } from './claim';
+import { DEPARTMENT, ownPlumberDetail } from './claim';
 import {
   counterKey, evidenceHelp, FORM_CONTROLS, FORM_COUNTERS, FORM_DRAWINGS, formControl, formHint, formNote, formPrompt, formStepper, FORM_STEPPERS, type FormControl,
 } from './formcontrols';
-import { BURST_KEY, CONTRACTOR_KEY, factColumns, INSURERS_PLUMBER, plumberAsked, plumberDetail, withFacts } from './formfacts';
+import { BURST_KEY, factColumns, ownPlumberChosen, plumberAsked, plumberDetail, withFacts } from './formfacts';
 import { FORM_TERMS } from './templates';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
@@ -85,22 +85,7 @@ export interface GuidedEvidence {
   count: number;
   /** Examples of what would help, where it isn't obvious what to send (formcontrols.ts evidenceHelp). */
   help?: string;
-  /**
-   * The user (13 Nov 2026): a quote the client may not have yet (followon.ts QUOTE_ITEMS). Never required to sign; the
-   * page outlines it and shows the badge, and the words say how to send it later, by WhatsApp (`text`) or, on an
-   * email claim's form, by email (`textEmail`).
-   */
-  later?: { badge: string; text: string; textEmail: string };
 }
-
-/** The user (13 Nov 2026): the words on a quote the client may send after signing (GuidedEvidence.later). */
-export const QUOTE_LATER = {
-  badge: 'Needed later',
-  text: "Add it now if you have it. If you don't have it yet, you can still sign and submit: just send it to Tina here on WhatsApp "
-    + "as soon as you get it. We'll remind you each morning until it's in.",
-  textEmail: "Add it now if you have it. If you don't have it yet, you can still sign and submit: just reply to our email with it "
-    + "attached, or send it to Tina on WhatsApp, as soon as you get it. We'll remind you each morning until it's in.",
-} as const;
 
 export interface GuidedView {
   reference: string;
@@ -121,11 +106,6 @@ export interface GuidedView {
   notKnown: string[];
   /** The screen to open on (AC 5): the first with an unanswered question, `screens.length` for the photos. */
   startAt: number;
-  /**
-   * The user (9 Nov 2026): the questions that can't be left blank before signing (BEFORE_SIGNING), as this form asks them.
-   * The page shows each only when its conditions hold (the case number only when the police were involved).
-   */
-  beforeSigning: string[];
 }
 
 /** What the page needs from the CRM to show what TTT holds (fill-dataverse.ts crmValues). */
@@ -206,10 +186,10 @@ const fieldType = (item: QuestionItem): GuidedField['type'] =>
   item.answerType === 'number' || item.answerType === 'date' || item.answerType === 'yes/no' || item.answerType === 'choice' ? item.answerType : 'text';
 
 /** How a question is answered: the form's own choices or yes/no as they are, anything else as formcontrols.ts says. */
-function controlFor(item: QuestionItem, baseKey: string, master: MasterForm, claimType?: string): GuidedControl {
+function controlFor(item: QuestionItem, baseKey: string, master: MasterForm): GuidedControl {
   if (item.answerType === 'yes/no') return { kind: 'yes-no' };
   if (item.answerType === 'choice') return { kind: 'pills', options: item.choices ?? [] };
-  const c = formControl(master.id, baseKey, claimType);
+  const c = formControl(master.id, baseKey);
   if (c) return c;
   return item.answerType === 'date' ? { kind: 'date' } : item.answerType === 'number' ? { kind: 'number' } : { kind: 'short' };
 }
@@ -278,10 +258,14 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     if (item.sumOf || baseKey === PHONE_OR_TABLET_KEY) continue;
     const when = conditionsFor(item, form, facts);
     if (!when) continue;
+    // A group whose every question the claim rules out (a windscreen on the generic list) has no "is there another?" either,
+    // so it leaves no empty screen.
+    if (item.group && item.key.startsWith(`${item.group}.more.`)
+      && !all.some((m) => m.group === item.group && !m.key.startsWith(`${item.group}.more.`) && conditionsFor(m, form, facts))) continue;
     if (added(item) && !sapsRequired) when.push({ key: 'saps', oneOf: [true] });
     // TTTFG-5734: a claim that must have a case never asks whether there is one (below), so the case number and station
     // can't wait on that answer, even where the insurer's list (the generic one) puts them under "reported? yes". Otherwise
-    // the box never shows while signing still needs it (BEFORE_SIGNING), and Submit holds the client on nothing they can see.
+    // the box never shows, and the client is never asked for a case number the claim needs.
     if (sapsRequired && isSaps(item.key)) {
       const free = when.filter((w) => w.key !== 'saps');
       when.splice(0, when.length, ...free);
@@ -307,7 +291,7 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     const held = variants?.find((v) => v.cond === true);
     const known = answers[item.key]?.status === 'answered';
     const pre = !known && !item.group ? earlierValue(item, master, earlier) : undefined;
-    const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey, master, claim.claimType);
+    const control: GuidedControl = hasGroup ? stepper : controlFor(item, baseKey, master);
     const hidden = isMore && countedGroup(form, item.group!);
     // A burst geyser or pipe is damage: "stolen, lost or damaged?" is answered for them (applyGuidedSave).
     if (baseKey === LOSS_KIND_KEY && burstAsked(form)) when.push({ key: BURST_KEY, oneOf: [true], not: true });
@@ -427,18 +411,14 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
   const sapsRequired = !!claim.sapsRequired;
   const screens = screensFor(form, claim, earlier, sapsRequired);
   const { answers, notKnown } = knownValues(form, claim);
-  // The user (13 Nov 2026): a quote shows too, never required, unless the insurer appoints the repairer: never on a
-  // windscreen, and on a burst geyser or pipe only when the client chose their own plumber.
-  const quote = (q: { key: string; onHand?: boolean }) => QUOTE_ITEMS.has(q.key) && q.onHand === false && facts.claimType !== 'Windscreen';
-  const ownPlumber: GuidedCondition[] = form.questionList.some((q) => q.key === CONTRACTOR_KEY) ? [{ key: CONTRACTOR_KEY, oneOf: [INSURERS_PLUMBER], not: true }] : [];
-  const evidence: GuidedEvidence[] = form.questionList.filter((q) => q.kind === 'evidence' && (q.onHand !== false || FORM_DRAWINGS.has(q.key) || quote(q))).flatMap((q) => {
+  // The user (16 Nov 2026): a quote or an invoice is never asked of the client: TTT gets those (the broker is reminded,
+  // followon.ts forTtt), so an item the client isn't asked for (`onHand: false`) has no row on the form.
+  const evidence: GuidedEvidence[] = form.questionList.filter((q) => q.kind === 'evidence' && (q.onHand !== false || FORM_DRAWINGS.has(q.key))).flatMap((q) => {
     const when = conditionsFor(q, form, facts);
     const help = evidenceHelp(master.id, q.key);
-    const later = quote(q);
     return when ? [{
-      key: q.key, prompt: FORM_DRAWINGS.has(q.key) ? 'A drawing of the accident' : q.prompt, kind: evidenceKind(q), required: later ? false : q.required,
-      ...(FORM_DRAWINGS.has(q.key) ? { draw: true } : {}), when: later ? [...when, ...ownPlumber] : when, count: filesFor(q, claim.evidence), ...(help ? { help } : {}),
-      ...(later ? { later: { badge: QUOTE_LATER.badge, text: QUOTE_LATER.text, textEmail: QUOTE_LATER.textEmail } } : {}),
+      key: q.key, prompt: FORM_DRAWINGS.has(q.key) ? 'A drawing of the accident' : q.prompt, kind: evidenceKind(q), required: q.required,
+      ...(FORM_DRAWINGS.has(q.key) ? { draw: true } : {}), when, count: filesFor(q, claim.evidence), ...(help ? { help } : {}),
     }] : [];
   });
   const otherHelp = evidenceHelp(master.id, 'other');
@@ -458,34 +438,7 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     answers,
     notKnown,
     startAt: startAt < 0 ? screens.length : startAt,
-    beforeSigning: beforeSigningOn(screens),
   };
-}
-
-/**
- * The user (9 Nov 2026): the bare minimum the broker needs to send the claim pack, so the client can't sign (or submit)
- * without it, even though any other question may be left blank: when and where it happened, what happened in their own
- * words, and the police case number when the police were involved. The user (13 Nov 2026): the police station too (it is
- * on the same slip), and a case number with no digit in it ("....") doesn't count.
- */
-export const BEFORE_SIGNING: readonly string[] = ['incidentAt', 'place', 'description', SAPS_CASE_KEY, SAPS_STATION_KEY];
-
-/** BEFORE_SIGNING as this form asks it: never a question the client has no box for. */
-const beforeSigningOn = (screens: readonly GuidedScreen[]) =>
-  BEFORE_SIGNING.filter((k) => screens.some((s) => s.fields.some((f) => f.key === k)));
-
-/** What BEFORE_SIGNING still lacks: a question left blank or "don't know" counts as missing. */
-export function missingBeforeSigning(form: ClaimForm, claim: FollowOnClaim, sapsRequired: boolean): string[] {
-  const facts = factsOf(claim);
-  const police = sapsRequired || policeOpen(claim);
-  const has = (k: string) => {
-    const a = claim.answers[k];
-    const v = a?.status === 'answered' && a.value !== null && a.value !== '' ? a.value : factFor(k, facts);
-    if (v === undefined || v === null || v === '') return false;
-    return k !== SAPS_CASE_KEY || isCaseNumber(String(v));
-  };
-  return beforeSigningOn(screensFor(asGuided(form, claim), claim, [], sapsRequired))
-    .filter((k) => (!isSaps(k) || police) && !has(k));
 }
 
 /** Whether the police case's own questions are open on the form: the claim needs them, or the client said it was reported. */
@@ -677,14 +630,14 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
   if (Object.keys(columns).length) await ports.saveFacts?.(claimId, columns);
   const at = now.toISOString();
   const by = { department: DEPARTMENT as typeof DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim' as const, id: claimId }, contactId: claim.contactId, at };
-  if (input.termsAccepted && claim.answers[TERMS_KEY]?.status !== 'answered') {
-    await ports.createAgentAction?.({
-      kind: 'Created', ...by, detail: `The client agreed to the notes that open the claim form for ${claim.reference}.`,
-      template: { name: FORM_TERMS.name, version: FORM_TERMS.version, text: FORM_TERMS.lines.join(' ') },
-    });
-  }
+  // The user (13 Nov 2026): no Done row for the client agreeing to the notes. The agreement is on the claim's answers
+  // (TERMS_KEY: answered, when, from the form), and the Action Centre has no use for a line saying so.
   if (plumberAsked(claim.answers, answers)) {
     await ports.createAgentAction?.({ kind: 'Follow-up', ...by, urgent: true, urgencyReason: 'The client needs a plumber', detail: plumberDetail(claim.reference, claim.insurer) });
+  }
+  // The user (16 Nov 2026): their own plumber is for the broker to talk through with the client.
+  if (ownPlumberChosen(claim.answers, answers)) {
+    await ports.createAgentAction?.({ kind: 'Follow-up', ...by, detail: ownPlumberDetail(claim.reference) });
   }
   // saveSaps sets riivo_sapsinvolved with a case number, so the questions that hang on the police being involved are open now.
   const after: FollowOnClaim = {
@@ -695,37 +648,26 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
 }
 
 /**
- * The client tapped Submit. A required question with no answer sends them back to it. Otherwise an optional one they left
- * empty counts as "not yet", which on WhatsApp means it's never asked, so Tina only follows up on what's still required.
- * `open` empty: ready; the host carries on with { kind: 'form-done' } on the client's own queue.
+ * The client tapped Submit. The user (16 Nov 2026): nothing on the form blocks signing, whatever is still blank, a required
+ * question or file included (it was the case number, when and where, and the required files). What the client left blank
+ * is kept the way "I don't know" is on WhatsApp: a required question the client can get (the case number: `chased`) stays on
+ * their list, and the morning reminder asks for it until it's in (reminder.ts); another required one is the broker's to
+ * confirm; an optional one is "not yet", which on WhatsApp means it's never asked. A file not sent is just as missing: the
+ * reminder lists it too. `open` is always empty: the host carries on with { kind: 'form-done' } on the client's own queue.
  */
 export async function finishGuided(ports: GuidedPorts, claimId: string, now: Date): Promise<{ open: string[] }> {
   const { claim, form, sapsRequired } = await loaded(ports, claimId);
-  const facts = factsOf(claim);
   const open = guidedOpen(form, claim, sapsRequired);
-  const items = formItems(form, claim.answers, facts, sapsRequired);
-  const required = open.filter((k) => items.find((i) => i.key === k)?.required);
-  // The user (9 Nov 2026): the client signs at the end of the form, so what the form asks them to send and is required
-  // must be in first. Only what a client can always get is required (a driver's licence, the drawing of the accident);
-  // photos of damage never are (contracts.ts `required`).
-  const files = missingOnForm(form, claim, items, facts);
-  const minimum = missingBeforeSigning(form, claim, sapsRequired).filter((k) => !required.includes(k));
-  if (required.length || minimum.length || files.length) return { open: [...required, ...minimum, ...files] };
-  const left = open.filter((k) => !required.includes(k));
-  if (left.length) {
+  if (open.length) {
+    const items = formItems(form, claim.answers, factsOf(claim), sapsRequired);
     const answers: ClaimAnswers = { ...claim.answers };
-    for (const k of left) answers[k] = { value: null, status: 'not-yet', at: now.toISOString(), source: 'form' };
+    for (const k of open) {
+      const item = items.find((i) => i.key === k);
+      answers[k] = { value: null, status: item?.required && !chased(item) ? 'broker-to-confirm' : 'not-yet', at: now.toISOString(), source: 'form' };
+    }
     await ports.saveAnswers(claimId, answers);
   }
   return { open: [] };
-}
-
-/** The required photos and documents the form asks for (its last screen) that still have no file. */
-export function missingOnForm(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers' | 'evidence'>, items: readonly QuestionItem[], facts: ClaimFacts): string[] {
-  // The drawing of the accident isn't asked on chat (TTT gets it), but the form lets the client draw it, so it counts here.
-  const drawings = form.questionList.filter((q) => FORM_DRAWINGS.has(q.key) && !items.some((i) => i.key === q.key));
-  return [...items, ...drawings].filter((i) => i.kind === 'evidence' && i.required && (i.onHand !== false || FORM_DRAWINGS.has(i.key))
-    && applies(i, claim.answers, facts) && filesFor(i, claim.evidence) === 0).map((i) => i.key);
 }
 
 /** A file from the form's last screen, through the same document pipeline as a file sent on WhatsApp (AC 7). */

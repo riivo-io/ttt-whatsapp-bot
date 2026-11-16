@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formfacts.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formfacts.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562 (2 Nov 2026): when the guided form is on, Tina sends the link right after the policy and the kind of claim, so
 // what the walkthrough used to ask (what happened, when, where, who else) is asked on the form. These are those questions.
@@ -10,7 +10,10 @@ import { isTheft, type Facts } from './walkthrough';
 
 /** Saved on a claim opened for the form: what the walkthrough asks is still to come, on the form or on chat. */
 export const OPENED_FOR_FORM_KEY = 'guidedOpenedForForm';
-export const factsMissing = (f: Facts) => [f.incidentAt, f.place, f.description, f.thirdParties, f.saps, f.injuries].some((v) => v === undefined || v === null || v === '');
+/** 16 Nov 2026 (TTT's feedback): a windscreen is asked only when, where and what happened, so that is all it can be missing. */
+export const factsMissing = (f: Facts) =>
+  (f.claimType === 'Windscreen' ? [f.incidentAt, f.place, f.description] : [f.incidentAt, f.place, f.description, f.thirdParties, f.saps, f.injuries])
+    .some((v) => v === undefined || v === null || v === '');
 
 /** What the claim's columns can hold from the form. */
 export type FactColumns = Pick<Facts, 'incidentAt' | 'place' | 'description' | 'thirdParties' | 'thirdPartyDetails' | 'saps' | 'injuries' | 'injuryDetails'>;
@@ -133,3 +136,6 @@ export const plumberAsked = (before: ClaimAnswers, after: ClaimAnswers) =>
   after[CONTRACTOR_KEY]?.value === INSURERS_PLUMBER && before[CONTRACTOR_KEY]?.value !== INSURERS_PLUMBER;
 export const plumberDetail = (reference: string, insurer: string) =>
   `Claim ${reference}: the client asked on the claim form for ${insurer} to send a plumber. Please arrange it with the insurer.`;
+/** The user (16 Nov 2026): the client has just said they will use their own plumber (claim.ts ownPlumberDetail). */
+export const ownPlumberChosen = (before: ClaimAnswers, after: ClaimAnswers) =>
+  after[CONTRACTOR_KEY]?.value === OWN_PLUMBER && before[CONTRACTOR_KEY]?.value !== OWN_PLUMBER;

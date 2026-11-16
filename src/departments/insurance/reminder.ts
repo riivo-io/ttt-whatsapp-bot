@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -51,7 +51,7 @@
 // state is left alone and a reply goes through "which claim?".
 import { DEPARTMENT, type Conversation, type Owner } from './claim';
 import {
-  CLAIM_SETTINGS_DEFAULTS, list, quotesToCome, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
+  CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
   type StoredClaimForm,
 } from './followon';
 import { chased } from './progress';
@@ -87,9 +87,12 @@ const isReminded = (status: ClaimStatus) => (REMINDED_STATUSES as readonly strin
 export const FORM_STAGES = ['FNOL logged', 'Cover verified'] as const satisfies readonly ClaimStatus[];
 const atFormStage = (status: ClaimStatus) => (FORM_STAGES as readonly string[]).includes(status);
 
-/** The user (13 Nov 2026): where a signed claim may sit while its quote is still to come (remindQuote). */
-export const QUOTE_STAGES = [...FORM_STAGES, 'Pack complete', 'Submitted to insurer', 'Under assessment'] as const satisfies readonly ClaimStatus[];
-const atQuoteStage = (status: ClaimStatus) => (QUOTE_STAGES as readonly string[]).includes(status);
+/**
+ * The user (16 Nov 2026): where a signed claim may sit while the client still owes something required (remindSigned): nothing
+ * on the form holds up signing, so a client may sign with the case number or a required file still to come.
+ */
+export const SIGNED_STAGES = [...FORM_STAGES, 'Pack complete', 'Submitted to insurer', 'Under assessment'] as const satisfies readonly ClaimStatus[];
+const atSignedStage = (status: ClaimStatus) => (SIGNED_STAGES as readonly string[]).includes(status);
 
 /** The latest the client did anything on a claim: wrote to TTT (`heard`), or saved a screen of its form. */
 export function lastActivity(heard: string | undefined, answers: ClaimAnswers): string | undefined {
@@ -242,8 +245,8 @@ export async function remindTurn(
       }
     }
     if (!isReminded(o.status)) {
-      // The user (13 Nov 2026): a signed claim whose quote is still to come, before and after it went to the insurer.
-      const r = atQuoteStage(o.status) ? await remindQuote(ports, conv, state, contactId, o, now, settings, heard) : null;
+      // The user (16 Nov 2026): a signed claim whose client still owes something required, before and after it went to the insurer.
+      const r = atSignedStage(o.status) ? await remindSigned(ports, conv, state, contactId, o, now, settings, heard) : null;
       outcomes.push(r?.outcome ?? { reference: o.reference, skipped: 'status' });
       if (r?.sent && r.reminded) { lastSent = r.sent; reminded.push(r.reminded); }
       continue;
@@ -402,12 +405,13 @@ async function remindForm(
 }
 
 /**
- * The user (13 Nov 2026): one signed claim at a QUOTE_STAGES status whose quote is still to come (followon.ts
- * quotesToCome): the client signed without it, as the form allows. The same clock, Sundays and broker steps as any
- * reminder, from the client's last message or the last screen they saved; the same templates, with the quote as what's
- * still needed. On WhatsApp the conversation goes back on that list (remindTurn), so the file they send is read against it.
+ * The user (16 Nov 2026): one signed claim at a SIGNED_STAGES status whose client still owes something required (followon.ts
+ * resumeMissing): they signed without it, as nothing on the form holds that up. The same clock, Sundays and broker steps as
+ * any reminder, from the client's last message or the last screen they saved; the same templates. A quote or an invoice is
+ * never on the list: TTT gets those. On WhatsApp the conversation goes back on that list (remindTurn), so the file they send
+ * is read against it.
  */
-async function remindQuote(
+async function remindSigned(
   ports: ReminderPorts, conv: Conversation, state: ResumeState, contactId: string, o: OpenClaim, now: Date, settings: ReminderSettings,
   heard: string | undefined,
 ): Promise<{ outcome: ReminderOutcome; sent?: string; reminded?: { ctx: Parameters<typeof resumeMissing>[0]; missing: ReturnType<typeof resumeMissing> } } | null> {
@@ -418,9 +422,9 @@ async function remindQuote(
   const form: StoredClaimForm = claim.claimFormId
     ? await ports.claimForm(claim.claimFormId)
     : (await ports.activeClaimForm(claim.providerId, claim.claimType)) ?? (await ports.genericClaimForm());
-  const missing = quotesToCome(form, { answers: claim.answers, evidence: [...claim.evidence], facts: { ...claim.facts, claimType: claim.claimType } });
-  if (!missing.length) return { outcome: { reference: o.reference, skipped: 'nothing-needed' }};
   const ctx = { claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays };
+  const missing = resumeMissing(ctx);
+  if (!missing.length) return { outcome: { reference: o.reference, skipped: 'nothing-needed' }};
   const mine = lastActivity(heard, claim.answers);
   const today = reminderToday(mine, now, settings);
   const step = brokerStep(mine, now, settings);

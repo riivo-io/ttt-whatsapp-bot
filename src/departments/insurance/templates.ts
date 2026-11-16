@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -239,13 +239,13 @@ export interface FormDoneEmailVars {
   reference: string;
   /** A signing link went, as the signature from the form couldn't be used. */
   linkSent: boolean;
-  /** The user (13 Nov 2026): the quote is still to come from the client (followon.ts quotesToCome). */
-  quote?: boolean;
+  /**
+   * The user (16 Nov 2026): what the client still has to send, as the lines of "Things we still need from you" (followon.ts
+   * stillNeedLines). Nothing on the form holds up signing, so the thank-you says what is still to come. Never a quote or an
+   * invoice: TTT gets those.
+   */
+  stillNeed?: readonly string[];
 }
-
-/** The user (13 Nov 2026): the thank-you's line when the client still has to send the quote, on WhatsApp and by email. */
-export const QUOTE_LATER_WHATSAPP = 'When you get the quote, please send it to me here on WhatsApp.';
-export const QUOTE_LATER_EMAIL = 'When you get the quote, please reply to this email with it attached, or send it to Tina on WhatsApp.';
 
 /** The user (9 Nov 2026): the email claim's last email, once the form is submitted and signed: WhatsApp's thank-you. */
 export const FORM_DONE_EMAIL_TEMPLATE = {
@@ -254,7 +254,11 @@ export const FORM_DONE_EMAIL_TEMPLATE = {
   approved: false,
   subject: (v: Pick<FormDoneEmailVars, 'reference'>) => `Your claim is submitted (${v.reference})`,
   render: (v: FormDoneEmailVars) => [
-    [FORM_THANKS, v.linkSent ? 'Please check and sign the form using the link we emailed you.' : '', FORM_CLOSING, v.quote ? QUOTE_LATER_EMAIL : ''].filter(Boolean).join(' '),
+    [FORM_THANKS, v.linkSent ? 'Please check and sign the form using the link we emailed you.' : '', FORM_CLOSING].filter(Boolean).join(' '),
+    ...(v.stillNeed?.length ? [
+      `Things we still need from you:\n${v.stillNeed.map((l) => `- ${l}`).join('\n')}`,
+      `Please reply to this email with ${itOrThem(v.stillNeed)} when you have ${itOrThem(v.stillNeed)}, or send ${itOrThem(v.stillNeed)} to Tina on WhatsApp. We will remind you each morning until ${itOrThem(v.stillNeed) === 'it' ? 'it is' : 'they are'} in.`,
+    ] : []),
     'Kind regards,\nTTT',
   ].join('\n\n'),
 } as const;
@@ -337,6 +341,43 @@ export const CLAIM_TO_INSURER_TEMPLATE = {
       `Our reference: ${v.reference}`,
     ].join('\n'),
     `Please reply with your claim number, quoting our reference ${v.reference}.`,
+  ].join('\n\n'),
+} as const;
+
+export interface InsurerChaseVars {
+  clientName: string;
+  /** The insurer's claim number. A claim without one isn't chased (chase.ts). */
+  insurerClaimNumber: string;
+  /** The client's policy number. A claim without one isn't chased (chase.ts). */
+  policyNumber: string;
+  /** The claim reference, CLM-…. */
+  reference: string;
+  /** riivo_submittedon, a date and time, or null when the claim holds none. */
+  submittedOn: string | null;
+}
+
+/**
+ * TTTFG-5269 AC 3: the chase that goes to an insurer silent on a submitted claim for 2 working days. Unattended, so the
+ * wording is fixed and TTT approves it once; CRM values only, so Claude writes none of it. It goes from the claim owner's
+ * mailbox, whose frame adds the signature, so the insurer's reply reaches the broker. Neutral: it asks where the claim
+ * stands and never says the insurer is late or in breach.
+ */
+export const INSURER_CHASE_TEMPLATE = {
+  name: 'Insurer claim chase',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<InsurerChaseVars, 'insurerClaimNumber' | 'clientName'>) => `Claim ${v.insurerClaimNumber} – ${v.clientName} – follow-up`,
+  render: (v: InsurerChaseVars) => [
+    'Good day,',
+    `We are following up on the claim below${v.submittedOn ? `, submitted on ${new Date(v.submittedOn).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' })}` : ''}. `
+      + 'We have not yet had an update from you. Please let us know where the claim stands, and whether you need anything further from us or the client.',
+    [
+      `Client: ${v.clientName}`,
+      `Policy number: ${v.policyNumber}`,
+      `Your claim number: ${v.insurerClaimNumber}`,
+      `Our reference: ${v.reference}`,
+    ].join('\n'),
+    'Thank you.',
   ].join('\n\n'),
 } as const;
 

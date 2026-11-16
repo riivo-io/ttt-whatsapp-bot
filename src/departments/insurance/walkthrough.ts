@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/walkthrough.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Tina opens a short-term insurance claim on WhatsApp (SPEC-04 "Tina's claim walkthrough", steps 1 to 6).
 // The first piece of the Insurance and Advice department package (SPEC-05). It imports nothing from the email
@@ -226,8 +226,13 @@ export function missingFor(step: Step, f: Facts, opening?: string): Fact[] {
     }
     case 'parties': {
       const m: Fact[] = [];
-      if (f.thirdParties === undefined) m.push('thirdParties');
-      else if (f.thirdParties && !f.thirdPartyDetails) m.push('thirdPartyDetails');
+      // 16 Nov 2026 (TTT's feedback): a windscreen is asked what happened, when and where (and, on the form, chip or crack and
+      // the licence disc), so never who else was involved. The police and injuries are answered no, as before (partiesNotAsked).
+      // What the client volunteers is still kept.
+      if (f.claimType !== 'Windscreen') {
+        if (f.thirdParties === undefined) m.push('thirdParties');
+        else if (f.thirdParties && !f.thirdPartyDetails) m.push('thirdPartyDetails');
+      }
       if (f.saps === undefined) m.push('saps');
       if (f.injuries === undefined) m.push('injuries');
       else if (f.injuries && !f.injuryDetails) m.push('injuryDetails');

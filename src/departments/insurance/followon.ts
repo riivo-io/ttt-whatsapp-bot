@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -44,7 +44,7 @@
 // conversation stays on it (phase `still-need`): whatever the client sends next is read against the list, and the
 // morning reminder (reminder.ts) puts a client back on it. "I don't know" to one of those items is "not yet", so it
 // stays the client's to send; the broker takes only what the client can't get.
-import { clientQuestionDetail, DEPARTMENT, FNOL_TEMPLATE, OWN_PLUMBER_NOTE, PACK_FOLLOW_UP, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
+import { clientQuestionDetail, DEPARTMENT, FNOL_TEMPLATE, OWN_PLUMBER_NOTE, ownPlumberDetail, PACK_FOLLOW_UP, toBrokerText, YES_NO, type AgentActionRow, type Choice, type Conversation, type Outbound, type Owner } from './claim';
 import type { AnswerRecord, ClaimAnswers, ClaimForm, QuestionItem, RequestClaimSignature } from './contracts';
 import type { FlagTrigger } from './flags';
 import { formatProblem } from './formats';
@@ -55,8 +55,8 @@ import {
   SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
-import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, FORM_CLOSING, FORM_THANKS, itOrThem, longDate, QUOTE_LATER_WHATSAPP, type ClaimTemplate } from './templates';
-import { factColumns, factsMissing, OPENED_FOR_FORM_KEY, plumberAsked, plumberDetail, withFacts, type FactColumns } from './formfacts';
+import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, FORM_CLOSING, FORM_THANKS, itOrThem, longDate, type ClaimTemplate } from './templates';
+import { factColumns, factsMissing, OPENED_FOR_FORM_KEY, ownPlumberChosen, plumberAsked, plumberDetail, withFacts, type FactColumns } from './formfacts';
 import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
 /**
@@ -124,6 +124,8 @@ export interface FollowOnClaim {
    * the signing step with it, even when no link went out and something is still to come.
    */
   readySent?: boolean;
+  /** The user (13 Nov 2026): the broker's "for TTT to get" Follow-up exists (FOR_TTT_TO_GET), so it is written once per claim. */
+  forTttSent?: boolean;
 }
 
 /** A file the client sent on WhatsApp. `media` comes from the WhatsApp message type. */
@@ -403,7 +405,7 @@ type Out =
   | { kind: 'template'; template: ClaimTemplate; text: string }
   | { kind: 'received'; item: QuestionItem }
   /** `form` (the user, 9 Nov 2026): the client submitted the guided form, so the thank-you that ends the claim on WhatsApp. */
-  | { kind: 'closing'; form?: boolean; /** The user (13 Nov 2026): the quote is still to come. */ quote?: boolean }
+  | { kind: 'closing'; form?: boolean }
   /** `lead` (TTTFG-4830): the words in front of "Things we still need from you:" ('' for none). */
   | { kind: 'still-missing'; items: QuestionItem[]; lead: string }
   | { kind: 'save-answer'; key: string; record: AnswerRecord }
@@ -581,37 +583,23 @@ export function forTtt(form: ClaimForm, w: Pick<Work, 'answers' | 'evidence' | '
 }
 
 /**
- * The user (13 Nov 2026): a quote from the client's own repairer or plumber. The client seldom has it when they fill in
- * the form, so it never stops them signing: the form shows it marked "Needed later" (guided.ts), the thank-you says to
- * send it to Tina or by email, and the morning reminder asks for it after signing (reminder.ts). Where the insurer
- * appoints the repairer (a windscreen, a burst geyser with the insurer's plumber) there is no quote to get.
- */
-export const QUOTE_ITEMS: ReadonlySet<string> = new Set(['quotes', 'repairQuote']);
-
-/** The quotes the client still has to send: required on this claim, the insurer doesn't appoint, none received yet. */
-export function quotesToCome(form: ClaimForm, w: Pick<Work, 'answers' | 'evidence' | 'facts'>): QuestionItem[] {
-  return forTtt(form, w).filter((q) => QUOTE_ITEMS.has(q.key));
-}
-
-/**
  * The user (13 Nov 2026): what the broker needs to register the claim with the insurer, on the claim pack's Review item.
  * It was the ready-to-register Follow-up, written once on Submit and again on the signature (two identical Follow-ups,
- * CLM-000485), next to the pack item made at the same moment. `blank`: required items the client didn't give (Tina won't
- * ask); `forTtt`: what the form never asks the client for (repair quotes); `deadline`: the insurer's reporting date,
- * when it's near or passed.
+ * CLM-000485), next to the pack item made at the same moment. `blank`: required items the client still has to send (Tina
+ * reminds them each morning); `forTtt`: what the form never asks the client for, quotes and invoices among it (the
+ * broker sorts those out with the client, 16 Nov 2026); `deadline`: the insurer's reporting date, when it's near or passed.
  */
 export function registerNotes(
   form: ClaimForm, claim: { insurer: string; answers: ClaimAnswers; evidence: ReceivedEvidence; facts?: ClaimFacts; sapsRequired?: boolean }, now: Date,
   warningDays: number = CLAIM_SETTINGS_DEFAULTS.notificationWarningDays,
-): { blank: string[]; forTtt: string[]; quotes: string[]; deadline?: string } {
+): { blank: string[]; forTtt: string[]; deadline?: string } {
   const w = { answers: claim.answers, evidence: [...claim.evidence], facts: claim.facts ?? {} };
   const ttt = forTtt(form, w);
-  const quotes = quotesToCome(form, w);
   const blank = missingItems(form, w.answers, w.evidence, { facts: w.facts, sapsRequired: !!claim.sapsRequired }).filter((i) => !ttt.includes(i));
   const d = w.facts.incidentAt ? notificationDeadline(w.facts.incidentAt, form.notificationPeriodDays, now, warningDays) : null;
   const names = (items: readonly QuestionItem[]) => [...new Set(items.map(itemName))];
   return {
-    blank: names(blank), forTtt: names(ttt.filter((q) => !quotes.includes(q))), quotes: names(quotes),
+    blank: names(blank), forTtt: names(ttt),
     ...(d ? { deadline: `${claim.insurer} asks for claims to be reported within ${form.notificationPeriodDays} days of the incident: `
       + `${d.variant === 'upcoming' ? 'by' : 'that date was'} ${longDate(d.deadline)}.` } : {}),
   };
@@ -633,6 +621,26 @@ export const EVERYTHING_IN = "Thanks, that's everything we need from you for now
 export const READY_TO_REGISTER = { name: 'Claim - ready to register', version: 'draft-1' } as const;
 
 /**
+ * The user (13 Nov 2026, CLM-000488): the client has given everything and the insurer still needs something TTT gets
+ * itself (forTtt: the proof the items were theirs), but the only word of it was a Done line in My Day, so nobody acted.
+ * This is the broker's Follow-up for it: in My Day, and emailed to them by the Follow-up email timer (followupemail.ts).
+ * Its name (riivo_subject) lets a later turn find it, so it is written once per claim (followon-dataverse.ts forTttSent).
+ */
+export const FOR_TTT_TO_GET = { name: 'Claim - for TTT to get', version: 'draft-1' } as const;
+
+/** The "for TTT to get" Follow-up's words. */
+export function forTttDetail(claim: { reference: string; insurer: string }, items: readonly QuestionItem[]): string {
+  const names = [...new Set(items.map(itemName))];
+  return `Claim ${claim.reference}: everything the client can give is in, but ${claim.insurer} still needs ${list(names)}. `
+    + `Tina doesn't ask the client for it, so it's for TTT to get. Please sort that out with the client and add it to the claim with the insurer.`;
+}
+
+/** TTTFG-4830 (29 Oct 2026): not "all required items" while the insurer still needs something TTT gets itself. */
+export const evidenceCompleteNote = (reference: string, forTttItems: readonly QuestionItem[] = []): string => forTttItems.length
+  ? `Every item Tina asks the client for is in for claim ${reference} (evidence complete). Still for TTT to get: ${list(forTttItems.map(itemName))}.`
+  : `All required items are in for claim ${reference} (evidence complete).`;
+
+/**
  * TTTFG-4830 (28 Oct 2026, TTT's feedback: "will we get notification of the claim while waiting for these items?"): the
  * broker's Follow-up once the client has answered everything, so the claim is registered with the insurer without
  * waiting for what's still to come. 29 Oct 2026: it says whether the form is signed ("Form signed: yes/no"): out to sign
@@ -641,20 +649,16 @@ export const READY_TO_REGISTER = { name: 'Claim - ready to register', version: '
 export function readyToRegister(
   claim: { reference: string; insurer: string; claimType: string }, still: readonly QuestionItem[], signature: SignatureStatus = 'Link sent',
   ttt: readonly QuestionItem[] = [],
-  /**
-   * `form` (the user, 9 Nov 2026): the client submitted the guided form, and Tina asks for nothing after it, so what it
-   * left blank is the broker's to get. `deadline`: the insurer's reporting date, when it's near or passed.
-   */
+  /** `form`: the client submitted the guided form. `deadline`: the insurer's reporting date, when it's near or passed. */
   o: { form?: boolean; deadline?: string } = {},
 ): string {
   const how = o.form ? 'filled in the claim form' : "answered Tina's questions on WhatsApp";
   const form = signature === 'Signed' ? 'the client has signed the claim form.'
     : signature === 'Link sent' ? `the client ${how} and has the claim form to sign.`
       : `the client ${how}, but no signing link went to them, so the claim form isn't signed yet.`;
-  const later = !still.length ? ''
-    : o.form ? ` Left blank on the form: ${list(still.map(itemName))}. Tina won't ask the client for it; please get it from them if the insurer needs it.`
-      : ` Still to come from the client: ${list(still.map(itemName))}. Tina keeps asking for it; it needn't hold the claim up.`;
-  const ours = ttt.length ? ` Not asked of the client, for TTT to get: ${list(ttt.map(itemName))}.` : '';
+  // The user (16 Nov 2026): what the form leaves blank never held up signing; Tina keeps reminding the client of it.
+  const later = !still.length ? '' : ` Still to come from the client: ${list(still.map(itemName))}. Tina keeps asking for it; it needn't hold the claim up.`;
+  const ours = ttt.length ? ` Not asked of the client, for TTT to get: ${list(ttt.map(itemName))}. Please sort that out with the client.` : '';
   const when = o.deadline ? ` ${o.deadline}` : '';
   return `Claim ${claim.reference} (${claim.claimType}, ${claim.insurer}) is ready to register with the insurer: ${form}${later}${ours}${when} `
     + `Please check it and register it with ${claim.insurer}.`;
@@ -1430,26 +1434,32 @@ function formDone(c: Ctx, st: FollowOnState): Step {
 }
 
 /**
- * The user (9 Nov 2026): "when the form is submitted, that's it; it's done". The form blocks signing until everything the
- * client can get is in, so Tina asks for nothing more on WhatsApp: no deadline note, no photos, no list of what's still to
- * come. The form is filled and signed (with the signature from the form, or a link when that can't be used), the client
- * gets one thank-you, and the broker's Follow-up says what the form left blank and the insurer's reporting date.
+ * The user (9 Nov 2026): "when the form is submitted, that's it; it's done". The form is filled and signed (with the
+ * signature from the form, or with a link when that can't be used), the client gets one thank-you, and the broker's
+ * Follow-up says what the form left blank and the insurer's reporting date.
+ *
+ * The user (16 Nov 2026): nothing on the form blocks signing, so the client may submit with a required item still to
+ * come (the SAPS case number, a required file). It is theirs to send: the claim goes to Awaiting client docs, Tina lists
+ * it after the thank-you, and the morning reminder keeps asking until it's in (reminder.ts). A quote or an invoice is never
+ * on that list: TTT gets those (forTtt), and the broker is told.
  */
-function formEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[]): null {
+function formEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState | null {
   workedOut(c, w, st, out);
   const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
   const ttt = forTtt(c.form, w);
   if (!missing.length) out.push({ kind: 'evidence-complete', ...(ttt.length ? { forTtt: ttt } : {}) });
+  else if (BEFORE_EVIDENCE.includes(c.claim.status)) out.push({ kind: 'status', status: 'Awaiting client docs' });
   const deadline = reportingDate(c);
   const ready = (signature: SignatureStatus) => readyToRegister(c.claim, missing, signature, ttt, { form: true, deadline });
   // The signing step first, so the thank-you knows whether a link went after all.
   out.push(
-    { kind: 'request-signature' },
-    { kind: 'closing', form: true, ...(quotesToCome(c.form, w).length ? { quote: true } : {}) },
+    { kind: 'request-signature', ...(missing.length ? { stillToCome: true } : {}) },
+    { kind: 'closing', form: true },
+    ...(missing.length ? [{ kind: 'still-missing' as const, items: missing, lead: '' }] : []),
     // The user (13 Nov 2026): signed on the form, the pack's Review item says it all (registerNotes), so no Follow-up.
     { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), signed: null, template: READY_TO_REGISTER },
   );
-  return null;
+  return missing.length ? stillNeedState(c, { ...st, signingRequested: true }, missing) : null;
 }
 
 /** The insurer's reporting date for the broker, when it's near or passed (as the deadline note said to the client). */
@@ -2027,8 +2037,8 @@ export function closingText(signature: SignatureStatus): string {
  */
 export { FORM_CLOSING, FORM_THANKS };
 const SIGN_WITH_LINK = 'Please check and sign the form using the link I sent.';
-export const formClosingText = (signature: SignatureStatus, quote = false) =>
-  [FORM_THANKS, signature === 'Link sent' ? SIGN_WITH_LINK : '', FORM_CLOSING, quote ? QUOTE_LATER_WHATSAPP : ''].filter(Boolean).join(' ');
+export const formClosingText = (signature: SignatureStatus) =>
+  [FORM_THANKS, signature === 'Link sent' ? SIGN_WITH_LINK : '', FORM_CLOSING].filter(Boolean).join(' ');
 
 /** "a, b and c". Names that come out the same (several missing questions of one group entry) are listed once. */
 export const list = (names: string[]) => {
@@ -2138,6 +2148,8 @@ export async function followOnTurn(
   const answers: ClaimAnswers = { ...claim.answers };
   let status = claim.status;
   let signature = claim.signatureStatus;
+  // The user (13 Nov 2026): the ready-to-register Follow-up went out this turn, and it names what TTT still gets.
+  let readyWritten = false;
   const action = (detail: string, template?: { name: string; version: string; text: string }) =>
     ports.createAgentAction({
       kind: 'Created', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, detail, at, template,
@@ -2164,7 +2176,7 @@ export async function followOnTurn(
           const body = guidedLinkText(link.firstName, guidedMinutes(form, claim, !!step.state?.sapsRequired));
           const text = o.lead ? `${o.lead} ${body}` : body;
           await ports.send(conv.phone, { kind: 'text', text, link: { url: link.url, label: GUIDED_LINK_LABEL } });
-          await action(`Guided claim form link sent on WhatsApp for claim ${claim.reference}.`);
+          // The user (13 Nov 2026): no Done row for the link going out: "Claim opened on WhatsApp" is the row for this moment.
           if (step.state?.linkMissing) {
             const { linkMissing: _m, ...rest } = step.state;
             step = { ...step, state: rest };
@@ -2208,7 +2220,7 @@ export async function followOnTurn(
         await say(`Thanks, I've got ${itemName(o.item)}.`);
         break;
       case 'closing':
-        await say(o.form ? formClosingText(signature, o.quote) : closingText(signature));
+        await say(o.form ? formClosingText(signature) : closingText(signature));
         break;
       case 'still-missing':
         await say(stillMissingText(o.items, o.lead));
@@ -2241,14 +2253,13 @@ export async function followOnTurn(
         await setStatus(o.status);
         break;
       case 'evidence-complete':
+        // The user (13 Nov 2026): no Done row for it. The claim's own Evidence complete flag says so, and what TTT still
+        // gets itself is in the ready-to-register notes (TTTFG-4830, 29 Oct 2026).
         await ports.setEvidenceComplete(claimId);
-        // TTTFG-4830 (29 Oct 2026): not "all required items" while the insurer still needs something TTT gets itself.
-        await action(o.forTtt?.length
-          ? `Every item Tina asks the client for is in for claim ${claim.reference} (evidence complete). Still for TTT to get: ${list(o.forTtt.map(itemName))}.`
-          : `All required items are in for claim ${claim.reference} (evidence complete).`);
         break;
       case 'follow-up':
         if (o.signed === null && signature === 'Signed') break;
+        if (o.template?.name === READY_TO_REGISTER.name) readyWritten = true;
         await ports.createAgentAction({
           kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId,
           // TTTFG-4830 (29 Oct 2026): the ready-to-register words when the signing step before it sent no link.
@@ -2258,6 +2269,16 @@ export async function followOnTurn(
         break;
     }
   }
+  // The user (13 Nov 2026): evidence complete with something still for TTT to get is the broker's to act on, so it is a
+  // Follow-up (My Day, and an email), not only a Done line. The ready-to-register Follow-up names it too, so one that went
+  // out (this turn, or when the form went out earlier) is enough. A form signed on the page writes no ready Follow-up.
+  const chase = (step.out.find((o): o is Extract<Out, { kind: 'evidence-complete' }> => o.kind === 'evidence-complete')?.forTtt ?? []);
+  if (chase.length && !readyWritten && !claim.readySent && !claim.forTttSent) {
+    await ports.createAgentAction({
+      kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at,
+      detail: forTttDetail(claim, chase), template: FOR_TTT_TO_GET,
+    });
+  }
   // TTTFG-5562: a claim opened for the form: what was asked instead of the walkthrough goes on the claim's own columns.
   if (openedForForm && ports.saveFacts) {
     const columns = factColumns(form, claim.facts, answers);
@@ -2266,6 +2287,11 @@ export async function followOnTurn(
       await ports.createAgentAction({
         kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at, urgent: true,
         urgencyReason: 'The client needs a plumber', detail: plumberDetail(claim.reference, claim.insurer),
+      });
+    }
+    if (ownPlumberChosen(claim.answers, answers)) {
+      await ports.createAgentAction({
+        kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at, detail: ownPlumberDetail(claim.reference),
       });
     }
   }
