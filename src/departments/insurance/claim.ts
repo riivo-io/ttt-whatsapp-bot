@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -224,8 +224,6 @@ const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
   windscreen: {
     description: 'What happened to the glass? For example a stone hit the windscreen on the highway.',
     place: 'Where did it happen? For example the road you were on.',
-    thirdParties: 'Was another vehicle involved, for example a truck that threw up a stone?',
-    thirdPartyDetails: 'Do you have any of their details, for example the vehicle registration or the company name?',
   },
   'motor-theft': {
     description: 'Please tell me in your own words what happened, for example where the car was parked and when you noticed it was gone.',
@@ -304,8 +302,6 @@ export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLin
       'If a truck threw something up: its *registration* or company name',
       '*Where* it happened: the road, and the nearest exit or landmark',
     ],
-    // TTT's feedback (28 Oct 2026): the insurer appoints the glass repairer, so the client needs no quote.
-    note: "You don't need to get a quote: your insurer will arrange the repair.",
   },
   'motor-theft': {
     lead: `As soon as you can, try to do these. ${EASIER}`,
@@ -578,7 +574,10 @@ export function summary(state: WalkthroughState): string {
     `*Where:* ${f.place}`,
     `*What happened:* ${f.description}`,
     ...(f.contractor ? [`*Plumber:* ${plumber[f.contractor]}`] : []),
-    theft ? `*Who did it or saw it:* ${f.thirdPartyDetails ?? 'not known'}` : `*Anyone else involved:* ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
+    // 16 Nov 2026: a windscreen isn't asked who else was involved, so it isn't read back unless the client said.
+    ...(f.claimType === 'Windscreen' && f.thirdParties === undefined ? [] : [
+      theft ? `*Who did it or saw it:* ${f.thirdPartyDetails ?? 'not known'}` : `*Anyone else involved:* ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
+    ]),
     ...(skipped.saps === false && !f.saps ? [] : [theft ? `*Reported to the police (SAPS):* ${yesNo(f.saps)}` : `*Police (SAPS) involved:* ${yesNo(f.saps)}`]),
     ...(skipped.injuries === false && !f.injuries ? [] : [`*Anyone injured:* ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`]),
   ];
@@ -795,6 +794,14 @@ export async function sendText(
 /** TTTFG-4830: on the claim's description when the client uses their own plumber; followon.ts forTtt reads it. */
 export const OWN_PLUMBER_NOTE = 'The client will use their own plumber.';
 
+/**
+ * The user (16 Nov 2026): the client will use their own plumber, so the broker is reminded to get in touch with them. The
+ * plumber's quote and invoice are TTT's to get, not the client's (the form never asks for them).
+ */
+export const ownPlumberDetail = (reference: string) =>
+  `Claim ${reference}: the client will use their own plumber. Please get in touch with the client to talk it through, `
+  + `including the plumber's quote and invoice: the form doesn't ask the client for them.`;
+
 async function openClaim(ports: ClaimPorts, conv: Conversation, state: WalkthroughState & { policyId: string }, at: string) {
   const policy = state.policies.find((p) => p.id === state.policyId)!;
   const owner = await ownerFor(ports, policy.id);
@@ -818,6 +825,13 @@ async function openClaim(ports: ClaimPorts, conv: Conversation, state: Walkthrou
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_claim', id }, contactId: state.contactId, at, urgent: true,
       urgencyReason: 'The client needs a plumber', detail: `Claim ${reference}: the client asked on WhatsApp for ${policy.insurer} to send a plumber. Please arrange it with the insurer.`,
+    });
+  }
+
+  // The user (16 Nov 2026): a client with their own plumber is for the broker to talk to.
+  if (f.contractor === 'own') {
+    await ports.createAgentAction({
+      kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_claim', id }, contactId: state.contactId, at, detail: ownPlumberDetail(reference),
     });
   }
 

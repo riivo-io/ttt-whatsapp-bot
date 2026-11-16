@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830: answers that don't look right. A phone number with a digit too many, an email address without its "@" or
 // an ID number with a wrong check digit is almost always a typo, and on a claim form it means the insurer can't reach a
@@ -84,8 +84,8 @@ export function idProblem(typed: string): string | null {
 
 /**
  * The user (13 Nov 2026): a SAPS case number has digits ("CAS 123/10/2026"). Anything without one ("....", "n/a",
- * "dont have") isn't a case number at all, so the form can't be signed with it (guided.ts missingBeforeSigning). One with
- * digits but an unusual shape is the client's to give, and goes through.
+ * "dont have") isn't a case number at all, so it is pointed out. The user (16 Nov 2026): nothing holds up signing any more, so a
+ * client who keeps it anyway is not stopped. One with digits but an unusual shape is the client's to give, and goes through.
  */
 export const isCaseNumber = (typed: string) => /\d/.test(typed);
 

@@ -164,11 +164,7 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .foot .go { background:var(--accent); color:#fff; border-color:var(--accent); flex:2.2; }
 .foot button:disabled { opacity:.45; cursor:not-allowed; }
 .center { text-align:center; padding:48px 18px; display:grid; gap:12px; justify-items:center; }
-.req { display:inline-block; margin-left:6px; padding:1px 8px; border-radius:99px; background:var(--warn-soft); color:var(--warn); font:600 11px/1.6 var(--sans); vertical-align:1px; white-space:nowrap; }
 .up.need { border-color:#E2BC85; background:#FFFBF4; }
-.up.later { border:2px solid var(--accent); background:var(--accent-soft); }
-.later-badge { display:inline-block; margin-left:6px; padding:1px 9px; border-radius:99px; background:var(--accent); color:#fff; font:600 11px/1.6 var(--sans); vertical-align:1px; white-space:nowrap; }
-.up .later-note { display:block; font-size:13px; color:var(--accent-deep); line-height:1.45; margin:4px 0 3px; }
 .up-acts { display:grid; gap:6px; justify-items:stretch; }
 .up-acts .addb { justify-content:center; }
 .addb.draw { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -645,8 +641,8 @@ const SCRIPT = String.raw`
     if (c.bare || c.kind === 'slider') return '';
     var text = c.kind === 'stepper' ? c.label : promptOf(f);
     var tappable = ['yes-no', 'pills', 'combo', 'multi', 'car', 'yes-text', 'date', 'time', 'datetime', 'year', 'stepper'].indexOf(c.kind) >= 0;
-    var need = (f.required || (V.beforeSigning || []).indexOf(f.key) >= 0) && c.kind !== 'stepper' ? '<span class="req">Required</span>' : '';
-    return tappable ? '<div class="ql">' + esc(text) + need + '</div>' : '<label class="ql" for="f-' + q(f.key) + '">' + esc(text) + need + '</label>';
+    // The user (16 Nov 2026): no "Required" pill on a field: nothing on the form holds up signing.
+    return tappable ? '<div class="ql">' + esc(text) + '</div>' : '<label class="ql" for="f-' + q(f.key) + '">' + esc(text) + '</label>';
   }
   function fieldHtml(f) {
     var note = f.note ? '<p class="qn">' + esc(f.note) + '</p>' : '';
@@ -745,10 +741,10 @@ const SCRIPT = String.raw`
     var key = e.key, count = key ? e.count : extra, id = 'up-' + (key || 'other'), accept = e.kind === 'video' ? 'video/*' : 'image/*,application/pdf';
     var mine = uploads.filter(function (u) { return u.key === key; }), going = mine.filter(function (u) { return u.state === 'up'; }).length;
     var need = e.required && !count && !going;
-    // The user (13 Nov 2026): a quote the client may not have yet. Never required; outlined, with a badge and how to send it later.
-    var later = e.later && !count;
-    var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : count ? count + ' added' : need ? (V.sign ? 'We need this before you can sign.' : 'We need this for your claim. No problem if you don\'t have it now: you can add it later.') : 'Not added yet';
-    return '<div class="up' + (need ? ' need' : '') + (later ? ' later' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + (e.required && !count ? '<span class="req">Required</span>' : '') + (later ? '<span class="later-badge">' + esc(e.later.badge) + '</span>' : '') + '</b>' + (e.help ? '<span class="eg">' + esc(e.help) + '</span>' : '') + (later ? '<span class="later-note">' + esc(V.emailed ? e.later.textEmail : e.later.text) + '</span>' : '') + '<small id="st-' + q(id) + '">' + note + '</small></div>'
+    // The user (16 Nov 2026): no "Required" pill, and no badge for a quote (TTT gets those). A file still to come is only said
+    // to be needed: it never holds up signing, and the client is reminded.
+    var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : count ? count + ' added' : need ? 'We need this for your claim. No problem if you don\'t have it now: you can add it later.' : 'Not added yet';
+    return '<div class="up' + (need ? ' need' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + '</b>' + (e.help ? '<span class="eg">' + esc(e.help) + '</span>' : '') + '<small id="st-' + q(id) + '">' + note + '</small></div>'
       + '<div class="up-acts">' + (e.draw ? '<button type="button" class="addb draw" data-draw="' + q(key) + '">Draw</button>' : '') + '<label class="addb" for="' + q(id) + '">' + (e.draw ? 'Photo' : 'Add') + '</label></div><input class="sr" type="file" id="' + q(id) + '" data-up="' + q(key) + '" accept="' + accept + '" multiple>'
       + (mine.length ? '<div class="thumbs">' + mine.map(thumbHtml).join('') + '</div>' : '') + '</div>';
   }
@@ -768,28 +764,6 @@ const SCRIPT = String.raw`
   /** The required photos and documents still to add (one being uploaded counts). */
   function missingUploads() {
     return V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && (u.state === 'up' || u.state === 'ok'); }); });
-  }
-  /**
-   * The user (9 Nov 2026): the bare minimum the broker needs (when, where, what happened, the case number when the police
-   * were involved). These can't be left blank: the client fills them in before signing or submitting.
-   */
-  var askedToSign = false;
-  function neededText() { return V.sign ? 'We need this before you can sign.' : 'We need this before you can submit.'; }
-  function neededBlank() {
-    return (V.beforeSigning || []).map(function (k) { return FIELD[k]; })
-      .filter(function (f) { return f && shows(f) && !f.hidden && !filled(value(f.key)); });
-  }
-  /** Back to the first of them, saying why. True when there was one. */
-  function goNeeded() {
-    var blank = neededBlank();
-    if (!blank.length) return false;
-    // From now on the bar over the step also points at the ones on other steps, until they're filled in.
-    askedToSign = true;
-    goFix(blank[0].key);
-    // Every one of them says so, not only the first.
-    blank.forEach(function (f) { errors[f.key] = neededText(); });
-    render();
-    return true;
   }
   var ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
   /** items: { text, jump } where jump is 'f:<question key>' or 'e:<photo or document key>': a tap goes to it. */
@@ -816,19 +790,11 @@ const SCRIPT = String.raw`
   /** The summary: the one step that may scroll. */
   function reviewHtml() {
     var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.sign ? 'you sign, and your claim is submitted' : V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
-    var needed = neededBlank(), blank = [];
-    var files = needed.map(function (f) { return { text: promptOf(f), jump: 'f:' + f.key }; })
-      .concat(missingUploads().map(function (e) { return { text: e.prompt, jump: 'e:' + e.key }; }));
-    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper' && needed.indexOf(f) < 0) blank.push({ text: promptOf(f), jump: 'f:' + f.key }); }); });
-    if (V.sign) {
-      // What a client can always get must be in before they sign (the server checks it too), with the bare minimum the
-      // broker needs; any other question left blank is one they don't know, and the broker follows it up.
-      if (files.length) html += listBox('Add these before you sign', files, '');
-      if (blank.length) html += listBox('Left blank', blank, 'You can still sign. Your broker will follow these up with you.');
-    } else {
-      var missing = files.concat(blank);
-      if (missing.length) html += listBox('Still required', missing, 'You can submit now and send these later. Your consultant will follow up.');
-    }
+    // The user (16 Nov 2026): nothing holds up signing or submitting, so what is still blank is only listed, to jump back to. The
+    // client is reminded of what is required, and the broker follows the rest up.
+    var missing = missingUploads().map(function (e) { return { text: e.prompt, jump: 'e:' + e.key }; });
+    visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper') missing.push({ text: promptOf(f), jump: 'f:' + f.key }); }); });
+    if (missing.length) html += listBox('Still to come', missing, 'You can still ' + (V.sign ? 'sign' : 'submit') + '. We will remind you about these, and your broker will follow them up with you.');
     visibleScreens().forEach(function (i) {
       var s = V.screens[i], rows = '';
       s.fields.forEach(function (f) {
@@ -1043,16 +1009,15 @@ const SCRIPT = String.raw`
   /** A slim bar over the step: no connection, or an answer the client has moved past that needs another look. */
   function drawNotice() {
     if (finished) return;
-    var needed = askedToSign ? neededBlank().map(function (f) { return f.key; }) : [];
-    var el = $('notice'), html = '', keys = Object.keys(problems).concat(needed.filter(function (k) { return !(k in problems); })).filter(function (k) { return !onPage(k); });
+    var el = $('notice'), html = '', keys = Object.keys(problems).filter(function (k) { return !onPage(k); });
     if (lost) html = '<span>Some answers could not be saved. Please go back and check them, or ask Tina for help.</span>';
     else if (failures >= 2) html = '<span>No connection. Your answers are safe here and save when you\'re back online.</span>';
-    else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]] || neededText()) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
+    else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]]) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
     el.innerHTML = html;
     el.hidden = !html;
   }
   function goFix(key) {
-    errors[key] = problems[key] || ((V.beforeSigning || []).indexOf(key) >= 0 ? neededText() : undefined);
+    errors[key] = problems[key];
     if (V.details.some(function (d) { return d.key === key; })) { here = { id: 'details', anchor: null }; editing[key] = true; return render(); }
     var at = -1;
     V.screens.forEach(function (s, i) { if (at < 0 && s.fields.some(function (f) { return f.key === key; })) at = i; });
@@ -1123,7 +1088,7 @@ const SCRIPT = String.raw`
       return move(1);
     }
     var last = page.length ? page[page.length - 1].key : null;
-    if (step.id === 'review' && V.sign) return toSign();
+    if (step.id === 'review' && V.sign) return move(1);
     if (step.id === 'sign') return submit(signature());
     if (step.id === 'review') return submit();
     if (step.id === 'photos') return toReview ? backToReview() : morePages ? advance(last) : move(1);
@@ -1140,23 +1105,7 @@ const SCRIPT = String.raw`
     errors = {};
     render();
   }
-  /** Confirm and sign: what the client must add first, or on to the signature. */
-  function toSign() {
-    if (goNeeded()) return;
-    var files = missingUploads();
-    if (files.length) return goPhotos(files.map(function (e) { return e.key; }));
-    move(1);
-  }
-  /** To the photos, with what's still needed said at the top. */
-  function goPhotos(keys) {
-    var names = V.evidence.filter(function (e) { return keys.indexOf(e.key) >= 0; }).map(function (e) { return e.prompt; });
-    here = { id: 'photos', anchor: null };
-    render();
-    errors = { photos: 'Please add ' + (names.length === 1 ? 'this' : 'these') + ' before you sign: ' + names.join('; ') };
-    $('body').insertAdjacentHTML('afterbegin', err('photos'));
-  }
   function submit(sig) {
-    if (goNeeded()) return;
     if (V.sign && !sig) { errors = { sign: 'Please sign in the box first.' }; return render(); }
     busy = true; submitting = true; $('next').disabled = true;
     $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(function (u) { return u.state === 'up'; }) ? 'Uploading your photos…' : 'Submitting…');
@@ -1173,28 +1122,6 @@ const SCRIPT = String.raw`
       $('next').innerHTML = '<span class="spin"></span>Submitting…';
       post('/submit', sig ? { signature: sig } : {}).then(function (r) {
         busy = false; submitting = false;
-        // A required photo or document that isn't in: the photos, before they can sign.
-        var files = (r.open || []).filter(function (k) { return V.evidence.some(function (e) { return e.key === k; }); });
-        if (files.length) return api('/state').then(function (s) { adopt(s); goPhotos(files); }).catch(function () { goPhotos(files); });
-        if (r.open && r.open.length) {
-          var go = function () {
-            var target = null;
-            // A hidden "is there another?" is answered by the count of people above the cards, so that's where they go.
-            var asks = function (f) {
-              return r.open.indexOf(f.key) >= 0 || (f.control.kind === 'stepper' && r.open.some(function (k) { return k.indexOf(f.control.group + '.more.') === 0; }));
-            };
-            V.screens.forEach(function (s, i) { if (target === null && s.fields.some(function (f) { return shows(f) && !f.hidden && asks(f); })) target = i; });
-            // Nothing on the page asks it: reloading would only land on the same step again, so it says so instead.
-            if (target === null) { errors = { submit: 'Something on the form still needs an answer. Please ask ' + (V.emailed ? 'your broker' : 'Tina') + ' for help.' }; return render(); }
-            here = { id: 'screen', i: target, anchor: anchorFor(target, asks) };
-            errors = {};
-            r.open.forEach(function (k) { if (FIELD[k]) errors[k] = neededText(); });
-            askedToSign = true;
-            render();
-          };
-          if (r.open.every(holdsKey)) return go();
-          return api('/state').then(function (s) { adopt(s); go(); }).catch(go);
-        }
         // Nothing more to wait for: the same page the link now shows.
         finished = true;
         $('foot').hidden = true; $('notice').hidden = true;

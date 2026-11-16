@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the follow-on's ports (followon.ts FollowOnPorts) against Dataverse, in the style of TTTFG-5168's
 // dataverse.ts: the host passes its Dataverse call (`Dv`), its WhatsApp send and where files go, so this file runs
@@ -22,7 +22,7 @@ import { ClaimFormSchema, type ClaimAnswers, type RequestClaimSignature } from '
 import { dataverseClaimPorts, type Dv } from './dataverse';
 import { raiseClaimFlags } from './flags';
 import { dataverseFlagPorts } from './flags-dataverse';
-import { READY_TO_REGISTER, type ClaimStatus, type ClientFile, type FollowOnClaim, type FollowOnPorts, type SignatureStatus, type StoredClaimForm } from './followon';
+import { FOR_TTT_TO_GET, READY_TO_REGISTER, type ClaimStatus, type ClientFile, type FollowOnClaim, type FollowOnPorts, type SignatureStatus, type StoredClaimForm } from './followon';
 import { requestClaimSignature as signatureStub } from './signature';
 import { DISCLOSURE_TEMPLATE } from './templates';
 import { CLAIM_TYPES, type ClaimType } from './walkthrough';
@@ -196,7 +196,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
       // TTTFG-4830 (29 Oct 2026): the ready-to-register Follow-up, so a later conversation knows the end ran.
       const named = (name: string) => `startswith(riivo_subject,'${encodeURIComponent(name)}')`;
       const marks = await dv<{ value: { riivo_subject: string | null }[] }>('GET', `riivo_agentactions?$select=riivo_subject&$filter=`
-        + `riivo_sourcemessageid eq 'riivo_claim:${guid(claimId)}' and (${named(DISCLOSURE_TEMPLATE.name)} or ${named(READY_TO_REGISTER.name)})`);
+        + `riivo_sourcemessageid eq 'riivo_claim:${guid(claimId)}' and (${named(DISCLOSURE_TEMPLATE.name)} or ${named(READY_TO_REGISTER.name)} or ${named(FOR_TTT_TO_GET.name)})`);
       const sent = (name: string) => marks.value.some((a) => a.riivo_subject?.startsWith(name));
       const claimType = r.riivo_claimtype == null ? 'Other' : CLAIM_TYPE_VALUES[r.riivo_claimtype] ?? 'Other';
       if (!r.riivo_Provider) throw new Error(`Claim ${r.riivo_name} has no insurer`);
@@ -227,6 +227,7 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
         contactAddress: r.riivo_Contact?.address1_composite?.trim() || null,
         evidenceComplete: r.riivo_evidencecomplete === true,
         readySent: sent(READY_TO_REGISTER.name),
+        forTttSent: sent(FOR_TTT_TO_GET.name),
       };
       return claim;
     },

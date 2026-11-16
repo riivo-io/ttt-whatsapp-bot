@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
@@ -166,7 +166,6 @@ const INSURER_CONTROLS: Record<string, FormControl> = {
   windowMarkingBy: { kind: 'short', placeholder: 'Who marked the windows' },
   driverAge: { kind: 'slider', min: 16, max: 90, step: 1, unit: 'years' },
   repairerName: { kind: 'short', placeholder: 'Repairer or glass company' },
-  repairEstimate: { kind: 'amount' },
   coveredElsewhereDetails: { kind: 'short', placeholder: 'Insurer and policy number' },
   driverConsentDetails: { kind: 'long' },
   driverDefectDetails: { kind: 'short', placeholder: 'e.g. needs glasses' },
@@ -252,7 +251,6 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   incidentAt: { kind: 'datetime', label: 'When did it happen?' },
   place: short('e.g. 12 Oak Avenue, Durbanville', { label: 'Where did it happen?' }),
   whatDamaged: multi(['Vehicle', 'House or building', 'Furniture', 'Electronics', 'Jewellery'], { other: true, label: 'What was lost or damaged?' }),
-  estimatedCost: pills(['Under R5 000', 'R5 000 to R20 000', 'R20 000 to R50 000', 'R50 000 to R100 000', 'Over R100 000'], { label: 'Roughly how much to fix or replace it?' }),
 
   // ---- the vehicle
   vehicleMake: combo(CAR_MAKES, { placeholder: 'Choose or type the make' }),
@@ -401,7 +399,6 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   itemPurchaseAmount: { kind: 'amount', bare: true, placeholder: 'What you paid for it' },
   itemAmountClaimed: { kind: 'amount', bare: true, placeholder: 'What it costs to replace today' },
   itemValue: { kind: 'amount', bare: true, placeholder: 'What it costs to replace today' },
-  estimateTotal: AMOUNT,
   contentsItem: itemControl(),
   contentsFrom: shopControl(),
   contentsAmount: { kind: 'amount', bare: true, placeholder: 'What you paid for it' },
@@ -510,17 +507,8 @@ const STEPPERS_BY_MASTER: Partial<Record<MasterFormId, Readonly<Record<string, E
     thirdParties: { kind: 'stepper', group: 'otherParties', label: 'How many other cars were involved?', none: 'No other cars', one: 'other car', many: 'other cars' },
   },
 };
-/**
- * A kind of claim's own control, where its master form's doesn't fit. A windscreen claim (the user, 9 Nov 2026) is about
- * the glass, so its damaged parts are the car's glass as taps, not the drawing of the whole car.
- */
-const GLASS = ['Windscreen', 'Rear window', 'Left side windows', 'Right side windows', 'Sunroof'];
-const BY_CLAIM_TYPE: Readonly<Record<string, Readonly<Record<string, FormControl>>>> = {
-  Windscreen: { damagedParts: multi(GLASS, { other: true, label: 'Which glass is damaged?' }) },
-};
 /** The control of a question on one kind of claim's form. */
-export const formControl = (master: MasterFormId, key: string, claimType?: string): FormControl | undefined =>
-  (claimType ? BY_CLAIM_TYPE[claimType]?.[key] : undefined) ?? BY_MASTER[master]?.[key] ?? FORM_CONTROLS[key];
+export const formControl = (master: MasterFormId, key: string): FormControl | undefined => BY_MASTER[master]?.[key] ?? FORM_CONTROLS[key];
 export const formStepper = (master: MasterFormId, key: string) => STEPPERS_BY_MASTER[master]?.[key] ?? FORM_STEPPERS[key];
 
 /**
@@ -544,28 +532,24 @@ const EVIDENCE_HELP: Record<MasterFormId, Readonly<Record<string, string>>> = {
     scenePhotos: 'For example: both cars where they stopped, the damage on each car, the other car\'s number plate, skid marks or broken glass on the road.',
     damagePhotos: 'For example: each damaged part close up, and the whole car from each corner.',
     thirdPartyPhotos: 'For example: the other car\'s number plate, its damage, and the other driver\'s licence.',
-    quotes: 'A written quote from each panelbeater, with their name and the price.',
-    repairQuote: 'A written quote from a panelbeater, with their name and the price.',
     other: 'For example: dashcam or CCTV footage, photos of the road, traffic lights or road signs, or messages with the other driver.',
   },
   'motor-theft': {
     vehiclePhotos: 'For example: any recent photo that shows the car clearly, its number plate, mag wheels or stickers. Photos from your phone\'s gallery or an advert are fine.',
     damagePhotos: 'For example: each damaged part close up, broken glass or a forced lock.',
     damageReport: 'A report from the panelbeater saying what is damaged.',
-    repairQuote: 'A written quote from a panelbeater, with their name and the price.',
     settlementLetter: 'Your bank or finance company can send it to you. A PDF from their app or email is fine.',
     other: 'For example: CCTV footage, photos of broken glass where the car was parked, the spare keys, or a report from the tracking company.',
   },
   property: {
     damagePhotos: 'For example: the damaged item close up and from further away, a burst geyser, water marks on the ceiling, broken glass or a forced lock.',
-    quotes: 'A written quote from a shop or repairer, with their name and the price.',
     damageReport: 'For example: a letter or job card from the repairer or plumber saying what broke and why.',
     proofOfOwnership: 'For example: a till slip, the purchase on a bank statement, the box with the serial number, or a photo with the item in it.',
     other: 'For example: CCTV footage, photos of broken glass, a forced lock or window, or a report from your alarm or armed response company.',
   },
   generic: {
     damagePhotos: 'For example: the damage close up and from further away, broken glass, or a forced lock.',
-    quotes: 'A written quote from a repairer or shop, with their name and the price.',
+    licenceDisc: 'The licence disc is the sticker on your windscreen with your number plate and expiry date. Take the photo up close so the writing can be read.',
     other: 'For example: CCTV footage, photos of broken glass or damage, or a letter about what happened.',
   },
 };

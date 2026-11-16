@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided form's master forms. One per kind of claim, each holding every unique question of every go-live
 // insurer form of that kind, grouped into the topics a client sees one screen at a time. The client only ever sees what
@@ -53,7 +53,7 @@ const topic = (id: string, title: string, spec: string, prefill = ''): MasterTop
 /** TTTFG-5562: what Tina's walkthrough asks on chat. It opens every form, and the burst pipe only shows on a home claim. */
 const HAPPENED = topic('happened', 'What happened', 'incidentAt place description thirdParties injuries injuryDetails saps burstPipe contractor');
 const POLICY = topic('policy', 'Your policy', 'ownPolicy policyholderRelationship policyDocsReceived preferredContact');
-const WHERE = topic('where', 'Where it happened', 'incidentSuburb incidentProvince incidentCountry dateDiscovered');
+const WHERE = topic('where', 'Where it happened', 'incidentSuburb incidentProvince incidentCountry');
 const FINANCE_KEYS = 'vehicleFinanced financeInstitution financeAgreementType financeAccountNumber financeSettlementAmount registrationDocsAvailable';
 const FINANCE = topic('finance', 'Finance on the vehicle', FINANCE_KEYS);
 const AUTHORITIES = 'authoritiesAtScene authAmbulance authFireBrigade authTrafficPolice authParamedics authPolice authSecurity authTowTruck';
@@ -139,7 +139,7 @@ const BASE_MASTER_FORMS: Record<MasterFormId, MasterForm> = {
       topic('items', 'What was lost or damaged',
         'itemDescription itemAge itemFrom itemDateAcquired itemPurchaseAmount itemAmountClaimed|itemValue '
         + 'contentsItem contentsFrom contentsAmount contentsAge contentsProof specifiedItem specifiedFrom specifiedAmount specifiedAge specifiedProof '
-        + 'unspecifiedItem unspecifiedFrom unspecifiedAmount unspecifiedAge unspecifiedProof estimateTotal'),
+        + 'unspecifiedItem unspecifiedFrom unspecifiedAmount unspecifiedAge unspecifiedProof'),
       topic('phone', 'The stolen phone or tablet', 'phoneOrTablet itemBlacklisted blacklistReference'),
       topic('entry', 'How they got in',
         'forcedEntry entryPoint exitPoint enteredMainHouse enteredOtherAreas enteredOutbuilding enteredGarage enteredCottage enteredDomesticQuarters enteredShed enteredGarden '
@@ -172,14 +172,16 @@ const BASE_MASTER_FORMS: Record<MasterFormId, MasterForm> = {
     topics: [
       topic('what', 'What happened', 'description incidentCause burstPipe contractor'),
       topic('when', 'When and where', 'incidentAt place'),
-      topic('lost', 'What was lost or damaged', 'whatDamaged estimatedCost'),
+      // 16 Nov 2026 (TTT's feedback): a windscreen claim is asked this, and nothing else beyond what happened, when and where.
+      topic('glass', 'The glass', 'chipOrCrack'),
+      topic('lost', 'What was lost or damaged', 'whatDamaged'),
       topic('others', 'Who else was involved', 'thirdParties otherFirstName otherSurname otherPhone otherRegistration otherInsurer'),
       topic('hurt', 'Anyone hurt', 'injuries injuredName injuredDetails'),
       topic('witnesses', 'Witnesses', 'hadWitnesses witnessFirstName witnessSurname witnessPhone'),
       topic('police', 'The police', 'saps sapsCaseNumber sapsStation'),
       topic('claim', 'Anything else', 'additionalInfo'),
     ],
-    evidence: fields('damagePhotos quotes otherEvidence'),
+    evidence: fields('damagePhotos licenceDisc quotes otherEvidence'),
   },
 };
 

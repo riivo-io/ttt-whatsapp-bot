@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 511947c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit eb984a1). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed (13 Nov 2026: whatever is still missing), the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -150,7 +150,7 @@ export interface PackContext {
    * The user (13 Nov 2026): what the broker needs to register the claim with the insurer (followon.ts registerNotes), in
    * place of the ready-to-register Follow-up. Absent on items made before.
    */
-  register?: { insurer: string; blank: string[]; forTtt: string[]; quotes?: string[]; deadline?: string };
+  register?: { insurer: string; blank: string[]; forTtt: string[]; deadline?: string };
   /** The same in one paragraph, for a pane that shows text. */
   text: string;
   /** TTTFG-5204 AC 8: for an insurer that takes claims by email. The signed form, the summary and the evidence are its attachments. */
@@ -420,9 +420,10 @@ export function packContext(
   const text = [
     ...(register ? [
       `Ready to register with ${register.insurer}: the client has signed the claim form.`,
-      ...(register.blank.length ? [`Left blank on the form: ${register.blank.join(', ')}. Tina won't ask the client for it; please get it from them if the insurer needs it.`] : []),
-      ...(register.quotes?.length ? [`Still to come from the client: ${register.quotes.join(', ')}. They're reminded each morning and can send it to Tina or by email; it needn't hold up registering the claim.`] : []),
-      ...(register.forTtt.length ? [`Not asked of the client, for TTT to get: ${register.forTtt.join(', ')}.`] : []),
+      // The user (16 Nov 2026): nothing on the form holds up signing, so what the client left blank is theirs to send, and Tina
+      // reminds them each morning. Quotes and invoices are never asked of them: the broker sorts those out with the client.
+      ...(register.blank.length ? [`Still to come from the client: ${register.blank.join(', ')}. Tina reminds them each morning; it needn't hold up registering the claim.`] : []),
+      ...(register.forTtt.length ? [`Not asked of the client, for TTT to get: ${register.forTtt.join(', ')}. Please sort that out with the client.`] : []),
       ...(register.deadline ? [register.deadline] : []),
     ] : []),
     `Completeness ${c.score}%.`,
