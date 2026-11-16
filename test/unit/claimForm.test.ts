@@ -221,6 +221,26 @@ test('no intro page: the page opens on what TTT holds, and never waits for a sav
     assert.doesNotThrow(() => new Function(script));
 });
 
+test('scrolling or pulling at the page never takes the client back a step, or back to the signing page after Submit (13 Nov 2026)', () => {
+    const html = claimFormPage();
+    const script = /<script>([\s\S]*)<\/script>/.exec(html)![1];
+    // A phone's address bar slides as the client scrolls or pulls, and the window changes height: that is not a new screen.
+    // Only a new width (the phone turned) re-measures and redraws the step.
+    const resize = /window\.addEventListener\('resize', function \(\) \{\s*if \(window\.innerWidth === widthNow\) return;[\s\S]*?\}\);/.exec(script);
+    assert.ok(resize, 'the redraw on resize waits for a new width');
+    assert.match(resize![0], /!finished/);
+    assert.doesNotMatch(script, /window\.addEventListener\('resize', function \(\) \{ if \(V && !typing\(\)/);
+    // Once "Claim submitted" is up, nothing draws a step over it: the step the client was on was "sign" (or "review").
+    assert.match(script, /function render\(\) \{\s*if \(finished\) return;/);
+    assert.match(script, /function next\(\) \{\s*if \(finished \|\|/);
+    assert.match(script, /function back\(\) \{\s*if \(finished \|\|/);
+    assert.match(script, /function drawNotice\(\) \{\s*if \(finished\) return;/);
+    assert.ok(script.indexOf('finished = true;') > 0 && script.indexOf('finished = true;') < script.indexOf('<h1>Claim submitted</h1>'), 'the page is finished before the done screen is written');
+    // A pull at the top or bottom must not reach the browser, which reloads the page (pull-to-refresh).
+    assert.match(html, /html, body \{ overscroll-behavior:none; \}/);
+    assert.match(html, /\.body \{[^}]*overscroll-behavior-y:contain;/);
+});
+
 test('the link goes as a WhatsApp button, in its own message after what comes before it, and the log never keeps the address', () => {
     const link = { url: 'https://tina.example/claim-form/abc', label: 'Open claim form' };
     const out = joinParts([{ text: 'The duty of disclosure.' }, { text: 'Tap below.', link }, { text: 'Later text.' }], 700);

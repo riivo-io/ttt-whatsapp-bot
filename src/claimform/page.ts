@@ -31,6 +31,10 @@ const STYLE = `
 html, body { height:100%; }
 /* The user (9 Nov 2026): a quick second tap on Continue or Back zoomed the page right in. Taps stay taps; pinching still zooms. */
 html { touch-action:manipulation; -webkit-text-size-adjust:100%; }
+/* The user (13 Nov 2026): scrolling past the top or bottom took the client back a step, or "refreshed" a claim they had just
+   signed and submitted. The page itself never scrolls (only .body does), so a pull at its edge must not reach the browser:
+   pull-to-refresh reloads the page, and the bounce moves the address bar, which the page took for a new screen size. */
+html, body { overscroll-behavior:none; }
 button, a, label, input, textarea, .body { touch-action:manipulation; }
 body { margin:0; background:var(--panel); color:var(--text); font:15.5px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
 button { font:inherit; color:inherit; }
@@ -44,7 +48,7 @@ button { font:inherit; color:inherit; }
 .prog { height:4px; background:var(--line); border-radius:99px; overflow:hidden; }
 .prog i { display:block; height:100%; width:0; background:var(--accent); border-radius:99px; transition:width .3s; }
 .sec { font-size:18px; line-height:1.2; font-weight:500; letter-spacing:-.02em; color:var(--ink); }
-.body { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:16px 18px; display:grid; gap:16px; align-content:start; }
+.body { flex:1; min-height:0; overflow-y:auto; overscroll-behavior-y:contain; -webkit-overflow-scrolling:touch; padding:16px 18px; display:grid; gap:16px; align-content:start; }
 h1 { margin:0; font-size:21px; line-height:1.2; font-weight:500; letter-spacing:-.025em; color:var(--ink); text-wrap:balance; }
 .help { margin:0; font-size:13.5px; color:var(--muted); line-height:1.45; }
 .q { display:grid; gap:7px; min-width:0; }
@@ -249,6 +253,8 @@ const SCRIPT = String.raw`
   var THIS_YEAR = new Date().getFullYear();
 
   var V = null, A = {}, NK = {}, here = null, draft = {}, errors = {}, checked = {}, busy = false, extra = 0;
+  /** The claim is in. "Claim submitted" is the last thing on the page: nothing draws a step over it again. */
+  var finished = false;
   /** Which "Other" box is open, which "Earlier" date picker is open. */
   var otherOpen = {}, earlierOpen = {}, FIELD = {}, PRE = {}, editing = {}, lastTenth = {};
   /** What's on the page now, whether more of this step comes after it, and the height a step has to fit in. */
@@ -878,6 +884,7 @@ const SCRIPT = String.raw`
 
   var drawnAt = null;
   function render() {
+    if (finished) return;
     var body = $('body');
     var steps = route(), i = stepIndex(steps), step = steps[i], anchor = here && here.anchor;
     here = { id: step.id, i: step.i, anchor: anchor };
@@ -1035,6 +1042,7 @@ const SCRIPT = String.raw`
   function onPage(key) { return page.some(function (b) { return (b.fields || []).some(function (f) { return f.key === key; }); }) || (here && here.id === 'details' && V.details.some(function (d) { return d.key === key; })); }
   /** A slim bar over the step: no connection, or an answer the client has moved past that needs another look. */
   function drawNotice() {
+    if (finished) return;
     var needed = askedToSign ? neededBlank().map(function (f) { return f.key; }) : [];
     var el = $('notice'), html = '', keys = Object.keys(problems).concat(needed.filter(function (k) { return !(k in problems); })).filter(function (k) { return !onPage(k); });
     if (lost) html = '<span>Some answers could not be saved. Please go back and check them, or ask Tina for help.</span>';
@@ -1062,7 +1070,7 @@ const SCRIPT = String.raw`
     render();
   }
   function back() {
-    if (busy || rec || hearing) return;
+    if (finished || busy || rec || hearing) return;
     if ((here.id === 'screen' || here.id === 'photos') && here.anchor) {
       var earlier = pageStarts(here, here.anchor);
       if (earlier.length) { here.anchor = earlier.pop(); errors = {}; return render(); }
@@ -1103,7 +1111,7 @@ const SCRIPT = String.raw`
     return hit;
   }
   function next() {
-    if (busy || rec || hearing) return;
+    if (finished || busy || rec || hearing) return;
     var step = here;
     if (step.id === 'details') {
       var answers = V.details.filter(function (d) { return d.editable && d.key in draft && String(draft[d.key]).trim() !== d.value; }).map(function (d) { return { key: d.key, value: draft[d.key] }; });
@@ -1188,6 +1196,7 @@ const SCRIPT = String.raw`
           return api('/state').then(function (s) { adopt(s); go(); }).catch(go);
         }
         // Nothing more to wait for: the same page the link now shows.
+        finished = true;
         $('foot').hidden = true; $('notice').hidden = true;
         $('sec').textContent = '';
         $('prog').style.width = '100%';
@@ -1565,7 +1574,15 @@ const SCRIPT = String.raw`
   $('next').addEventListener('click', next);
   $('back').addEventListener('click', back);
   // Turning the phone changes what fits. The keyboard opening doesn't: typing never moves a question to another step.
-  window.addEventListener('resize', function () { if (V && !typing() && !sheetOpen()) { pageH = 0; render(); } });
+  // The user (13 Nov 2026): nor does the address bar. A phone's bar slides away as the client scrolls or pulls at the page,
+  // and the window then changes height by a few lines: that redrew the step (and, once submitted, put the signing page back).
+  // Only a new width (the phone turned) is a new screen; a step that is a little too tall for the new height just scrolls.
+  var widthNow = window.innerWidth;
+  window.addEventListener('resize', function () {
+    if (window.innerWidth === widthNow) return;
+    widthNow = window.innerWidth;
+    if (V && !finished && !typing() && !sheetOpen()) { pageH = 0; render(); }
+  });
 
   // ---- open --------------------------------------------------------------------------------------------------------
   api('/state').then(function (s) {
