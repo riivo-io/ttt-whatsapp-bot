@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit eb984a1). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -622,18 +622,59 @@ export const INCIDENT_FIRST_QUESTION = 'What happened? Just tell me in a few wor
 /** An insurer's name without "Ltd" or "(Pty) Ltd", so it fits a tap after what happened ("Theft – Santam"). */
 export const shortInsurer = (name: string) => name.replace(/\s*(\(Pty\)\s*)?(Ltd|Limited)\.?\s*$/i, '').trim() || name;
 
+/** The most characters of a list row's title WhatsApp shows; a longer one is cut with "…" (Tina's ROW_TITLE, domain/claimsOutbox.ts). */
+export const ROW_TITLE_MAX = 24;
+
+/** Words an insurer's name can end in without being what tells it from another ("Discovery Insure", "Hollard Insurance"). */
+const NAME_TAIL = new Set(['pty', '(pty)', 'ltd', 'limited', 'insurance', 'insure', 'insurers', 'insurer', 'assurance', 'holdings', 'group', 'company', 'co', 'sa', 'short', 'term', 'short-term']);
+
+/**
+ * 16 Nov 2026: the insurer's main name, for a list row's title, where the whole name does not fit: "Discovery Insure" is
+ * "Discovery", "Momentum Short Term Insurance" is "Momentum", "Santam Ltd" is "Santam". A name that is only such words stays as it is.
+ * The whole name stays in the line under the title (describe).
+ */
+export function mainInsurer(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  while (words.length > 1 && NAME_TAIL.has(words[words.length - 1].toLowerCase().replace(/\.$/, ''))) words.pop();
+  return words.join(' ') || name.trim();
+}
+
+const clip = (t: string, max: number) => (t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}…`);
+/** What happened, a little shorter, where the full label and the insurer's name would not fit in a title. */
+const SHORT_LABEL: Record<string, string> = { 'Car accident': 'Accident', 'Damage at home': 'Home damage', 'Burst geyser': 'Geyser' };
+
+/**
+ * 16 Nov 2026: the title of a policy in the tap list, never more than the 24 characters WhatsApp shows. What happened and the
+ * insurer ("Theft – Hybrid"); the name without "Ltd" when that fits, else the insurer's main name ("Car accident – Discovery").
+ * The policy's number follows when it is asked for and fits. The insurer's name always stays whole: if what happened does not
+ * fit beside it, its short form is tried ("Accident – Old Mutual"), and with no room for that the title is the insurer alone
+ * ("Auto & General"). The whole policy goes in the line under the title (describe), which is also where a client tells two
+ * policies at one insurer apart when the number does not fit.
+ */
+export function policyTitle(label: string, insurer: string, number?: string, max = ROW_TITLE_MAX): string {
+  const names = [...new Set([shortInsurer(insurer), mainInsurer(insurer)])];
+  const whats = label ? [...new Set([label, SHORT_LABEL[label]].filter((w): w is string => !!w))] : [''];
+  for (const what of whats) {
+    const lead = what ? `${what} – ` : '';
+    const tries = [...(number ? names.map((n) => `${lead}${n} (${number})`) : []), ...names.map((n) => `${lead}${n}`)];
+    const fits = tries.find((t) => t.length <= max);
+    if (fits) return fits;
+  }
+  return clip(names[names.length - 1], max);
+}
+
 /**
  * The client's policies, by insurer; the tap says the policy's number in the list, as a typed reply would. 6 Nov 2026:
  * what happened goes in front ("Theft – Hybrid", "Theft – Momentum"), so the client sees which policy it goes on.
+ * 16 Nov 2026: the title is the insurer's main name, so it is not cut ("Car accident – Discovery"); see policyTitle.
  */
 const policyChoices = (state: WalkthroughState): Choice[] => {
   const label = incidentLabel(state.facts, state.opening);
-  const name = (p: Policy) => (label ? `${label} – ${shortInsurer(p.insurer)}` : p.insurer);
-  // Two policies with one insurer would read the same: their numbers tell them apart.
-  const twice = (p: Policy) => state.policies.filter((x) => name(x) === name(p)).length > 1;
+  // Two policies with one insurer would read the same: their numbers tell them apart (in the title when it fits, else in the line under it).
+  const twice = (p: Policy) => state.policies.filter((x) => policyTitle(label, x.insurer) === policyTitle(label, p.insurer)).length > 1;
   return state.policies.map((p, i) => ({
-    title: twice(p) ? `${name(p)} (${p.policyNumber})` : name(p),
-    // WhatsApp cuts a long title ("Car accident – Discovery…"), so the whole policy is in the line under it.
+    title: policyTitle(label, p.insurer, twice(p) ? p.policyNumber : undefined),
+    // The whole policy is in the line under the title, which WhatsApp shows in full.
     description: describe(p),
     reply: `${i + 1}. ${describe(p)}`,
   }));

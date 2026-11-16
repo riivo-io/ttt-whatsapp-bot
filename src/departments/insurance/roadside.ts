@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit eb984a1). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299: roadside help on WhatsApp. A client whose car has broken down gets their insurer's assist number from the
 // CRM straight away, at any hour, with no person involved; the broker sees in My Day that their client needed help.
@@ -20,7 +20,7 @@
 //
 // An unknown number is roadside-unknown.ts (AC 2); roadside-turn.ts is what the host calls. Every text goes through the claim gate (sendText).
 // DRAFT WORDING (decision D11): the Insurance and Advice department approves it before go-live.
-import { CLIENT_BROKER, DEPARTMENT, describe, ownerFor, sendText, shortInsurer, YES_NO, type ClaimPorts, type Choice, type Conversation } from './claim';
+import { CLIENT_BROKER, DEPARTMENT, describe, ownerFor, policyTitle, sendText, shortInsurer, YES_NO, type ClaimPorts, type Choice, type Conversation } from './claim';
 import type { RoadsideRoute } from './roadside-intent';
 import { policyKind, type Policy } from './walkthrough';
 
@@ -113,8 +113,9 @@ export function numbersText(groups: InsurerGroup[], hurt: boolean): string {
 /** AC 3: one tap per motor policy. Two at one insurer would read the same, so their numbers tell them apart. */
 export function policyChoices(policies: Policy[]): Choice[] {
   const twice = (p: Policy) => policies.filter((x) => x.providerId === p.providerId).length > 1;
+  // 16 Nov 2026: a name too long for a list row ("Momentum Short Term Insurance (MO-1)") is the insurer's main name, which is not cut (policyTitle).
   return policies.map((p, i) => ({
-    title: twice(p) ? `${shortInsurer(p.insurer)} (${p.policyNumber})` : shortInsurer(p.insurer),
+    title: policyTitle('', p.insurer, twice(p) ? p.policyNumber : undefined),
     description: `${p.product} policy (${p.policyNumber})`,
     reply: `${i + 1}. ${describe(p)}`,
   }));
