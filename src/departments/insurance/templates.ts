@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit fb9b2c6). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 0b56e23). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -181,6 +181,9 @@ export const MISSING_REMINDER_TEMPLATE = {
  * the WhatsApp one; how to send is a reply to the email. Sent by the host's email sender (TTTFG-4973's templated
  * sends).
  */
+/** The user (18 Nov 2026): how a client who got a reminder email with the form's link stops the reminders (the page's button). */
+export const STOP_REMINDERS_EMAIL_LINE = "Don't want these reminders? Open the link above and tap Stop reminders at the bottom of the page.";
+
 export const REMINDER_EMAIL_TEMPLATE = {
   name: 'Claim - still needed (reminder email)',
   version: 'draft-2',
@@ -199,6 +202,7 @@ export const REMINDER_EMAIL_TEMPLATE = {
         `Update on your ${v.claim}:`,
         `Things we still need from you:\n${list}`,
         ...addMissingItems(v.lines, v.missingLink),
+        STOP_REMINDERS_EMAIL_LINE,
         'Kind regards,\nTTT',
       ].join('\n\n');
     }
@@ -296,6 +300,7 @@ export const FORM_REMINDER_EMAIL_TEMPLATE = {
     `Good morning ${v.firstName},`,
     `The form for your ${v.claim} isn't finished yet. Please complete it below so that we can submit your claim. What you've already filled in is kept.`,
     v.link,
+    STOP_REMINDERS_EMAIL_LINE,
     'Kind regards,\nTTT',
   ].join('\n\n'),
 } as const;
@@ -425,7 +430,7 @@ export interface ClaimToInsurerVars {
  */
 export const CLAIM_TO_INSURER_TEMPLATE = {
   name: 'Claim to insurer',
-  version: 'draft-2',
+  version: 'draft-3',
   approved: false,
   subject: (v: Pick<ClaimToInsurerVars, 'clientName' | 'policyNumber' | 'reference'>) =>
     (v.policyNumber ? `New claim: ${v.clientName} – policy ${v.policyNumber}` : `New claim: ${v.clientName} (${v.reference})`),
@@ -437,7 +442,8 @@ export const CLAIM_TO_INSURER_TEMPLATE = {
       ...(v.incidentDate ? [`Date of incident: ${new Date(v.incidentDate).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' })}`] : []),
       `Our reference: ${v.reference}`,
     ].join('\n'),
-    `Please reply with your claim number, quoting our reference ${v.reference}.`,
+    // The user, 18 Nov 2026: no "quoting our reference"; the reference is in the list above.
+    'Please reply with your claim number.',
   ].join('\n\n'),
 } as const;
 
@@ -520,7 +526,7 @@ export interface StatusTemplate {
  * The user (18 Nov 2026): what the client hears when their claim is under review (Under assessment): "Your claim submitted to
  * <insurer> is under review." and "Your claim number is: <number>.". It goes when the broker saves the insurer's number, which
  * moves the claim there (submitted.ts), and when anyone moves the claim there by hand (statusupdate.ts). A claim with no number
- * yet gets the first line only (`withoutNumber`), and the number follows when it is saved. It replaces TTTFG-5204 AC 7's
+ * yet gets the first line and the closing line, with no number line (`withoutNumber`, 18 Nov 2026 pm), and the number follows when it is saved. It replaces TTTFG-5204 AC 7's
  * "Submitted to <insurer>, claim no. <number>" and TTTFG-5208's "<insurer> is now assessing it".
  * CRM values only, with no approval per message. On WhatsApp it is always the approved template: `meta` and `templateVersion`
  * are its key in the WhatsApp flow's template list (WhatsApp - Automated - Send Templated Message), and Meta must have it.
@@ -536,9 +542,9 @@ export const UNDER_REVIEW_NO_NUMBER_TEMPLATE: StatusTemplate = {
   meta: 'claim_under_review_no_number',
   templateVersion: 1,
   /** For Meta: {{1}} the insurer. */
-  whatsappBody: 'Your claim submitted to {{1}} is under review.',
+  whatsappBody: 'Your claim submitted to {{1}} is under review.\nWe will keep you updated on the status of your claim.',
   params: (v) => [v.insurer],
-  render: (v) => `Your claim submitted to ${v.insurer} is under review.`,
+  render: (v) => `Your claim submitted to ${v.insurer} is under review.\nWe will keep you updated on the status of your claim.`,
   emailSubject: (v) => `Your claim ${v.reference} is under review`,
 };
 

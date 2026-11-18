@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit fb9b2c6). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 0b56e23). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -18,6 +18,8 @@
 // - it is day `fromDay` (1) or later, and before `stopAfterDays` (10). The reminders stop there and the claim goes to
 //   the broker as a call to make (below; TTTFG-5289 may move the day);
 // - it isn't Sunday in South Africa;
+// - the client hasn't opted out of the reminders on this claim (optout.ts: they replied "stop", or tapped Stop reminders on
+//   the form's page). The reminder doesn't go; the broker's steps below still do, since nobody else is chasing now;
 // - the client hasn't said the claim isn't theirs (TTTFG-4830: OpenClaim.disputed, while the broker checks it). Such a
 //   claim gets no reminder and no broker step: the broker already has an urgent Follow-up on it;
 // - the claim wasn't reminded already today (its Created agent action), so a second run the same day sends nothing.
@@ -127,7 +129,7 @@ export interface ReminderPorts extends ResumePorts {
 
 export type ReminderSkip =
   | 'nothing-needed' | 'wrote-today' | 'quiet-too-long' | 'no-message-yet' | 'reminded-today' | 'no-template' | 'question-open'
-  | 'sunday' | 'disputed' | 'status' | 'no-email-sender' | 'no-email-address' | 'no-form-link';
+  | 'sunday' | 'disputed' | 'opted-out' | 'status' | 'no-email-sender' | 'no-email-address' | 'no-form-link';
 /** `broker`: the claim's owner got that step's Follow-up this run. */
 export type ReminderOutcome =
   | { reference: string; sent: 'template' | 'email'; lines: string[]; broker?: BrokerStep }
@@ -256,7 +258,9 @@ export async function remindTurn(
       if (r?.sent && r.reminded) { lastSent = r.sent; reminded.push(r.reminded); }
       continue;
     }
+    // The user (18 Nov 2026): the client stopped the reminders on this claim (optout.ts). The broker's steps below still go.
     const when: Today = !today.ok ? today
+      : o.remindersOff ? { ok: false, skipped: 'opted-out' }
       : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
       // Tina asked "which claim?" or "is this a new claim?" and is waiting: a reminder now would cross it.
       : state.pending ? { ok: false, skipped: 'question-open' }
@@ -352,6 +356,7 @@ async function remindForm(
   const today = reminderToday(mine, now, settings);
   const step = brokerStep(mine, now, settings);
   const when: Today = !today.ok ? today
+    : o.remindersOff ? { ok: false, skipped: 'opted-out' }
     : !ports.guidedFormLink ? { ok: false, skipped: 'no-form-link' }
     : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
     : state.pending ? { ok: false, skipped: 'question-open' }
@@ -483,6 +488,7 @@ async function remindSigned(
   const today = reminderToday(mine, now, settings);
   const step = brokerStep(mine, now, settings);
   const when: Today = !today.ok ? today
+    : o.remindersOff ? { ok: false, skipped: 'opted-out' }
     : email ? (ports.email ? today : { ok: false, skipped: 'no-email-sender' })
     : state.pending ? { ok: false, skipped: 'question-open' }
     : !settings.template ? { ok: false, skipped: 'no-template' }

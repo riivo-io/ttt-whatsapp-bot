@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit fb9b2c6). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 0b56e23). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -610,7 +610,8 @@ export function applyGuidedSave(
     if (!item || item.kind !== 'question') continue;
     if (answers[key]?.status === 'answered') delete answers[key];
     // As for "I don't know" on WhatsApp: the broker confirms it, unless the client can get it (then it stays on their list).
-    const record: AnswerRecord = { value: null, status: item.required && !chased(item) ? 'broker-to-confirm' : 'not-yet', at, source: 'form' };
+    // The user (18 Nov 2026): a "Yes" with nothing typed is a gap, not a "don't know": a required one stays on the list.
+    const record: AnswerRecord = { value: null, status: item.required && !chased(item) && !blanks.includes(key) ? 'broker-to-confirm' : 'not-yet', at, source: 'form' };
     answers[key] = record;
   }
   dropEndedEntries(form, answers);
@@ -708,9 +709,10 @@ function topUpInput(input: GuidedSave, keys: ReadonlySet<string>): GuidedSave {
 /**
  * The client tapped Submit. The user (16 Nov 2026): nothing on the form blocks signing, whatever is still blank, a required
  * question or file included (it was the case number, when and where, and the required files). What the client left blank
- * is kept the way "I don't know" is on WhatsApp: a required question the client can get (the case number: `chased`) stays on
- * their list, and the morning reminder asks for it until it's in (reminder.ts); another required one is the broker's to
- * confirm; an optional one is "not yet", which on WhatsApp means it's never asked. A file not sent is just as missing: the
+ * is kept as "not yet": a required question stays on the client's list (the case number, and since 18 Nov 2026 any other
+ * required question), and the morning reminder asks for it until it's in (reminder.ts), with the missing-items form's link;
+ * an optional one is "not yet", which on WhatsApp means it's never asked. Only an explicit "I don't know" is the broker's
+ * to confirm (saveGuided). A file not sent is just as missing: the
  * reminder lists it too. `open` is always empty: the host carries on with { kind: 'form-done' } on the client's own queue.
  */
 export async function finishGuided(ports: GuidedPorts, claimId: string, now: Date): Promise<{ open: string[]; topUp?: true }> {
@@ -720,11 +722,11 @@ export async function finishGuided(ports: GuidedPorts, claimId: string, now: Dat
   if (formSubmitted(claim)) return { open: [], topUp: true };
   const open = guidedOpen(form, claim, sapsRequired);
   if (open.length) {
-    const items = formItems(form, claim.answers, factsOf(claim), sapsRequired);
     const answers: ClaimAnswers = { ...claim.answers };
     for (const k of open) {
-      const item = items.find((i) => i.key === k);
-      answers[k] = { value: null, status: item?.required && !chased(item) ? 'broker-to-confirm' : 'not-yet', at: now.toISOString(), source: 'form' };
+      // The user (18 Nov 2026): a required question the client left blank stays on their list (the missing-items form, the
+      // bullets and the morning reminder ask for it); only an explicit "I don't know" is the broker's to confirm.
+      answers[k] = { value: null, status: 'not-yet', at: now.toISOString(), source: 'form' };
     }
     await ports.saveAnswers(claimId, answers);
   }

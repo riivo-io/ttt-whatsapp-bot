@@ -6,6 +6,7 @@
  *   POST /claim-form/:token/voice      a recording (raw audio): { text } for the answer box
  *   POST /claim-form/:token/file       one photo or document (raw bytes), ?item=<evidence key>
  *   POST /claim-form/:token/submit     the client is done: Tina carries on on WhatsApp, or tells the email agent.
+ *   POST /claim-form/:token/stop-reminders  the user (18 Nov 2026): no more morning reminders about this claim (WhatsApp or email).
  *                                      { signature }: the client's signature from the form's last screen (a WhatsApp
  *                                      link, when the signing page is set up: the view's `sign`). The user (18 Nov
  *                                      2026): on a submitted claim it is the missing-items form (the view's `topUp`):
@@ -36,6 +37,8 @@ export interface ClaimFormSession {
     finish(): Promise<{ open: string[]; topUp?: true }>;
     /** Tells Tina the client is done, on the client's own queue. */
     carryOn(): Promise<void>;
+    /** The user (18 Nov 2026): the client stops the reminders about this claim (optout.ts). The link keeps working. */
+    stopReminders(): Promise<void>;
 }
 
 export interface ClaimFormDeps extends GuidedLinkDeps {
@@ -288,6 +291,16 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
             const r = await once(UPLOAD_ID.test(id) ? `${link.id}:${id}` : null, () => inTurn(`file:${link.id}`, () => d.session(link).file({ fileName, mimeType, media: type.media }, bytes, item)));
             res.json({ ok: true, count: r.count });
         } catch (e) { failed('file', res, e); }
+    });
+
+    router.post('/:token/stop-reminders', linkFirst, express.json({ limit: '1kb' }), async (req: Request, res: Response) => {
+        const d = getDeps();
+        if (!d) return void off(res);
+        try {
+            const link = res.locals.link as GuidedLinkRow;
+            await inTurn(link.id, () => d.session(link).stopReminders());
+            res.json({ ok: true });
+        } catch (e) { failed('stop-reminders', res, e); }
     });
 
     router.post('/:token/submit', linkFirst, express.json({ limit: '2mb' }), async (req: Request, res: Response) => {

@@ -29,6 +29,7 @@
 import { claimTurn, DEPARTMENT } from '../departments/insurance/claim';
 import { followOnTurn, formSubmitted, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { prefersChat } from '../departments/insurance/guided';
+import { asksToStopReminders, REMINDERS_STOPPED, stopReminders } from '../departments/insurance/optout';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
 import type { RoadsidePorts, RoadsideState } from '../departments/insurance/roadside';
 import { roadsideRoute, type RoadsideModel } from '../departments/insurance/roadside-intent';
@@ -190,7 +191,7 @@ const asRoadsidePorts = (ports: ResumePorts): RoadsidePorts => ({ ...ports, insu
 
 export type DemoOutcome =
     | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request' | 'busy'
-    | 'voice-unheard' | 'roadside';
+    | 'voice-unheard' | 'roadside' | 'reminders-stopped';
 
 export const helloText = (firstName: string) =>
     `Hi ${firstName}, it's Tina from TTT. On this number I'm set up to help with insurance claims. Tell me what happened `
@@ -357,6 +358,17 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
             return done('walkthrough');
         }
         return openedFollowOn(ports, r.claim.id, walk);
+    }
+
+    // ---- The user (18 Nov 2026): "stop" opts the client out of the morning reminders ----
+    // Plain words (optout.ts), checked before the reply is read as anything else, but not while they are reporting a claim
+    // (the walkthrough has its own "stop here"): every open claim of theirs stops being reminded and the claim owner is told.
+    if (!m.file && m.text.trim() && asksToStopReminders(m.text)) {
+        const ports = deps.ports(c.requestId, sent);
+        await stopReminders(ports, m.contactId, now);
+        await deps.say(m.phone, REMINDERS_STOPPED);
+        sent(REMINDERS_STOPPED);
+        return done('reminders-stopped');
     }
 
     // ---- TTTFG-5299: a car that has broken down, before anything is read against the open claims ----

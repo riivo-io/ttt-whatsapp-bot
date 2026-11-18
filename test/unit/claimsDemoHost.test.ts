@@ -15,6 +15,7 @@ import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
 import type { ClientFile, FollowOnClaim, StoredClaimForm } from '../../src/departments/insurance/followon';
+import { remindersOff, REMINDERS_STOPPED } from '../../src/departments/insurance/optout';
 import { isOpenClaim, type OpenClaim, type ResumePorts } from '../../src/departments/insurance/resume';
 import type { Policy, WalkthroughState } from '../../src/departments/insurance/walkthrough';
 
@@ -83,7 +84,8 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
             return { id, reference };
         },
         openClaimsForClient: async (contactId): Promise<OpenClaim[]> => rows.filter((r) => r.contactId === contactId && isOpenClaim(r.status))
-            .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt ?? '2026-11-02T08:00:00Z', status: r.status, lastClientMessageOn: r.lastClientMessageOn })),
+            .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt ?? '2026-11-02T08:00:00Z', status: r.status, lastClientMessageOn: r.lastClientMessageOn,
+                ...(remindersOff(r.answers) ? { remindersOff: true as const } : {}) })),
         loadClaim: async (id) => structuredClone(row(id)),
         activeClaimForm: async (provider, type) => (provider === form.provider && type === form.claimType ? form : null),
         genericClaimForm: async () => GENERIC,
@@ -469,6 +471,34 @@ test('TTTFG-5212: no reminder while the client is reporting a claim; the demo nu
     assert.deepEqual(demoPhones(`27723203629:${CONTACT}, +27 83 285 2913:${CONTACT}, bad`), [
         { phone: '27723203629', contactId: CONTACT }, { phone: '27832852913', contactId: CONTACT },
     ]);
+});
+
+test('the user (18 Nov 2026): replying STOP stops the reminders on the open claims, tells the owner, and the next morning sends nothing', async () => {
+    const quiet: Row = {
+        id: 'claim-1', reference: 'CLM-000001', contactId: CONTACT, providerId: 'prov-discovery', insurer: 'Discovery Insure', claimType: 'Motor accident',
+        facts: { claimType: 'Motor accident', description: 'Rear-ended at the Claremont robot', incidentAt: '2026-10-12T15:30:00Z', place: 'Claremont',
+            thirdParties: false, saps: false, injuries: false },
+        sapsCaseNumber: 'AR 77/10/2026', sapsStation: 'Claremont',
+        status: 'Awaiting client docs', signatureStatus: 'Not sent', claimFormId: MOTOR.id, answers: {}, evidence: [], owner: SIPHO,
+        lastClientMessageOn: '2026-10-14T05:00:00.000Z',
+    };
+    const w = world({ rows: [quiet] });
+    // Day 1: a reminder goes. The client answers "STOP".
+    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, new Date('2026-10-15T06:00:00Z'), { template: true }), [{ reference: 'CLM-000001', sent: 'template', lines: ['The answer to 1 more question', 'Photos of the damage'] }]);
+    w.since();
+    assert.equal(await say(w, 'STOP', new Date('2026-10-15T07:00:00Z')), 'reminders-stopped');
+    assert.deepEqual(w.since(), [REMINDERS_STOPPED]);
+    assert.equal(remindersOff(w.rows[0].answers), true);
+    const note = w.actions.filter((a) => a.kind === 'Follow-up');
+    assert.equal(note.length, 1);
+    assert.equal(note[0].owner.name, 'Sipho');
+    assert.match(note[0].detail, /^Claim CLM-000001: the client asked to stop the morning reminders/);
+    // The next morning (and the day after): nothing goes to the client.
+    w.rows[0].lastClientMessageOn = '2026-10-14T05:00:00.000Z';
+    assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, new Date('2026-10-16T06:00:00Z'), { template: true }), [{ reference: 'CLM-000001', skipped: 'opted-out' }]);
+    assert.deepEqual(w.since(), []);
+    // A message that only mentions stopping something else is read as it always was.
+    assert.notEqual(await say(w, 'the car will not stop leaking', new Date('2026-10-16T09:00:00Z')), 'reminders-stopped');
 });
 
 test("TTTFG-5212: the claim owner's day-5 alert and stop-day call go through the host, once each; the days are settings", async () => {

@@ -161,6 +161,8 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .thumbs { display:flex; gap:6px; flex-wrap:wrap; grid-column:1 / -1; }
 .thumbs img { width:58px; height:58px; object-fit:cover; border-radius:8px; border:1px solid var(--line); }
 .done-ic { width:64px; height:64px; border-radius:50%; background:var(--good-soft); color:var(--good); display:grid; place-items:center; }
+.stopline { text-align:center; padding:0 18px calc(8px + env(safe-area-inset-bottom,0px)); background:var(--bg); font-size:13px; color:var(--muted,#6b6b6b); }
+.stopline .link { padding:2px 8px; }
 .foot { padding:12px 18px calc(14px + env(safe-area-inset-bottom,0px)); border-top:1px solid var(--line); display:flex; gap:10px; background:var(--bg); }
 .foot button, .foot a { flex:1; display:block; text-align:center; text-decoration:none; border-radius:12px; padding:13px; min-height:48px; font-weight:500; font-size:15px; cursor:pointer; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); }
 .foot .go { background:var(--accent); color:#fff; border-color:var(--accent); flex:2.2; }
@@ -1210,7 +1212,7 @@ const SCRIPT = String.raw`
         busy = false; submitting = false;
         // Nothing more to wait for: the same page the link now shows.
         finished = true;
-        $('foot').hidden = true; $('notice').hidden = true;
+        $('foot').hidden = true; $('stopline').hidden = true; $('notice').hidden = true;
         $('sec').textContent = '';
         $('prog').style.width = '100%';
         $('body').innerHTML = V.topUp ? doneHtml('Thank you', TOP_UP_DONE) : '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. A consultant from TTT will be in touch with you shortly.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
@@ -1605,6 +1607,16 @@ const SCRIPT = String.raw`
     var el = document.querySelector('[data-mother="' + key.replace(/"/g, '') + '"]');
     return el ? el.value.trim() : '';
   }
+  // The user (18 Nov 2026): the reminders the client gets (WhatsApp or email) link here, so this is where they stop them. The
+  // link keeps working, and the claim's broker is told.
+  $('stopRem').addEventListener('click', function () {
+    if (!window.confirm('Stop the reminders about this claim? This link will still work.')) return;
+    var btn = $('stopRem');
+    btn.disabled = true;
+    post('/stop-reminders').then(function () {
+      $('stopline').innerHTML = '<span>Reminders stopped. This link still works.</span>';
+    }, function () { btn.disabled = false; btn.textContent = 'Could not stop them. Tap to try again'; });
+  });
   $('body').addEventListener('click', function (e) {
     var o = e.target.closest('[data-k]');
     if (o) {
@@ -1793,7 +1805,7 @@ const SCRIPT = String.raw`
     // The missing-items form with nothing left on it: everything came in some other way since the link went out.
     if (s.topUp && !s.screens.length && !s.evidence.length) {
       finished = true;
-      $('foot').hidden = true;
+      $('foot').hidden = true; $('stopline').hidden = true;
       $('sec').textContent = '';
       $('body').innerHTML = doneHtml('Nothing more needed', 'We have everything we need from you for now. Tina will let you know on WhatsApp if anything else comes up.');
       return;
@@ -1805,7 +1817,7 @@ const SCRIPT = String.raw`
       // Back to where the camera was opened, not to the first question still blank.
       if (camLost) here = { id: 'photos' };
     }
-    $('foot').hidden = false;
+    $('foot').hidden = false; $('stopline').hidden = false;
     render();
     // What opens the form: read once, one tap, and straight on.
     if (s.terms) {
@@ -1861,6 +1873,7 @@ export function claimFormPage(): string {
   <div class="notice" id="notice" role="status" hidden></div>
   <main class="body" id="body"><div class="sk" style="width:62%"></div><div class="sk tall"></div><div class="sk tall"></div><div class="sk tall"></div><div class="sk" style="width:44%"></div></main>
   <div class="foot" id="foot" hidden><button type="button" id="back">Back</button><button type="button" class="go" id="next">Continue</button></div>
+  <div class="stopline" id="stopline" hidden><button type="button" class="link" id="stopRem">Stop reminders</button></div>
   <div class="sheet" id="sheet" hidden>
     <div class="scrim" data-sheet-close></div>
     <div class="panel" role="dialog" aria-labelledby="sheetTitle">

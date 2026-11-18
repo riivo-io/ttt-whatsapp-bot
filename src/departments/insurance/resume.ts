@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit fb9b2c6). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 0b56e23). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -73,6 +73,8 @@ export interface OpenClaim {
    * said since that it is (THEIRS). Tina asks nothing about it, and the morning reminder passes it over.
    */
   disputed?: true;
+  /** The user (18 Nov 2026): the client asked for no more reminders on this claim (optout.ts). The broker's steps still go. */
+  remindersOff?: true;
   /**
    * TTTFG-4830 (29 Oct 2026): the hold is the client's own CANCEL_REQUEST, not NOT_THEIRS. Carrying on with the claim
    * then tells the broker they no longer want to cancel (CANCEL_WITHDRAWN) rather than that it is theirs.
