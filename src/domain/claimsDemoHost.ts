@@ -38,7 +38,7 @@ import { openQuestions, readReply, replyContext, reportedAnswers, type ReplyMode
 import { remindTurn, type BrokerStep, type ReminderOutcome, type ReminderPorts, type ReminderSettings } from '../departments/insurance/reminder';
 import { NO_RESUME_STATE, resumeTurn, type ResumePorts, type ResumeState } from '../departments/insurance/resume';
 import { openingFacts, understand, type UnderstandModel } from '../departments/insurance/understand';
-import type { WalkthroughState } from '../departments/insurance/walkthrough';
+import type { Facts, WalkthroughState } from '../departments/insurance/walkthrough';
 import { ABANDONED_AFTER_MS, claimsConversation } from './claimsHost';
 
 export const RESET_COMMAND = '#reset';
@@ -282,7 +282,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
      * A claim report starts the walkthrough under a new riivo_request, with what the report already says read first.
      * `policyId` (TTTFG-5299 AC 8): the policy roadside help settled; with the guided form the claim may open at once.
      */
-    const startClaim = async (text: string, policyId?: string): Promise<DemoOutcome> => {
+    const startClaim = async (text: string, policyId?: string, known: Facts = {}): Promise<DemoOutcome> => {
         const requestId = await deps.openRequest(m.contactId, m.phone, text);
         if (!requestId) {
             await deps.say(m.phone, "Sorry, I couldn't open your claim just now. Please try again in a few minutes.");
@@ -292,7 +292,9 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         c.said = [text.trim()];
         // TTTFG-4830 (28 Oct 2026): what the report already says goes into the start, so the policy question offers only the
         // policies that fit the claim. As before, a failed read here only means Tina asks for it.
-        const opening = await openingFacts(deps.understandModel, text, now);
+        const read = await openingFacts(deps.understandModel, text, now);
+        // 18 Nov 2026: `known` is what roadside already knows (a motor claim); what Claude reads from the words wins over it.
+        const opening = { ...read, facts: { ...known, ...read.facts } };
         const ports = deps.ports(requestId, sent);
         const t = await claimTurn(ports, conv(), null, {
             kind: 'start', ...opening, ...(deps.guidedForm ? { guided: true } : {}), ...(policyId ? { policyId } : {}),
@@ -328,9 +330,13 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
         if (deps.roadsideModel && !m.file && m.text.trim()) {
             const requestId = rs.requestId ?? '';
             const r = await roadsideReply(asRoadsidePorts(deps.ports(requestId, sent)), claimsConversation(m.phone, requestId, deps.signUpLink, deps.contactNumber), rs, m.text, now);
-            if (r.state) c.roadside = { ...r.state, requestId };
-            if (r.claim) return startClaim(r.claim.opening, r.claim.policyId);
-            return done('roadside');
+            // 18 Nov 2026: `again` is not an answer to "Complete my claim" ("send the number again", another question). The
+            // roadside conversation is over and the message goes on below as a new one, roadside check first.
+            if (!r.again) {
+                if (r.state) c.roadside = { ...r.state, requestId };
+                if (r.claim) return startClaim(r.claim.opening, r.claim.policyId, r.claim.facts);
+                return done('roadside');
+            }
         }
     }
 

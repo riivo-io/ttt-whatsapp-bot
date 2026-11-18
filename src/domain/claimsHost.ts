@@ -117,6 +117,12 @@ async function roadsideTurn(
         await deps.logIncoming(requestId, text);
         const conv = claimsConversation(phone, requestId, deps.signUpLink, deps.contactNumber);
         r = await roadsideReply(deps.ports(requestId, contact), conv, stored.state, text, now);
+        if (r.again) {
+            // 18 Nov 2026: not an answer to "Complete my claim" ("send the number again", a tax question). The roadside
+            // conversation ends and the message is read as a new one: roadside first, then the claim route, then Tina.
+            await deps.remove(phone);
+            return roadsideTurn(deps, phone, contact, text, now, null);
+        }
     } else {
         const route = await roadsideRoute(deps.roadsideModel!, text);
         if (!route) return null;
@@ -138,7 +144,8 @@ async function roadsideTurn(
     if (!claimRequest) return { handled: true, kind: 'roadside' };
     const conv = claimsConversation(phone, claimRequest, deps.signUpLink, deps.contactNumber);
     const opening = await openingFacts(deps.understandModel, r.claim.opening, now);
-    const t = await claimTurn(deps.ports(claimRequest, contact), conv, null, { kind: 'start', ...opening, ...(r.claim.policyId ? { policyId: r.claim.policyId } : {}) }, now);
+    // 18 Nov 2026: roadside already knows it is a motor claim; what Claude reads from the client's words wins over that.
+    const t = await claimTurn(deps.ports(claimRequest, contact), conv, null, { kind: 'start', ...opening, facts: { ...r.claim.facts, ...opening.facts }, ...(r.claim.policyId ? { policyId: r.claim.policyId } : {}) }, now);
     return persist(deps, phone, contact.id, claimRequest, t.state, t.lastSent ?? null, t.claim?.reference, 'started');
 }
 
