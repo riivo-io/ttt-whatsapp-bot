@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 4caf865). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -318,8 +318,12 @@ export type FollowOnInput =
    * instead, or says the link won't open, gets a new link (guided.ts prefersChat). Replaces TTTFG-5562's AC 8.
    */
   | { kind: 'form-again'; wamid: string }
-  /** TTTFG-5562: from the host: the client submitted the guided form, so the claim carries on as a chat-answered one does (AC 6). */
-  | { kind: 'form-done'; wamid: string };
+  /**
+   * TTTFG-5562: from the host: the client submitted the guided form, so the claim carries on as a chat-answered one does (AC 6).
+   * The user (18 Nov 2026): on a claim already submitted, it is the missing-items form (guided.ts topUp) that was sent. Its
+   * `claimId` lets the turn run when the conversation has no state for the claim any more (resumeFollowOn rebuilds it).
+   */
+  | { kind: 'form-done'; wamid: string; claimId?: string };
 
 /** A file for a resumed claim, with Claude's reading of which missing item it is. */
 export interface ResumeFile { file: ClientFile; forItem?: string }
@@ -426,7 +430,14 @@ type Out =
   | { kind: 'follow-up'; detail: string; template?: { name: string; version: string }; withoutLink?: string; /** null: none when signed. */ signed?: string | null };
 
 /** `waitForMore`: ClaimSettings.waitForMore. */
-export interface Ctx { claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean; guided?: boolean }
+export interface Ctx {
+  claim: FollowOnClaim; form: ClaimForm; now: Date; warningDays: number; waitForMore?: boolean; guided?: boolean;
+  /**
+   * The user (18 Nov 2026): the claim's form was submitted and the host has the guided form, so what's still to come is
+   * never asked one item at a time on WhatsApp: it is listed, with the link to the missing-items form (askOrEnd).
+   */
+  topUp?: boolean;
+}
 /** The claim as it stands within this turn. */
 interface Work { answers: ClaimAnswers; evidence: { key: string }[]; facts: ClaimFacts }
 
@@ -512,7 +523,8 @@ function workedOut(c: Ctx, w: Work, st: FollowOnState, out: Out[]): void {
 }
 
 function askOrEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[], skip: string[], thanks: 'Thanks.' | undefined, listLead: string): FollowOnState | null {
-  const batch = nextBatch(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip });
+  // The user (18 Nov 2026): after the form, nothing is asked on WhatsApp: the end below lists what's left, with the link.
+  const batch = c.topUp && st.signingRequested ? [] : nextBatch(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired, skip });
   const next = batch[0] ?? null;
   const leftOff = next && next.key === st.waitingOn && !deferred(next.key, w.answers) ? LEFT_OFF : undefined;
   const lead = [thanks, leftOff].filter(Boolean).join(' ') || undefined;
@@ -985,6 +997,20 @@ const BEFORE_FORM: readonly ClaimStatus[] = ['FNOL logged', 'Cover verified'];
 const BEFORE_EVIDENCE: readonly ClaimStatus[] = [...BEFORE_FORM, 'Form sent'];
 /** The statuses before the pack is complete: the conversation still gets to the end, and the signing step with it. */
 const isOpenStage = (s: ClaimStatus) => [...BEFORE_EVIDENCE, 'Awaiting client docs'].includes(s);
+
+/**
+ * Whether the claim's end has run: the form was submitted (or the chat finished), and the signing step with it. The
+ * signature status says so once it is past Not sent, or the claim is evidence complete, or the broker has the
+ * ready-to-register Follow-up (the end ran with no link), or the claim is past the pack. The user (18 Nov 2026): such a
+ * claim's form link is the missing-items form (guided.ts topUp): only what's still to come, and nothing to sign.
+ */
+export const formSubmitted = (claim: Pick<FollowOnClaim, 'signatureStatus' | 'evidenceComplete' | 'readySent' | 'status'>) =>
+  claim.signatureStatus !== 'Not sent' || !!claim.evidenceComplete || !!claim.readySent || !isOpenStage(claim.status);
+
+/** The required items still missing on a claim, from the record alone (resumeMissing without a turn's clock). */
+export function claimMissing(form: ClaimForm, claim: FollowOnClaim): QuestionItem[] {
+  return resumeMissing({ claim, form, now: new Date(0), warningDays: 0 });
+}
 const isSaps = (key: string) => key === SAPS_CASE_KEY || key === SAPS_STATION_KEY;
 
 /**
@@ -1054,7 +1080,7 @@ export function resumeFollowOn(c: Ctx, introSent = false, skipped: readonly stri
   const { status, signatureStatus } = c.claim;
   const st: FollowOnState = {
     claimId: c.claim.id, phase: 'items', asking: '', misses: 0, skipped: [...skipped], sapsRequired,
-    signingRequested: signatureStatus !== 'Not sent' || !!c.claim.evidenceComplete || !!c.claim.readySent || !isOpenStage(status),
+    signingRequested: formSubmitted(c.claim),
     evidenceStarted: !BEFORE_EVIDENCE.includes(status),
     introSent: introSent || !!c.claim.introSent || Object.keys(w.answers).some((k) => !isSaps(k)) || w.evidence.length > 0,
   };
@@ -1092,7 +1118,7 @@ export function resumeStep(c: Ctx, files: readonly ResumeFile[] = [], introSent 
     out.push({ kind: 'guided-link', ...(lead ? { lead } : {}) });
     return { state: { ...st, phase: 'form', asking: '', misses: 0, waitingOn: undefined }, out };
   }
-  if (st.phase === 'saps') {
+  if (st.phase === 'saps' && !c.topUp) {
     const item = sapsAsk(w.facts);
     out.push({ kind: 'ask', item, simpler: false, again: deferred(SAPS_CASE_KEY, w.answers), lead });
     return { state: st, out };
@@ -1103,7 +1129,10 @@ export function resumeStep(c: Ctx, files: readonly ResumeFile[] = [], introSent 
   const next = intro({ ...ctx, guided: false }, w, st, out);
   // The words in front go on the first question asked, if one is (not on a template or a closing line).
   const ask = out.slice(first).find((o): o is Extract<Out, { kind: 'ask' | 'ask-batch' }> => o.kind === 'ask' || o.kind === 'ask-batch');
-  if (lead && ask) ask.lead = lead;
+  // The user (18 Nov 2026): a submitted claim gets the list instead (askOrEnd), with the welcome-back words in front.
+  const listed = out.slice(first).find((o): o is Extract<Out, { kind: 'still-missing' }> => o.kind === 'still-missing');
+  if (c.topUp && listed) listed.lead = lead ?? '';
+  else if (lead && ask) ask.lead = lead;
   else if (lead) out.splice(first, 0, { kind: 'text', text: lead });
   return { state: next, out };
 }
@@ -1417,6 +1446,7 @@ const DETAIL_NAMES: Record<string, string> = {
  * the new value on the form and never changes the CRM herself.
  */
 function formDone(c: Ctx, st: FollowOnState): Step {
+  if (formSubmitted(c.claim)) return topUpDone(c, st);
   const w = work(c.claim);
   const out: Out[] = [];
   const changed = Object.entries(DETAIL_NAMES).flatMap(([key, name]) => {
@@ -1460,6 +1490,53 @@ function formEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState 
     { kind: 'follow-up', detail: ready('Link sent'), withoutLink: ready('Not sent'), signed: null, template: READY_TO_REGISTER },
   );
   return missing.length ? stillNeedState(c, { ...st, signingRequested: true }, missing) : null;
+}
+
+/**
+ * The user (18 Nov 2026): the client sent the missing-items form (guided.ts topUp). What they added is on the claim already:
+ * the files are in the document pipeline (a pack the broker hasn't sent takes them in, claimpack.ts addLateDocuments), the
+ * answers and the SAPS step's values are saved. Nothing is signed again. Then, as for an answer on WhatsApp after the end:
+ * - everything is in: evidence complete, Tina says so, and the broker's all-in Follow-up names the answers that came in;
+ * - something is still to come: Tina thanks the client and lists the rest (with the form's link again), and the broker gets
+ *   the answers that came in, to add to the claim with the insurer. A file needs no Follow-up: the pack takes it.
+ * The list Tina sent is the conversation's (phase `still-need`, its `skipped`). Without it (the conversation moved on, so
+ * the state was rebuilt) the broker is asked to look at the claim instead.
+ */
+function topUpDone(c: Ctx, st: FollowOnState): Step {
+  const w = work(c.claim);
+  const out: Out[] = [];
+  const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
+  const listed = st.phase === 'still-need' ? st.skipped : [];
+  const open = new Set(missing.map((i) => i.key));
+  const late = cameIn(c, w, st.sapsRequired, listed.filter((k) => !open.has(k)));
+  const checkClaim = !listed.length
+    ? [{ kind: 'follow-up' as const, detail: `Claim ${c.claim.reference}: the client added to the claim on the form Tina sent for what was still missing. Please check the claim and add anything new to the claim with the insurer.` }]
+    : [];
+  if (!missing.length) {
+    const ttt = forTtt(c.form, w);
+    out.push(
+      { kind: 'evidence-complete', ...(ttt.length ? { forTtt: ttt } : {}) },
+      { kind: 'text', text: EVERYTHING_IN },
+      ...(listed.length ? [{ kind: 'follow-up' as const, detail: allInDetail(c.claim, late) }] : checkClaim),
+    );
+    return { state: null, out };
+  }
+  out.push({ kind: 'still-missing', items: missing, lead: FILE_SAVED });
+  if (late.length) out.push({ kind: 'follow-up', detail: lateDetail(c.claim, late) });
+  out.push(...checkClaim);
+  return { state: stillNeedState(c, { ...st, signingRequested: true }, missing), out };
+}
+
+/** The listed questions (the SAPS step's two included) that now have a value, as lateAnswers names them for the broker. */
+function cameIn(c: Ctx, w: Work, sapsRequired: boolean, keys: readonly string[]): string[] {
+  const items = formItems(c.form, w.answers, w.facts, sapsRequired);
+  return keys.flatMap((key) => {
+    const item = items.find((i) => i.key === key) ?? SAPS_ITEMS.find((i) => i.key === key);
+    if (!item || item.kind !== 'question') return [];
+    const value = key === SAPS_CASE_KEY ? w.facts.sapsCaseNumber : key === SAPS_STATION_KEY ? w.facts.sapsStation
+      : w.answers[key]?.status === 'answered' ? w.answers[key].value ?? undefined : undefined;
+    return value === undefined || value === '' ? [] : [`${itemName(item)} (${heardValue(item, value)})`];
+  });
 }
 
 /** The insurer's reporting date for the broker, when it's near or passed (as the deadline note said to the client). */
@@ -2089,11 +2166,20 @@ function stillNeed(
  * TTTFG-4830 (still need): "Thanks, that's all for now. Things we still need from you:", the items as a bulleted list
  * (WhatsApp shows "- " lines as bullets), then how to send them. `lead` replaces "Thanks, that's all for now." ('' for none).
  */
-export function stillMissingText(items: readonly QuestionItem[], lead: string = ALL_FOR_NOW): string {
+export function stillMissingText(items: readonly QuestionItem[], lead: string = ALL_FOR_NOW, form?: { signed: boolean }): string {
   const lines = stillNeedLines(items);
   const them = itOrThem(lines);
-  return [[lead, `*${STILL_NEED_HEADING}*`].filter(Boolean).join(' '), lines.map((l) => `- ${l}`).join('\n'), `Please send ${them} here when you have ${them}.`].join('\n\n');
+  const how = form
+    ? `Tap *${MISSING_LINK_LABEL}* to add ${them} to your claim, or send ${them} here.${form.signed ? " You don't need to sign again." : ''}`
+    : `Please send ${them} here when you have ${them}.`;
+  return [[lead, `*${STILL_NEED_HEADING}*`].filter(Boolean).join(' '), lines.map((l) => `- ${l}`).join('\n'), how].join('\n\n');
 }
+
+/**
+ * The user (18 Nov 2026): the button under the list, to the missing-items form (guided.ts topUp). WhatsApp's limit for a
+ * button's words is 20 characters.
+ */
+export const MISSING_LINK_LABEL = 'Add missing items';
 
 // ----------------------------------------------------------------------------------------------------- the turn
 
@@ -2107,8 +2193,10 @@ export async function followOnTurn(
   const at = now.toISOString();
   // TTTFG-4830: a nudge Tina isn't waiting on any more (the client wrote again since) reads and writes nothing.
   if (input.kind === 'nudge' && (!state || state.waiting !== input.wamid)) return { state };
-  if (input.kind !== 'start' && input.kind !== 'resume' && !state) throw new Error('TTTFG-5176: a follow-on message with no follow-on state');
-  const claimId = input.kind === 'start' || input.kind === 'resume' ? input.claimId : state!.claimId;
+  // The user (18 Nov 2026): the missing-items form's Submit names its claim, and may come with no state for it (topUpDone).
+  const topUp = input.kind === 'form-done' && !!input.claimId && state?.claimId !== input.claimId;
+  if (input.kind !== 'start' && input.kind !== 'resume' && !state && !topUp) throw new Error('TTTFG-5176: a follow-on message with no follow-on state');
+  const claimId = input.kind === 'start' || input.kind === 'resume' ? input.claimId : topUp ? (input as { claimId: string }).claimId : state!.claimId;
   const claim = await ports.loadClaim(claimId);
 
   let form: StoredClaimForm;
@@ -2129,10 +2217,13 @@ export async function followOnTurn(
     ...(settings.waitForMore ? { waitForMore: true } : {}),
     // The user (12 Nov 2026): a client who comes back to a claim they haven't finished gets the form's link again.
     ...((input.kind === 'start' || input.kind === 'resume') && settings.guidedForm && ports.guidedFormLink ? { guided: true } : {}),
+    ...(settings.guidedForm && ports.guidedFormLink && formSubmitted(claim) && !claim.evidenceComplete ? { topUp: true } : {}),
   };
   // TTTFG-5196: a message from the client ends the quiet spell on an optional item; the turn sets a new one if it ends
   // on one again.
-  const from = state?.waitingFor === 'optional' && input.kind !== 'nudge' ? { ...state, waiting: undefined } : state;
+  if (topUp && !formSubmitted(claim)) throw new Error(`The form for claim ${claim.reference} isn't submitted, and the conversation is on another claim`);
+  const from = topUp ? resumeFollowOn(ctx, true)
+    : state?.waitingFor === 'optional' && input.kind !== 'nudge' ? { ...state, waiting: undefined } : state;
   let step =
     input.kind === 'start' ? startFollowOn(ctx, input.describedAsTheft, input.files, input.reported)
     : input.kind === 'resume' ? resumeStep(ctx, input.files, input.introSent, input.lead, input.skipped)
@@ -2222,9 +2313,21 @@ export async function followOnTurn(
       case 'closing':
         await say(o.form ? formClosingText(signature) : closingText(signature));
         break;
-      case 'still-missing':
-        await say(stillMissingText(o.items, o.lead));
+      case 'still-missing': {
+        // The user (18 Nov 2026): on a claim with the guided form, the list comes with a link to a form of only those
+        // items, and nothing to sign. A link that can't be made: the list as before, to send here.
+        let url: string | undefined;
+        if (settings.guidedForm && ports.guidedFormLink) {
+          try {
+            url = (await ports.guidedFormLink(claimId)).url;
+          } catch (e) {
+            console.error(`The missing-items link for claim ${claim.reference} couldn't be made: ${e}`);
+          }
+        }
+        if (url) await sendClaimText(ports, conv, stillMissingText(o.items, o.lead, { signed: signature === 'Signed' }), claim, at, undefined, { url, label: MISSING_LINK_LABEL });
+        else await say(stillMissingText(o.items, o.lead));
         break;
+      }
       case 'save-answer':
       case 'drop-answer':
         if (o.kind === 'save-answer') answers[o.key] = o.record;
@@ -2342,7 +2445,9 @@ function movesScore(o: Out, form: ClaimForm): boolean {
  * Every text Tina sends on the claim passes the policy gate. A blocked one becomes the holding line (without its
  * `choices`) and a Follow-up.
  */
-async function sendClaimText(ports: FollowOnPorts, conv: Conversation, text: string, claim: FollowOnClaim, at: string, choices?: Choice[]) {
+async function sendClaimText(
+  ports: FollowOnPorts, conv: Conversation, text: string, claim: FollowOnClaim, at: string, choices?: Choice[], link?: { url: string; label: string },
+) {
   const gate = claimGate(text);
   if (!gate.ok) {
     await ports.createAgentAction({
@@ -2350,5 +2455,5 @@ async function sendClaimText(ports: FollowOnPorts, conv: Conversation, text: str
       detail: `Tina's reply on claim ${claim.reference} was blocked by ${blockedBy(gate)}. The client got the holding line. Please update them.`,
     });
   }
-  await ports.send(conv.phone, { kind: 'text', text: gate.text, ...(gate.ok && choices?.length ? { choices } : {}) });
+  await ports.send(conv.phone, { kind: 'text', text: gate.text, ...(gate.ok && choices?.length ? { choices } : {}), ...(gate.ok && link ? { link } : {}) });
 }

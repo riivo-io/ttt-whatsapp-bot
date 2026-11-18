@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 4caf865). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -212,6 +212,12 @@ export interface FormReminderVars {
  * you to finish your claim form here: <link>." No second template to approve.
  */
 export const formStillNeeded = (link: string) => `you to finish your claim form here: ${link}`;
+
+/**
+ * The user (18 Nov 2026): the same {{3}} for a submitted claim, with the link to the missing-items form after the list:
+ * "… we still need the SAPS case number. You can add it to your claim here: <link>. Please send them here when you have them."
+ */
+export const missingOnForm = (names: string, link: string) => `${names}. You can add ${/ and /.test(names) ? 'them' : 'it'} to your claim here: ${link}`;
 
 /** The same reminder for a claim that came in by email, from the claim owner's mailbox (no Meta template on email). */
 export const FORM_REMINDER_EMAIL_TEMPLATE = {

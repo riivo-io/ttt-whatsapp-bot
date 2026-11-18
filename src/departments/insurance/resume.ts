@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 4caf865). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -31,7 +31,7 @@ import {
   claimTurn, clientQuestionDetail, CLIENT_BROKER, DEPARTMENT, sendText, toBrokerText, type AgentActionRow, type ClaimPorts, type Choice, type Conversation,
 } from './claim';
 import {
-  CLAIM_SETTINGS_DEFAULTS, followOnTurn, list, resumeMissing, type ClaimSettings, type ClaimStatus, type ClientReply, type FollowOnClaim,
+  CLAIM_SETTINGS_DEFAULTS, followOnTurn, formSubmitted, list, resumeMissing, type ClaimSettings, type ClaimStatus, type ClientReply, type FollowOnClaim,
   type FollowOnPorts, type FollowOnState, type ResumeFile, type StoredClaimForm,
 } from './followon';
 import type { QuestionItem } from './contracts';
@@ -557,8 +557,12 @@ export async function resumeTurn(
 
     case 'resume': {
       if (d.confirmed) await theirsAfterAll(ports, open.find((c) => c.id === d.claimId)!, at);
-      if (!d.files.length) await welcomeBack(ports, conv, d.claimId, d.lead, now, settings);
-      const r = await followOnTurn(ports, conv, null, { kind: 'resume', claimId: d.claimId, wamid: message.understood.wamid, files: d.files, introSent: d.introSent }, now, settings);
+      // The user (18 Nov 2026): a submitted claim's list comes with the missing-items form's link, the welcome-back words in
+      // front of it, so it isn't named twice (followon.ts resumeStep).
+      const listed = !d.files.length && !(await welcomeBack(ports, conv, d.claimId, d.lead, now, settings));
+      const r = await followOnTurn(ports, conv, null, {
+        kind: 'resume', claimId: d.claimId, wamid: message.understood.wamid, files: d.files, introSent: d.introSent, ...(listed ? { lead: d.lead } : {}),
+      }, now, settings);
       return { route: 'claim', state: { followOn: r.state, pending: null } };
     }
 
@@ -674,13 +678,19 @@ async function theirsAfterAll(ports: ResumePorts, held: OpenClaim, at: string) {
     : { ...row, kind: 'Created', detail: THEIRS.render({ reference: claim.reference }), template: { name: THEIRS.name, version: THEIRS.version } });
 }
 
-/** The welcome-back line, from the claim record: what's missing is worked out now, not remembered. */
-async function welcomeBack(ports: ResumePorts, conv: Conversation, claimId: string, lead: 'Welcome back.' | 'Thanks.', now: Date, settings: ResumeSettings) {
+/**
+ * The welcome-back line, from the claim record: what's missing is worked out now, not remembered. Whether it was sent: the
+ * user (18 Nov 2026): not on a submitted claim with something still to come, when the host has the guided form. The
+ * follow-on lists that, with the link to the missing-items form (followon.ts askOrEnd).
+ */
+async function welcomeBack(ports: ResumePorts, conv: Conversation, claimId: string, lead: 'Welcome back.' | 'Thanks.', now: Date, settings: ResumeSettings): Promise<boolean> {
   const claim = await ports.loadClaim(claimId);
   const form: StoredClaimForm = claim.claimFormId
     ? await ports.claimForm(claim.claimFormId)
     : (await ports.activeClaimForm(claim.providerId, claim.claimType)) ?? (await ports.genericClaimForm());
   const missing = resumeMissing({ claim, form, now, warningDays: settings.notificationWarningDays ?? CLAIM_SETTINGS_DEFAULTS.notificationWarningDays });
+  if (missing.length && settings.guidedForm && ports.guidedFormLink && formSubmitted(claim)) return false;
   const text = welcomeBackText(claim.claimType, missing, lead, { status: claim.status });
   await sendText(ports, conv, text, { id: claim.id, owner: claim.owner }, now.toISOString());
+  return true;
 }

@@ -810,6 +810,35 @@ test('TTTFG-5562: a form submitted after the conversation moved on tells the bro
     assert.ok(w.actions.some((a) => a.kind === 'Follow-up' && /submitted the claim form/.test(a.detail)));
 });
 
+test('the user (18 Nov 2026): after Submit, what is still missing is a list with the button to the missing-items form', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    // Everything answered on the form, no photo sent: the photos of the damage are still to come.
+    const claim = w.rows[0];
+    claim.answers = { driverName: { value: 'Adriaan', status: 'answered', at: t.toISOString(), source: 'form' } };
+    assert.equal(await claimsFormDone(w.deps, PHONE, claim.id, tick(t, 1)), 'carried-on');
+    const said = w.since().join('\n');
+    assert.match(said, /\*Things we still need from you:\*\n\n- Photos of the damage/);
+    assert.match(said, /Tap \*Add missing items\* to add (it|them) to your claim, or send (it|them) here\./);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'still-need');
+});
+
+test('the user (18 Nov 2026): the missing-items form sent after the conversation moved on still carries on, and keeps no other claim\'s state', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    const claim = w.rows[0];
+    claim.answers = { driverName: { value: 'Adriaan', status: 'answered', at: t.toISOString(), source: 'form' } };
+    claim.signatureStatus = 'Signed';
+    claim.status = 'Awaiting client docs';
+    w.store.get(PHONE)!.resume = { followOn: null, pending: null };
+    w.since();
+    assert.equal(await claimsFormDone(w.deps, PHONE, claim.id, tick(t, 1)), 'carried-on');
+    assert.match(w.since().join('\n'), /Tap \*Add missing items\*/);
+    assert.ok(!w.actions.some((a) => /no signing link went out/.test(a.detail)), 'not the stale Follow-up');
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.claimId, claim.id);
+});
+
 // ---- TTTFG-5299: roadside help on the demo numbers ----
 const ROADSIDE = { roadside: true, fromDamage: false, someoneHurt: false };
 const withRoadside = (w: ReturnType<typeof world>, route: Record<string, unknown> = ROADSIDE) => {

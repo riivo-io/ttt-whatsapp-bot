@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 4caf865). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -12,7 +12,7 @@
 // topics; the screens come in the order the form's list first reaches each topic, and a topic's questions in list order.
 import type { ClaimAnswers, AnswerRecord, ClaimForm, Condition, QuestionItem } from './contracts';
 import {
-  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, oneLine, type FollowOnClaim, type FollowOnPorts, type ClientFile,
+  accept, ADDRESS_CHECK_KEY, ADDRESS_KEY, claimMissing, formSubmitted, oneLine, type FollowOnClaim, type FollowOnPorts, type ClientFile,
 } from './followon';
 import { emailProblem, formatProblem, phoneProblem } from './formats';
 import type { Dv } from './dataverse';
@@ -106,6 +106,11 @@ export interface GuidedView {
   notKnown: string[];
   /** The screen to open on (AC 5): the first with an unanswered question, `screens.length` for the photos. */
   startAt: number;
+  /**
+   * The user (18 Nov 2026): the claim was submitted already, so this is the missing-items form: only what the client still
+   * has to send (followon.ts claimMissing), no details or notes to agree to, and nothing to sign. Its Submit is "Send".
+   */
+  topUp?: true;
 }
 
 /** What the page needs from the CRM to show what TTT holds (fill-dataverse.ts crmValues). */
@@ -406,6 +411,7 @@ const evidenceKind = (item: QuestionItem): GuidedEvidence['kind'] => (item.answe
 /** The form as the page shows it. `earlier`: the riivo_answers of the client's earlier claims, latest first. */
 export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm, earlier: readonly ClaimAnswers[] = []): GuidedView {
   const form = asGuided(list, claim);
+  if (formSubmitted(claim)) return topUpView(form, claim, earlier);
   const master = masterFormFor(form);
   const facts = factsOf(claim);
   const sapsRequired = !!claim.sapsRequired;
@@ -439,6 +445,30 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     notKnown,
     startAt: startAt < 0 ? screens.length : startAt,
   };
+}
+
+/**
+ * The user (18 Nov 2026): Tina lists what the client still has to send and links here, instead of asking for it on WhatsApp.
+ * The claim is signed (or its signing step ran), so the client sees only those items: the questions on one screen, in the
+ * list's order and with the same controls as on the full form, then the files. What they gave before isn't shown, and
+ * can't be changed here (topUpKeys): the signed form holds it.
+ */
+function topUpView(form: ClaimForm, claim: FollowOnClaim, earlier: readonly ClaimAnswers[]): GuidedView {
+  const missing = new Set(claimMissing(form, claim).map((i) => i.key));
+  const all = guidedView(form, { ...claim, signatureStatus: 'Not sent', evidenceComplete: false, readySent: false, status: 'FNOL logged' }, { contact: {}, riivo_policy: {} }, earlier);
+  const fields = all.screens.flatMap((sc) => sc.fields).filter((f) => missing.has(f.key)).map((f) => ({ ...f, hidden: undefined, counted: undefined }));
+  return {
+    reference: all.reference, title: all.title, insurer: all.insurer, details: [], detailsConfirmed: true,
+    screens: fields.length ? [{ id: 'missing', title: 'What we still need', help: 'Add what you have now. You can come back to this link for the rest.', fields }] : [],
+    evidence: all.evidence.filter((e) => missing.has(e.key)),
+    ...(all.otherHelp ? { otherHelp: all.otherHelp } : {}),
+    answers: all.answers, notKnown: all.notKnown, startAt: 0, topUp: true,
+  };
+}
+
+/** The keys a missing-items form may save: the questions on its list. Anything else a request names is dropped. */
+function topUpKeys(form: ClaimForm, claim: FollowOnClaim): Set<string> {
+  return new Set(claimMissing(form, claim).filter((i) => i.kind === 'question').map((i) => i.key));
 }
 
 /** Whether the police case's own questions are open on the form: the claim needs them, or the client said it was reported. */
@@ -622,6 +652,7 @@ export async function earlierClaimAnswers(dv: Dv, contactId: string, claimId: st
 /** One screen's answers, saved as chat answers are. */
 export async function saveGuided(ports: GuidedPorts, claimId: string, input: GuidedSave, now: Date): Promise<GuidedSaved> {
   const { claim, form, sapsRequired } = await loaded(ports, claimId);
+  if (formSubmitted(claim)) input = topUpInput(input, topUpKeys(form, claim));
   const { answers, saps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
   if (saps.caseNumber || saps.station) await ports.saveSaps(claimId, saps);
   if (JSON.stringify(answers) !== JSON.stringify(claim.answers)) await ports.saveAnswers(claimId, answers);
@@ -648,6 +679,20 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
 }
 
 /**
+ * The user (18 Nov 2026): what the missing-items form may save. Only its list's questions: never what TTT holds, the notes
+ * or an answer the signed form already has, whatever a request names. A "don't know yet" there keeps the item on the list.
+ */
+function topUpInput(input: GuidedSave, keys: ReadonlySet<string>): GuidedSave {
+  const mine = (k: string) => keys.has(k);
+  return {
+    answers: (input.answers ?? []).filter((a) => mine(a.key)),
+    notKnown: (input.notKnown ?? []).filter(mine),
+    cleared: (input.cleared ?? []).filter(mine),
+    checked: (input.checked ?? []).filter(mine),
+  };
+}
+
+/**
  * The client tapped Submit. The user (16 Nov 2026): nothing on the form blocks signing, whatever is still blank, a required
  * question or file included (it was the case number, when and where, and the required files). What the client left blank
  * is kept the way "I don't know" is on WhatsApp: a required question the client can get (the case number: `chased`) stays on
@@ -655,8 +700,11 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
  * confirm; an optional one is "not yet", which on WhatsApp means it's never asked. A file not sent is just as missing: the
  * reminder lists it too. `open` is always empty: the host carries on with { kind: 'form-done' } on the client's own queue.
  */
-export async function finishGuided(ports: GuidedPorts, claimId: string, now: Date): Promise<{ open: string[] }> {
+export async function finishGuided(ports: GuidedPorts, claimId: string, now: Date): Promise<{ open: string[]; topUp?: true }> {
   const { claim, form, sapsRequired } = await loaded(ports, claimId);
+  // The user (18 Nov 2026): the missing-items form. Nothing is marked: what's still blank stays on the client's list, and
+  // the host sends no signature (followon.ts topUpDone carries on).
+  if (formSubmitted(claim)) return { open: [], topUp: true };
   const open = guidedOpen(form, claim, sapsRequired);
   if (open.length) {
     const items = formItems(form, claim.answers, factsOf(claim), sapsRequired);

@@ -14,6 +14,9 @@
  *
  * It prints one link per form. A voice recording comes back as a sample sentence; Submit prints what Tina would do next.
  * GET /__claim/<form name> shows what the form has saved so far, for the checks in the test walkthrough.
+ *
+ * --top-up (the user, 18 Nov 2026): every claim is one already submitted and signed, with its questions answered and its
+ * files and SAPS case number still to come, so each link opens the missing-items form (guided.ts topUp).
  */
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
@@ -38,6 +41,7 @@ const HTTPS = process.argv.includes('--https');
 const EMAIL = process.argv.includes('--email');
 const CARRY = arg('carry', '');
 const CARRY_MS = Number(arg('carry-ms', '20000'));
+const TOP_UP = process.argv.includes('--top-up');
 const SCHEME = HTTPS ? 'https' : 'http';
 const LAN = Object.values(networkInterfaces()).flat().filter((a) => a?.family === 'IPv4' && !a.internal).map((a) => a!.address);
 
@@ -71,6 +75,19 @@ const done: string[] = [];
 
 function claimFor(row: { name: string; form: StoredClaimForm }, i: number): FollowOnClaim {
     const claimType = (row.form.claimType ?? 'Other') as FollowOnClaim['claimType'];
+    if (TOP_UP) {
+        const at = '2026-11-17T08:00:00.000Z';
+        const answers = Object.fromEntries(row.form.questionList.filter((q) => q.kind === 'question')
+            .map((q) => [q.key, { value: null, status: 'broker-to-confirm' as const, at, source: 'form' as const }]));
+        return {
+            id: row.name, reference: `CLM-${String(24117 + i).padStart(6, '0')}`, contactId: 'preview', providerId: row.form.provider ?? '', insurer: row.form.provider ?? 'Your insurer', claimType,
+            facts: { claimType, incidentAt: '2026-11-16T10:00:00+02:00', place: 'Main Road, Claremont', description: 'A taxi drove into the back of my car', thirdParties: false, injuries: false, saps: true },
+            sapsRequired: ['Motor accident', 'Motor theft', 'Hijacking'].includes(claimType), sapsStation: 'Claremont',
+            status: 'Awaiting client docs', signatureStatus: 'Signed', readySent: true, introSent: true, claimFormId: row.form.id,
+            answers: { ...answers, sapsCaseNumber: { value: null, status: 'not-yet', at, source: 'form' } }, evidence: [],
+            owner: { kind: 'user', id: 'u', name: 'Preview' }, contactAddress: '12 Oak Avenue\nDurbanville\n7550',
+        };
+    }
     return {
         id: row.name, reference: `CLM-${String(24117 + i).padStart(6, '0')}`, contactId: 'preview', providerId: row.form.provider ?? '', insurer: row.form.provider ?? 'Your insurer', claimType,
         facts: { claimType },
@@ -122,6 +139,7 @@ function session(link: GuidedLinkRow): ClaimFormSession {
             if (CARRY === 'slow') await new Promise((r) => setTimeout(r, CARRY_MS));
             done.push(link.claim_id);
             const signed = await formSignatureFor(D, link.claim_id);
+            if (TOP_UP) return void console.log(`  ${link.claim_id}: missing items sent. Tina would now thank the client and list anything still missing, with a new link.`);
             console.log(signed
                 ? `  ${link.claim_id}: submitted and signed on the form (signature ${signed.signature.length} characters). Tina would now fill the form and sign it with this signature: no signing link.`
                 : `  ${link.claim_id}: submitted. Tina would now ask on WhatsApp for anything still missing, fill the form and send the signing link.`);
