@@ -31,6 +31,7 @@ async function main() {
     const { metaWhatsAppService } = await import('../services/meta.service');
     const { routeClientMessage } = await import('../services/serviceRouting.service');
     const { ROUTE_IDS } = await import('../domain/serviceRoute');
+    const { CLAIM_LINK_TEXT } = await import('../domain/claimLink');
 
     (dynamicsService as any).getToken = async () => token;
     const history = new Map<string, string[]>();
@@ -78,6 +79,7 @@ async function main() {
     await send(ins, s1, 'I just sent you a document.', { file: true });
     await send(ins, s1, 'thank you');
     await send(ins, session('ins-claim'), 'Report a claim', { tapId: ROUTE_IDS.INSURANCE_CLAIM });
+    await send(ins, session('ins-link'), CLAIM_LINK_TEXT); // the broker's WhatsApp claim link (src/domain/claimLink.ts)
 
     console.log('\n=== Tax only ===');
     const s2 = session('tax');
@@ -86,6 +88,7 @@ async function main() {
     await send(tax, s2, 'insurance');
     await send(tax, s2, 'Yes, contact me', { tapId: ROUTE_IDS.OFFER_YES });
     await send(tax, s2, 'it was a white polo');
+    await send(tax, session('tax-link'), CLAIM_LINK_TEXT); // no policy to claim on: the offer, never a claim walkthrough
 
     console.log('\n=== Both ===');
     const s3 = session('both');
@@ -96,6 +99,8 @@ async function main() {
     await send(both, s4, 'question about my excess');
     await send(both, s4, '🧾 Tax', { tapId: ROUTE_IDS.TAX });
     await send(both, session('both-hi'), 'hi');
+    // The claim link, from a client with both: a claim, no "insurance or tax?", the session set to insurance.
+    await send(both, session('both-link', { service_side: 'tax' }), CLAIM_LINK_TEXT);
 
     console.log('\nSessions:');
     for (const s of sessions.values()) console.log(` ${s.id}: side=${s.service_side ?? '-'} pending=${s.route_pending ? s.route_pending.kind : '-'} handover=${s.insurance_handover ? `${s.insurance_handover.requestId} (${s.insurance_handover.ownerKind})` : '-'}`);

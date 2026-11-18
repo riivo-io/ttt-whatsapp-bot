@@ -11,6 +11,7 @@ import {
 } from '../../src/domain/claimsHost';
 import { question, type AgentActionRow, type ClaimPorts, type ClaimRow, type Outbound } from '../../src/departments/insurance/claim';
 import { missingFor, type Policy } from '../../src/departments/insurance/walkthrough';
+import { CLAIM_LINK_TEXT } from '../../src/domain/claimLink';
 
 const PHONE = '+27821234567';
 const JANE = { id: 'c-jane', firstName: 'Jane' };
@@ -248,4 +249,49 @@ test('service routing: force starts a claim without the claim check; wordFilter 
     assert.equal(forced.handled, true);
     assert.equal(w.intentCalls(), 1, 'force: no claim check');
     assert.deepEqual(w.requests, ['I want to report an insurance claim.']);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The claim link (src/domain/claimLink.ts): its message starts a claim by its words, with service routing on or off.
+// ---------------------------------------------------------------------------------------------------------------
+
+test('claim link: the link\'s message starts a claim with no model check, even when the model would say "not a claim"', async () => {
+    const w = world({ isClaim: false, answers: [{}] });
+    const out = await claimFromClient(w.deps, PHONE, JANE, CLAIM_LINK_TEXT, NOW);
+    assert.deepEqual(out, { handled: true, kind: 'started' });
+    assert.equal(w.intentCalls(), 0, 'the claim check is not asked');
+    assert.deepEqual(w.requests, [CLAIM_LINK_TEXT], 'an Insurance request, with the client\'s own message on it');
+    assert.equal(w.texts()[0], 'Is this claim about your Discovery Insure Personal policy (DI-1)?');
+    assert.equal(w.store.get(PHONE)!.state.step, 'policy');
+});
+
+test('claim link: the same words with a loss in them go the ordinary way (the claim check decides)', async () => {
+    const no = world({ isClaim: false });
+    assert.deepEqual(await claimFromClient(no.deps, PHONE, JANE, 'How do I open an insurance claim?', NOW), { handled: false });
+    assert.equal(no.intentCalls(), 1);
+    assert.equal(no.requests.length, 0);
+});
+
+test('claim link: claims switched off: the link starts nothing', async () => {
+    const w = world({ enabled: false });
+    assert.deepEqual(await claimFromClient(w.deps, PHONE, JANE, CLAIM_LINK_TEXT, NOW), { handled: false });
+    assert.equal(w.requests.length, 0);
+});
+
+test('claim link: a number TTT does not have gets the unknown-number reply, not a sign-up, and no claim', async () => {
+    const w = world({ isClaim: false });
+    assert.deepEqual(await claimFromUnknownNumber(w.deps, PHONE, CLAIM_LINK_TEXT), { handled: true, kind: 'unknown-number' });
+    assert.equal(w.intentCalls(), 0);
+    assert.equal(w.texts().length, 1);
+    assert.match(w.texts()[0], /I can't find this number on our system/);
+    assert.equal(w.claims.length + w.actions.length + w.requests.length, 0);
+});
+
+test('claim link: a walkthrough in progress keeps the link\'s message as an answer, and does not start a second claim', async () => {
+    const w = world({ answers: [{}, {}] });
+    await claimFromClient(w.deps, PHONE, JANE, 'I need to claim, my car was hit', NOW);
+    const before = w.requests.length;
+    const out = await claimFromClient(w.deps, PHONE, JANE, CLAIM_LINK_TEXT, NOW);
+    assert.deepEqual(out, { handled: true, kind: 'continued' });
+    assert.equal(w.requests.length, before, 'no second request');
 });

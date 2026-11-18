@@ -13,6 +13,7 @@
  * Pure: the processor reads the inputs, calls the model when the verdict says `needs-model`, and applies the verdict.
  */
 import { mightBeClaim } from '../departments/insurance/intent';
+import { isClaimLinkMessage } from './claimLink';
 import type { ServiceLines } from './serviceLines';
 
 export type Side = 'tax' | 'insurance';
@@ -95,8 +96,8 @@ const TAX_WORDS = new RegExp([
 export const hasInsuranceWords = (text: string) => mightBeClaim(text) || MORE_INSURANCE_WORDS.test(text);
 export const hasTaxWords = (text: string) => TAX_WORDS.test(text);
 
-/** The message as one lower-case word or phrase: "Insurance!" and " insurance 🛡️" are "insurance". */
-const bare = (text: string) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+/** The message as one lower-case word or phrase: "Insurance!" and " insurance 🛡️" are "insurance". A phone's curly apostrophe is a straight one. */
+const bare = (text: string) => text.toLowerCase().replace(/[‘’ʼ]/g, "'").replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 const INSURANCE_ANSWERS = new Set(['insurance', 'insure', 'my insurance', 'insurance please', 'its insurance', "it's insurance", 'about insurance']);
 const TAX_ANSWERS = new Set(['tax', 'my tax', 'tax please', 'its tax', "it's tax", 'about tax', "it's about tax", 'its about tax']);
@@ -154,6 +155,16 @@ export function decideServiceRoute(input: RouteInput, model?: SideAnswer): Route
 
     const insuranceOnly = lines.insurance && !lines.tax;
     const taxOnly = lines.tax && !lines.insurance;
+
+    // 3b. The claim link (src/domain/claimLink.ts): the same as tapping Report a claim, whatever else the client has.
+    // Decided by words, so a client with both services isn't asked "insurance or tax?" and no model can call it "not a
+    // claim". A tax-only client has no policy for a claim: they get the offer, as for any insurance message. The
+    // exception is a tax client who already said yes to the offer this session: the message joins that hand-over below.
+    if (!document && isClaimLinkMessage(text) && !(taxOnly && side === 'insurance')) {
+        return taxOnly
+            ? { kind: 'offer', text, why: 'claim link (tax client)' }
+            : { kind: 'insurance', claim: true, setSide: 'insurance', why: 'claim link' };
+    }
 
     // 4. "insurance" on its own: the client is saying which side (Tina's tax prompt tells them to).
     if (!document && bare(text) === 'insurance') {

@@ -23,6 +23,7 @@ import { roadsideRoute, type RoadsideModel } from '../departments/insurance/road
 import { isRoadside, roadsideReply, roadsideStart } from '../departments/insurance/roadside-turn';
 import { openingFacts, understand, type UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
+import { isClaimLinkMessage } from './claimLink';
 
 /** A walkthrough untouched this long is abandoned: the next message starts afresh. */
 export const ABANDONED_AFTER_MS = 72 * 3_600_000;
@@ -151,7 +152,9 @@ export async function claimFromUnknownNumber(deps: ClaimsHostDeps, phone: string
         const out = await roadsideTurn(deps, phone, null, text, now, stored);
         if (out) return out;
     }
-    if (!(await claimRoute(deps.intentModel, text))) return NOT_MINE;
+    // The claim link's message (src/domain/claimLink.ts) is a claim report by its words: no model check. A client
+    // texting from a number TTT doesn't have gets the unknown-number reply, not the sign-up template.
+    if (!isClaimLinkMessage(text) && !(await claimRoute(deps.intentModel, text))) return NOT_MINE;
     const conv = claimsConversation(phone, '', deps.signUpLink, deps.contactNumber);
     // The package's own start with no contact: the unknown-number reply through the gate, and nothing else.
     await claimTurn(deps.ports('', null), conv, null, { kind: 'start' }, new Date());
@@ -169,6 +172,9 @@ export async function claimFromClient(
     o: { force?: boolean; wordFilter?: boolean } = {},
 ): Promise<ClaimsOutcome> {
     if (!deps.enabled) return NOT_MINE;
+    // The claim link's message is a claim report by its words (src/domain/claimLink.ts), the same as the Report a claim
+    // tap: it starts a claim with no claim check, with service routing on or off.
+    const force = !!o.force || isClaimLinkMessage(text);
     let stored = await deps.load(phone);
     if (stored && (stored.contactId !== contact.id || now.getTime() - Date.parse(stored.updatedAt) > ABANDONED_AFTER_MS)) {
         await deps.remove(phone);
@@ -176,7 +182,7 @@ export async function claimFromClient(
     }
 
     // TTTFG-5299: a roadside conversation in progress, or a new one (asked before the claim route).
-    if (roadsideOn(deps) && (stored ? isRoadside(stored.state) : !o.force)) {
+    if (roadsideOn(deps) && (stored ? isRoadside(stored.state) : !force)) {
         const out = await roadsideTurn(deps, phone, contact, text, now, stored);
         if (out) return out;
     }
@@ -194,7 +200,7 @@ export async function claimFromClient(
         return persist(deps, phone, contact.id, stored.requestId, r.state, r.lastSent ?? stored.lastSent, r.claim?.reference, 'continued');
     }
 
-    if (!o.force && !(await claimRoute(deps.intentModel, text, { wordFilter: o.wordFilter }))) return NOT_MINE;
+    if (!force && !(await claimRoute(deps.intentModel, text, { wordFilter: o.wordFilter }))) return NOT_MINE;
     const requestId = await deps.openRequest(contact.id, phone, text);
     // Without a request there is nothing to hang the follow-ups and messages on. Tina's normal path answers instead,
     // and the error is in the log; better than a claim conversation the CRM can't see.
