@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit c3f3a6e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/progress.ts (commit a1504ad). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 8 and 14): what Tina asks next on a claim, and what is still missing. Pure functions
 // over the claim form's question list, the claim's saved answers and the evidence linked to the claim.
@@ -53,11 +53,36 @@ export const SAPS_CLAIM_TYPES: readonly string[] = ['Motor accident', 'Motor the
  * code decides), or when the client said the police were involved (`policeInvolved`, the walkthrough's `saps` fact).
  * 2 Nov 2026: the case number is essential; before, a motor accident with the police involved was never asked for it.
  */
-export function sapsStepApplies(claimType: ClaimType | string, form: ClaimForm, describedAsTheft: boolean, policeInvolved = false): boolean {
+export function sapsStepApplies(claimType: ClaimType | string, form: ClaimForm, describedAsTheft: boolean, policeInvolved = false, answers?: ClaimAnswers): boolean {
   return (
     SAPS_CLAIM_TYPES.includes(claimType) || form.sapsCaseRequired || describedAsTheft || policeInvolved ||
-    form.questionList.some((q) => q.key === SAPS_CASE_KEY && q.required)
+    form.questionList.some((q) => q.key === SAPS_CASE_KEY && q.required) || (!!answers && statesTheft(form, answers))
   );
+}
+
+/** The questions whose answer says something was stolen, and the answers that say it: "Stolen", or a cause that is a theft. */
+const THEFT_ANSWER = /\b(theft|stolen|burglary|robbery|hijack)/i;
+const THEFT_QUESTIONS = ['lossKind', 'lossCause'] as const;
+
+/**
+ * TTT (18 Nov 2026): on a household or portable possessions theft the client needs a SAPS case number. The claim type is
+ * Property loss or damage whether it was stolen, burnt or flooded, so the form's own question settles it: "Was your
+ * property stolen, lost or damaged?" answered Stolen, or a cause that is a theft or a burglary. Only the options the form
+ * lists count, so a form with neither question never reads a theft into anything.
+ */
+export function theftOptions(form: Pick<ClaimForm, 'questionList'>): Array<{ key: string; oneOf: string[] }> {
+  return THEFT_QUESTIONS.flatMap((key) => {
+    const q = form.questionList.find((i) => i.key === key && i.kind === 'question');
+    const oneOf = (q?.choices ?? []).filter((c) => THEFT_ANSWER.test(c));
+    return oneOf.length ? [{ key, oneOf }] : [];
+  });
+}
+
+export function statesTheft(form: Pick<ClaimForm, 'questionList'>, answers: ClaimAnswers): boolean {
+  return theftOptions(form).some(({ key, oneOf }) => {
+    const a = answers[key];
+    return a?.status === 'answered' && typeof a.value === 'string' && oneOf.some((o) => o.toLowerCase() === (a.value as string).trim().toLowerCase());
+  });
 }
 
 /**

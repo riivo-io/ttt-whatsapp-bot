@@ -287,10 +287,18 @@ const SCRIPT = String.raw`
   // A value from the client's last claim counts until they change it, so the question after it shows straight away.
   function value(key) { return key in draft ? draft[key] : A[key] !== undefined ? A[key] : NK[key] ? undefined : PRE[key]; }
   function filled(v) { return v !== undefined && v !== null && v !== ''; }
+  function stolen() {
+    var p = V && V.policeIf || [];
+    for (var i = 0; i < p.length; i++) {
+      var v = value(p[i].key);
+      if (filled(v)) for (var j = 0; j < p[i].oneOf.length; j++) if (sameStrict(v, p[i].oneOf[j])) return true;
+    }
+    return false;
+  }
   function holds(c) {
     var v = value(c.key);
-    // A case number says the police were involved, before anyone asks.
-    if (c.key === 'saps' && filled(value('sapsCaseNumber'))) v = true;
+    // A case number says the police were involved, before anyone asks. So does "stolen" (policeIf): a theft needs the case.
+    if (c.key === 'saps' && (filled(value('sapsCaseNumber')) || stolen())) v = true;
     var hit = false;
     if (filled(v)) for (var i = 0; i < c.oneOf.length; i++) if (sameStrict(v, c.oneOf[i])) hit = true;
     // "not": shows unless the answer is one of them, so a question nobody has answered yet doesn't hide it.
@@ -503,7 +511,7 @@ const SCRIPT = String.raw`
   }
   function closeCombo() { listSheet = null; $('comboInput').blur(); $('comboSheet').hidden = true; render(); }
   function pickCombo(name) {
-    var k = listSheet, c = FIELD[k].control, rest = detailOf(c, value(k));
+    var k = listSheet, c = FIELD[k].control, rest = (c.noDetail || []).some(function (n) { return same(n, name); }) ? '' : detailOf(c, value(k));
     draft[k] = name + (rest ? c.detail.joiner + rest : '');
     delete errors[k];
     closeCombo();
@@ -617,7 +625,7 @@ const SCRIPT = String.raw`
         return html;
       }
       case 'combo': {
-        var base = pillBase(c, v), then2 = c.detail && filled(base) ? '<input class="inp" autocomplete="off" data-detail="' + q(k) + '" placeholder="' + esc(c.detail.placeholder) + '" value="' + esc(detailOf(c, v)) + '">' : '';
+        var base = pillBase(c, v), then2 = c.detail && filled(base) && !(c.noDetail || []).some(function (n) { return same(n, base); }) ? '<input class="inp" autocomplete="off" data-detail="' + q(k) + '" placeholder="' + esc(c.detail.placeholder) + '" value="' + esc(detailOf(c, v)) + '">' : '';
         return '<div class="tiles t1">' + tile(k, 'Tap to choose or type', base, 'data-combo="' + q(k) + '"') + '</div>' + then2;
       }
       case 'multi': {

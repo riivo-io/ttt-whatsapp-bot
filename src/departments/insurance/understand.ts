@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit c3f3a6e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit a1504ad). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Claude reads one WhatsApp message from the client and says what it means for the step Tina is on. Code
 // decides what happens next (walkthrough.ts). This is the "use Claude only to understand each answer" half of the

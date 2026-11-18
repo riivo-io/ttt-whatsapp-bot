@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms-insurers.ts (commit c3f3a6e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/masterforms-insurers.ts (commit a1504ad). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // 9 Nov 2026: the questions that the claim forms of 13 more insurers ask and the go-live forms don't, and the screen each sits on.
 // The wording stays in each insurer form's question list (config/claimforms); this only says where a question key goes.
@@ -13,11 +13,11 @@ export const INSURER_TOPICS: Readonly<Record<MasterFormId, readonly InsurerTopic
       'vinNumber vehiclePurchaseDate vehiclePurchasePrice engineNumber vehicleMakeModel vehicleColour vehicleMarks '
       + 'preExistingDamage vehicleDatePurchased vehicleInsuredElsewhere' },
     { id: 'damage', title: "Damage", fields:
-      'oldDamage repairerName glassBreakType glassType glassSignwriting damageRepaired '
-      + 'damageRepairedDetails glassCause smashAndGrab loadCarried loadCommodity' },
+      'oldDamage damageRepaired '
+      + 'damageRepairedDetails loadCarried loadCommodity' },
     { id: 'driver', title: "Driver", fields:
       'driverAddress driverEmployee driverOwnInsurer driverOwnPolicyNo driverPreviousAccidents driverConvictions '
-      + 'driverOtherVehicle driverEmail driverOwnsOtherVehicle driverAge driverConsentDetails driverHasDefects '
+      + 'driverOtherVehicle driverEmail driverOwnsOtherVehicle driverConsentDetails driverHasDefects '
       + 'driverDefectDetails principalDriver principalDriverOther previousAccidents driverOwnInsurance '
       + 'driverDefectsDetails driverOwnsOtherCar driverOtherCarInsurer bloodSampleTaken bloodSampleResult' },
     { id: 'licence', title: "Licence", fields:
@@ -37,7 +37,7 @@ export const INSURER_TOPICS: Readonly<Record<MasterFormId, readonly InsurerTopic
       'witnessAddress witnessEmail witnessLocation witnessPassenger' },
     { id: 'accident', title: "Accident", fields:
       'roadWidth vehicleLights streetLighting warningGiven streetLightsOn driverWarned roadState roadLayout roadType '
-      + 'junctionType faultOpinion faultWhy warningDetails someoneResponsible responsibleDetails lostControl '
+      + 'junctionType faultOpinion faultWhy warningDetails lostControl '
       + 'lostControlDetails tyresChanged tyresChangedWhich vehicleLightsOn accidentCause' },
     { id: 'policy', title: "Policy", fields:
       'occupation soleOwner otherInterestDetails coveredElsewhere coveredElsewhereDetails previousInsurer' },
