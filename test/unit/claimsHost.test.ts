@@ -66,9 +66,11 @@ test('TTTFG-5168 check 1: "I need to claim, my car was hit" opens an Insurance r
     assert.deepEqual(out, { handled: true, kind: 'started' });
     assert.deepEqual(w.requests, ['I need to claim, my car was hit']);
     assert.deepEqual(w.incoming, ['I need to claim, my car was hit']);
-    assert.equal(w.texts()[0], 'Is this claim about your Discovery Insure Personal policy (DI-1)?');
+    // 18 Nov 2026: a car accident, and the only policy can take it, so it is taken: straight to the on-scene list.
+    assert.match(w.texts()[0], /^While you're still at the scene/);
     const stored = w.store.get(PHONE)!;
-    assert.equal(stored.state.step, 'policy');
+    assert.equal(stored.state.step, 'ready');
+    assert.equal(stored.state.policyId, DISCOVERY.id);
     assert.equal(stored.state.facts.claimType, 'Motor accident', 'what the client already said is kept');
     assert.equal(stored.state.facts.description, undefined, 'a four-word opening line is not the description: Tina asks for it');
     assert.equal(stored.lastSent, w.texts()[0]);
@@ -99,8 +101,7 @@ test('TTTFG-5168 check 2: an unknown number reporting a claim gets only the unkn
 test('TTTFG-5168 checks 4 to 8 through Tina: a whole claim from first message to acknowledgement', async () => {
     const w = world({ answers: [
         {}, // first read of "my car was hit": nothing beyond the claim words
-        { kind: 'yes' }, // policy confirmed
-        { kind: 'facts', claimType: 'Motor accident' },
+        // The "Car accident" tap and "ready" after the on-scene list are read without the model (understand.ts categoryTap, READY_WORDS).
         // "ready" after the on-scene list is read without the model (understand.ts READY_WORDS).
         { kind: 'facts', description: 'A car drove into the back of mine at the robot.', incidentDate: '2026-11-03', incidentTime: '14:30', place: 'Main Rd, Claremont' },
         { kind: 'facts', thirdParties: true, thirdPartyDetails: 'the other driver, CA 123-456', saps: false, injuries: true, injuryDetails: 'passenger hurt her neck' },
@@ -110,11 +111,11 @@ test('TTTFG-5168 checks 4 to 8 through Tina: a whole claim from first message to
     ] });
     const say = (t: string) => claimFromClient(w.deps, PHONE, JANE, t, NOW);
     await say('I need to claim, my car was hit');
-    await say('yes');
-    // TTTFG-5299 (9 Nov 2026): no safety line and no emergency number any more: straight to the claim question.
-    assert.equal(w.texts().at(-1), 'What kind of claim is it?');
+    // 18 Nov 2026: the kind of claim first, from four taps. TTTFG-5299: no safety line and no emergency number.
+    assert.equal(w.texts().at(-1), 'What is your claim for? Please pick one from the list.');
+    assert.deepEqual(w.sent.at(-1)!.choices?.map((c) => c.title), ['Car accident', 'Car stolen or hijacked', 'Windscreen', 'Household']);
     assert.doesNotMatch(w.texts().join('\n'), /10111|hurt or in danger/);
-    await say('car accident');
+    await say('Car accident'); // the tap; the only policy is taken
     assert.match(w.texts().at(-1)!, /Tap \*Ready\* to begin\.$/);
     await say('ready');
     await say('yesterday at 14:30, someone drove into the back of me at the robot on Main Rd, Claremont');
@@ -173,7 +174,7 @@ test('TTTFG-4830: a short opening ("Hi, my phone was stolen") is kept as a hint,
     const w = world({ answers: [{ kind: 'facts', claimType: 'Portable possessions', description: 'my phone was stolen' }] });
     assert.deepEqual(await claimFromClient(w.deps, PHONE, JANE, 'Hi, my phone was stolen', NOW), { handled: true, kind: 'started' });
     const s = w.store.get(PHONE)!.state;
-    assert.equal(s.step, 'policy'); // the policy is still the first question
+    assert.equal(s.step, 'ready'); // 18 Nov 2026: the only policy is taken; the on-scene list is next
     assert.equal(s.facts.claimType, 'Portable possessions');
     assert.equal(s.facts.description, undefined); // still asked for the whole story
     assert.equal(s.opening, 'my phone was stolen');
@@ -192,10 +193,13 @@ test('TTTFG-4830 (28 Oct 2026): the opening is read before the walkthrough start
     assert.equal(w.reads.length, 1);
     assert.equal(w.reads[0].sentBefore, 0);
     assert.match(w.reads[0].user, /Someone broke into my house last night/);
-    assert.deepEqual(w.texts(), ['That sounds like a claim on your Discovery Insure Household policy (DI-HOME). Is that right?']);
+    // 18 Nov 2026: the household policy is the only one for a break-in, so it is taken: straight to the on-scene list.
+    assert.equal(w.texts().length, 1);
+    assert.match(w.texts()[0], /^If you're at the property/);
     const s = w.store.get(PHONE)!.state;
+    assert.equal(s.policyId, 'p-home');
     assert.deepEqual(s.policies.map((p) => p.id), ['p-home']);
-    assert.deepEqual(s.allPolicies?.map((p) => p.id), ['p-car', 'p-home'], 'the motor policy is kept, in case the client says no');
+    assert.deepEqual(s.allPolicies?.map((p) => p.id), ['p-car', 'p-home'], 'the motor policy is kept, in case the kind of claim is put right at the summary');
     assert.equal(s.facts.description, opening);
 });
 
@@ -261,8 +265,10 @@ test('claim link: the link\'s message starts a claim with no model check, even w
     assert.deepEqual(out, { handled: true, kind: 'started' });
     assert.equal(w.intentCalls(), 0, 'the claim check is not asked');
     assert.deepEqual(w.requests, [CLAIM_LINK_TEXT], 'an Insurance request, with the client\'s own message on it');
-    assert.equal(w.texts()[0], 'Is this claim about your Discovery Insure Personal policy (DI-1)?');
-    assert.equal(w.store.get(PHONE)!.state.step, 'policy');
+    // 18 Nov 2026 (the developer): the four kinds of claim to tap, then the policies for the one picked, then the form.
+    assert.equal(w.texts()[0], 'What is your claim for? Please pick one from the list.');
+    assert.deepEqual(w.sent[0].choices?.map((c) => c.title), ['Car accident', 'Car stolen or hijacked', 'Windscreen', 'Household']);
+    assert.equal(w.store.get(PHONE)!.state.step, 'claim-type');
 });
 
 test('claim link: the same words with a loss in them go the ordinary way (the claim check decides)', async () => {
