@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    answerUnknownNumber, createdActionName, isPlaceholderLead, placeholderLeadNames, REPLY_WINDOW_MS, routeUnknownNumber,
-    TAX_LEAD_TYPE, unknownNumberReply, type UnknownNumberPorts,
+    answerUnknownNumber, createdActionColumns, createdActionName, isPlaceholderLead, placeholderLeadNames, placeholderLeadParams, REPLY_WINDOW_MS,
+    routeUnknownNumber, TAX_LEAD_TYPE, unknownNumberReply, type UnknownNumberPorts,
 } from '../../src/domain/unknownNumber';
 import { claimFromUnknownNumber, type ClaimsHostDeps, type StoredWalkthrough } from '../../src/domain/claimsHost';
 import type { Outbound } from '../../src/departments/insurance/claim';
@@ -106,6 +106,28 @@ test('AC 5: the lead is made for the Tax team from the number alone', () => {
     assert.deepEqual(placeholderLeadNames('27839990000'), { firstName: 'WhatsApp', lastName: '27839990000' });
     assert.match(createdActionName('27839990000'), /^New lead from WhatsApp 27839990000: Tina sent the tax sign-up link\./);
     assert.ok(createdActionName('27839990000').length <= 300);
+});
+
+test('AC 5: the lead is a Tax lead from WhatsApp owned by the Tax team, with only the number to go on', () => {
+    assert.deepEqual(placeholderLeadParams('27839990000', 'team-tax'), {
+        firstName: 'WhatsApp', lastName: '27839990000', phone: '27839990000', leadType: 100000000, leadSource: 463630005, ownerTeamId: 'team-tax',
+    });
+    assert.equal('ownerTeamId' in placeholderLeadParams('27839990000'), false, 'no team found: the CRM default owner');
+});
+
+test('AC 5: the Created action is open, department Tax, owned by the Tax team, regarding the lead; it carries no message text', () => {
+    const row = createdActionColumns({ phone: '27839990000', leadId: 'lead-1', at: T0.toISOString(), sourceMessageId: 'wamid.1', ownerTeamId: 'team-tax' });
+    assert.equal(row.riivo_kind, 463630007, 'Kind Created');
+    assert.equal(row.riivo_status, 463630000, 'open: it shows in My Day until a person has checked it');
+    assert.equal(row.riivo_channel, 463630001, 'WhatsApp');
+    assert.equal(row.riivo_department, 463630000, 'Tax');
+    assert.equal(row['ownerid@odata.bind'], '/teams(team-tax)');
+    assert.equal(row['riivo_Client_new_lead@odata.bind'], '/new_leads(lead-1)');
+    assert.equal(row.riivo_sourcemessageid, 'wamid.1');
+    assert.equal(row.riivo_recipient, '27839990000');
+    assert.equal(JSON.stringify(row).includes(JANE_ID), false);
+    assert.equal(createdActionColumns({ phone: '27839990000', leadId: 'lead-1', at: T0.toISOString() }).riivo_sourcemessageid, 'whatsapp:27839990000');
+    assert.equal('ownerid@odata.bind' in createdActionColumns({ phone: '27839990000', leadId: 'lead-1', at: T0.toISOString() }), false);
 });
 
 test('AC 6: a second message from the same number inside 24 hours gets no reply and no second lead', async () => {

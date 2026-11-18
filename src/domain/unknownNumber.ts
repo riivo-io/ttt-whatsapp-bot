@@ -37,6 +37,39 @@ export const placeholderLeadNames = (phone: string): { firstName: string; lastNa
 export const createdActionName = (phone: string): string =>
     `New lead from WhatsApp ${phone}: Tina sent the tax sign-up link. She asked for no ID number and answered no question.`.slice(0, 300);
 
+// riivo_agentaction choices: the values ship with 2Tables, so they are the same in every environment.
+const KIND_CREATED = 463630007;
+const STATUS_OPEN = 463630000;
+const CHANNEL_WHATSAPP = 463630001;
+const DEPARTMENT_TAX = 463630000;
+const URGENCY_NORMAL = 463630002;
+
+/** What createLead is given for an unknown number's lead (the Tax team owns it when the team is known). */
+export const placeholderLeadParams = (phone: string, ownerTeamId?: string) => ({
+    ...placeholderLeadNames(phone), phone, leadType: TAX_LEAD_TYPE, leadSource: WHATSAPP_LEAD_SOURCE, ...(ownerTeamId ? { ownerTeamId } : {}),
+});
+
+/**
+ * The riivo_agentaction row for the lead: Kind Created, open (so it shows in My Day until a person has checked it), department
+ * Tax, owned by the Tax team, regarding the lead. The service and the DEV rehearsal both write exactly this.
+ */
+export function createdActionColumns(o: { phone: string; leadId: string; at: string; sourceMessageId?: string; ownerTeamId?: string | null }): Record<string, unknown> {
+    return {
+        riivo_name: createdActionName(o.phone),
+        riivo_kind: KIND_CREATED,
+        riivo_status: STATUS_OPEN,
+        riivo_channel: CHANNEL_WHATSAPP,
+        riivo_department: DEPARTMENT_TAX,
+        riivo_urgency: URGENCY_NORMAL,
+        riivo_urgencyreason: 'The agent created a lead to check',
+        riivo_actedon: o.at,
+        riivo_recipient: o.phone,
+        riivo_sourcemessageid: o.sourceMessageId || `whatsapp:${o.phone}`,
+        'riivo_Client_new_lead@odata.bind': `/new_leads(${o.leadId})`,
+        ...(o.ownerTeamId ? { 'ownerid@odata.bind': `/teams(${o.ownerTeamId})` } : {}),
+    };
+}
+
 /** What the reply table says about a number. */
 export interface ReplyClaim {
     /** True when this message may be answered: no reply in the last 24 hours. */

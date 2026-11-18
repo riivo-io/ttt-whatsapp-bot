@@ -1500,10 +1500,20 @@ class SupabaseService {
         if (error) throw new Error(`[Supabase] saveUnknownNumberLead: ${error.message}`);
     }
 
-    /** The lead Tina made for the number, or null. An error throws: it is not "no lead". */
-    async getUnknownNumberLeadId(phone: string): Promise<string | null> {
+    /**
+     * The lead Tina made for the number, or null. An error throws: it is not "no lead".
+     * `tolerateMissingTable`: the table is not there yet (the migration is applied by hand, before the deploy). A lead's own
+     * message must not fail for that: with no table there is no placeholder, so it is an ordinary lead, served as before.
+     */
+    async getUnknownNumberLeadId(phone: string, o: { tolerateMissingTable?: boolean } = {}): Promise<string | null> {
         const { data, error } = await this.client.from('unknown_number_replies').select('lead_id').eq('phone_number', phone).maybeSingle();
-        if (error) throw new Error(`[Supabase] getUnknownNumberLeadId: ${error.message}`);
+        if (error) {
+            if (o.tolerateMissingTable && /42P01|PGRST205|does not exist|schema cache/i.test(`${(error as any).code ?? ''} ${error.message}`)) {
+                console.warn('[Supabase] unknown_number_replies is not there yet (migration 20261118120000): no placeholder leads');
+                return null;
+            }
+            throw new Error(`[Supabase] getUnknownNumberLeadId: ${error.message}`);
+        }
         return (data as { lead_id: string | null } | null)?.lead_id ?? null;
     }
 

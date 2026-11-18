@@ -59,8 +59,9 @@
       "task": "Add scenario tests for the Jane Smith message, repeats, CRM failures and known clients, plus a DEV rehearsal script and test steps",
       "owner": "agent",
       "reason": "tests in this repo (AC 1 to 6, 8)",
-      "done": false,
-      "area": "build"
+      "done": true,
+      "area": "build",
+      "verified_by": "agent"
     },
     {
       "task": "Land the unknown-number roadside path from TTTFG-5299 on main",
