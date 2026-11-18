@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/intent.ts (commit c3f3a6e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/intent.ts (commit a1504ad). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168 AC 1: a client who reports a claim on WhatsApp is routed to the Insurance and Advice package, topic Claim.
 // This is the claim intent of the Anchor (SPEC-05): one message in, a route or nothing out.

@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit c3f3a6e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit a1504ad). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -1019,7 +1019,7 @@ const isSaps = (key: string) => key === SAPS_CASE_KEY || key === SAPS_STATION_KE
  * has a SAPS case number or station (a column for it is suggested to TTTFG-4885).
  */
 function resumedSaps(c: Ctx): boolean {
-  return !!c.claim.sapsRequired || sapsStepApplies(c.claim.claimType, c.form, false, c.claim.facts.saps === true)
+  return !!c.claim.sapsRequired || sapsStepApplies(c.claim.claimType, c.form, false, c.claim.facts.saps === true, c.claim.answers)
     || !!(c.claim.sapsCaseNumber || c.claim.sapsStation);
 }
 

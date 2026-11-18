@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit c3f3a6e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formcontrols.ts (commit a1504ad). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: how each question is answered on the guided form. Tapping comes first: a free-text box only where the client
 // has to give a name, a number or their own words, and a voice recording only for those own words. The question list's
@@ -12,9 +12,10 @@ export type FormControl =
   | { kind: 'pills'; options: readonly string[]; other?: boolean; label?: string; bare?: boolean; detail?: { placeholder: string; joiner: string } }
   /**
    * A list too long to tap, of things people know the name of: a dropdown they can also type into, which narrows as they
-   * type. `free`: a name that isn't on the list is kept as typed. `detail`: as for pills.
+   * type. `free`: a name that isn't on the list is kept as typed. `detail`: as for pills. `noDetail`: options that take no
+   * detail box ("None", "I don't know" have no policy number).
    */
-  | { kind: 'combo'; options: readonly string[]; free?: boolean; label?: string; bare?: boolean; placeholder?: string; detail?: { placeholder: string; joiner: string } }
+  | { kind: 'combo'; options: readonly string[]; free?: boolean; label?: string; bare?: boolean; placeholder?: string; detail?: { placeholder: string; joiner: string }; noDetail?: readonly string[] }
   /**
    * Any of the options, saved as "a, b". `say`: a box under the options, always open, for the rest in the client's own
    * words, typed or recorded; what's in it is saved after the options, as "Other" would be.
@@ -73,6 +74,14 @@ const YEARS: FormControl = { kind: 'slider', min: 0, max: 30, step: 1, unit: 'ye
 const WHERE_ON_CAR = ['Front', 'Rear', 'Left side', 'Right side', 'Bonnet', 'Boot', 'Roof'];
 const INSURERS = ['1st for Women', 'Absa Insurance', 'AIG', 'Auto & General', 'Budget Insurance', 'Bryte', 'Clientele', 'Dial Direct', 'Discovery Insure', 'First for Women', 'FNB Insurance', 'Hollard', 'Hybrid', 'iTOO', 'King Price', 'MiWay', 'Momentum', 'Mutual & Federal', 'Naked', 'Nedbank Insurance', 'Old Mutual Insure', 'OUTsurance', 'Pineapple', 'Renasa', 'Santam', 'Sasria', 'Standard Bank Insurance', 'Virseker', 'Western National', 'Zurich'];
 const insurer = (label: string): FormControl => combo(INSURERS, { label, placeholder: 'Choose or type the insurer', detail: { placeholder: 'Policy number (if you have it)', joiner: ', policy ' } });
+/**
+ * TTT (18 Nov 2026): the other driver may have no insurance, or the client doesn't know it, so those are two taps at the top
+ * of the list and neither asks for a policy number. "No insurance", not "None": a bare "none" is refused as an answer to a
+ * question that doesn't invite it (followon.ts BARE_NO), so the form would have lost it. For the insurer of someone else (the other driver, the owner of the
+ * car or the tree that did the damage), not the client's own.
+ */
+export const NO_INSURER = ['No insurance', "I don't know"] as const;
+const otherInsurer = (label: string): FormControl => combo([...NO_INSURER, ...INSURERS], { label, placeholder: 'Choose or type the insurer', detail: { placeholder: 'Policy number (if you have it)', joiner: ', policy ' }, noDetail: NO_INSURER });
 const KIN = ['Spouse', 'Child', 'Parent', 'Friend', 'Employee'];
 const KNOWS = ['Family', 'Neighbour', 'Domestic worker', 'Friend', 'Security company'];
 const SEEN_FROM = ['Home', 'Work', 'A shop'];
@@ -80,8 +89,8 @@ const ROOM_IN = ['Front door', 'Back door', 'Window', 'Garage', 'Roof'];
 const ARMED = ['Fidelity ADT', 'Chubb', 'Beagle Watch'];
 const CAR_MAKES = ['Alfa Romeo', 'Aston Martin', 'Audi', 'Bentley', 'BMW', 'BYD', 'Chana', 'Changan', 'Chery', 'Chevrolet', 'Chrysler', 'Citroen', 'Daihatsu', 'Datsun', 'Dodge', 'DFSK', 'Ferrari', 'Fiat', 'Ford', 'Foton', 'GAC', 'Geely', 'GWM', 'Haval', 'Honda', 'Hummer', 'Hyundai', 'Infiniti', 'Isuzu', 'Iveco', 'JAC', 'Jaguar', 'Jeep', 'Jetour', 'Kia', 'Lamborghini', 'Land Rover', 'Lexus', 'Mahindra', 'Maserati', 'Mazda', 'McLaren', 'Mercedes-Benz', 'MG', 'Mini', 'Mitsubishi', 'Nissan', 'Omoda', 'Opel', 'Peugeot', 'Porsche', 'Proton', 'Renault', 'Rolls-Royce', 'Saab', 'Seat', 'Smart', 'Ssangyong', 'Subaru', 'Suzuki', 'Tata', 'Tesla', 'Toyota', 'Volkswagen (VW)', 'Volvo'];
 const COLOURS = ['White', 'Silver', 'Grey', 'Black', 'Red', 'Blue'];
-const SHOPS = ['A gift', 'Apple Store', 'Builders', 'Cash Crusaders', 'Dis-Chem', 'Game', 'Hi-Fi Corp', 'Incredible', 'iStore', 'Jet', 'Makro', 'Mr Price', 'Pick n Pay', 'Sportsmans Warehouse', 'Takealot', 'Woolworths'];
-const ITEMS = ['Appliance', 'Bicycle', 'Camera', 'Cellphone', 'Clothing', 'Furniture', 'Gaming console', 'Jewellery', 'Laptop', 'Power tool', 'Sound system', 'Sunglasses', 'Tablet', 'TV', 'Watch'];
+const SHOPS = ['A gift', 'Apple Store', 'Builders', 'Cash Crusaders', 'Dis-Chem', 'Game', 'Hi-Fi Corp', 'Incredible', 'iStore', 'Jet', 'Makro', 'Mr Price', 'Pick n Pay', 'Sportsmans Warehouse', 'Takealot', 'Woolworths', 'Other'];
+const ITEMS = ['Appliance', 'Bicycle', 'Camera', 'Cellphone', 'Clothing', 'Furniture', 'Gaming console', 'Jewellery', 'Laptop', 'Power tool', 'Sound system', 'Sunglasses', 'Tablet', 'TV', 'Watch', 'Other'];
 const itemControl = (): FormControl => combo(ITEMS, { label: 'What is the item?', placeholder: 'Choose or type the item', detail: { placeholder: 'Make and model, e.g. Samsung 55 inch', joiner: ': ' } });
 const shopControl = (): FormControl => combo(SHOPS, { label: 'Where did you buy it or get it?', placeholder: 'Choose or type the shop' });
 const makeAndModel = (label: string): FormControl => combo(CAR_MAKES, { label, placeholder: 'Choose or type the make', detail: { placeholder: 'Model, e.g. Polo Vivo', joiner: ' ' } });
@@ -164,8 +173,6 @@ const INSURER_CONTROLS: Record<string, FormControl> = {
   trackerFittedBy: { kind: 'short', placeholder: 'Who fitted it' },
   windowMarkingNumber: { kind: 'yes-text', label: 'Is a number marked on the windows?', then: 'What is the number?', needsText: true },
   windowMarkingBy: { kind: 'short', placeholder: 'Who marked the windows' },
-  driverAge: { kind: 'slider', min: 16, max: 90, step: 1, unit: 'years' },
-  repairerName: { kind: 'short', placeholder: 'Repairer or glass company' },
   coveredElsewhereDetails: { kind: 'short', placeholder: 'Insurer and policy number' },
   driverConsentDetails: { kind: 'long' },
   driverDefectDetails: { kind: 'short', placeholder: 'e.g. needs glasses' },
@@ -183,7 +190,6 @@ const INSURER_CONTROLS: Record<string, FormControl> = {
   vehicleEntryHow: { kind: 'pills', options: ['Smashed window', 'Unlocked door', 'Forced the lock'], other: true },
   itemsPlacement: { kind: 'pills', options: ['On the back seat', 'On the front seat', 'In the boot', 'In the glove box'], other: true },
   itemsOwnedByOtherDetails: { kind: 'short', placeholder: 'Who owns which items' },
-  responsibleDetails: { kind: 'long' },
   principalDriverOther: { kind: 'short', placeholder: 'Full name' },
   injuredInCarName: card('Name'),
   injuredInCarDetails: pills(['Minor', 'Went to hospital'], { other: true, bare: true }),
@@ -319,9 +325,9 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   otherVehicleMake: makeAndModel('What make and model was the other car?'),
   otherRegistration: card('Registration number'),
   otherContact: card("Other driver's phone number or email"),
-  otherInsurer: insurer('Which insurance company is the other driver with?'),
-  otherInsurance: insurer('Which insurance company is the other driver with?'),
-  otherInsuranceDetails: insurer('Which insurance company are they with?'),
+  otherInsurer: otherInsurer('Which insurance company is the other driver with?'),
+  otherInsurance: otherInsurer('Which insurance company is the other driver with?'),
+  otherInsuranceDetails: otherInsurer('Which insurance company are they with?'),
   otherDamage: multi(['Front', 'Rear', 'Left side', 'Right side', 'Windscreen', 'Property, not a car'], { other: true, label: 'What was damaged?' }),
   otherDriverName: NAME,
   otherDriverPhone: PHONE,
@@ -455,17 +461,17 @@ export const FORM_CONTROLS: Readonly<Record<string, FormControl>> = {
   impactDriverFirstName: FIRST,
   impactDriverSurname: SURNAME,
   impactDriverPhone: PHONE,
-  impactDriverInsurance: insurer('Which insurance company are they with?'),
+  impactDriverInsurance: otherInsurer('Which insurance company are they with?'),
   impactVehicleRegistration: short('e.g. CA 123-456'),
   impactOwnerFirstName: FIRST,
   impactOwnerSurname: SURNAME,
   impactOwnerPhone: PHONE,
-  impactOwnerInsurance: insurer('Which insurance company are they with?'),
+  impactOwnerInsurance: otherInsurer('Which insurance company are they with?'),
   treeCompany: NAME,
   treeContactFirstName: FIRST,
   treeContactSurname: SURNAME,
   treeContactPhone: PHONE,
-  treeFellerInsurance: insurer('Which insurance company are they with?'),
+  treeFellerInsurance: otherInsurer('Which insurance company are they with?'),
   geyserTypeOther: NAME,
   damagedAreas: multi(BUILDING_PARTS, { other: true, label: 'Which parts of the building were damaged or stolen?' }),
   resultantDamageDetails: multi(['Ceilings', 'Walls', 'Floors', 'Carpets', 'Furniture'], { other: true }),

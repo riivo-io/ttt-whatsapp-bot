@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit c3f3a6e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit a1504ad). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -25,7 +25,7 @@ import { FORM_TERMS } from './templates';
 import { masterFormFor, masterPlace, type MasterForm } from './masterforms';
 import {
   applies, chased, CLAIM_COLUMN_FACTS, computedTotals, entryWord, deferred, filesFor, formItems, holds, moreKey, phoneFromItems,
-  PHONE_OR_TABLET_KEY, SAPS_CASE_KEY, SAPS_STATION_KEY, type ClaimFacts,
+  PHONE_OR_TABLET_KEY, SAPS_CASE_KEY, SAPS_STATION_KEY, statesTheft, theftOptions, type ClaimFacts,
 } from './progress';
 
 /** The screen of what TTT already holds. Saved against this key once the client has gone past it. */
@@ -106,6 +106,12 @@ export interface GuidedView {
   notKnown: string[];
   /** The screen to open on (AC 5): the first with an unanswered question, `screens.length` for the photos. */
   startAt: number;
+  /**
+   * TTT (18 Nov 2026): answers that say something was stolen ("Stolen"; a cause that is a theft). When one holds, the page
+   * counts "Was it reported to the police?" as yes without asking, so the SAPS case number is asked for. Absent where the
+   * claim already needs a case, or the form has no such question.
+   */
+  policeIf?: GuidedCondition[];
   /**
    * The user (18 Nov 2026): the claim was submitted already, so this is the missing-items form: only what the client still
    * has to send (followon.ts claimMissing), no details or notes to agree to, and nothing to sign. Its Submit is "Send".
@@ -300,6 +306,8 @@ function screensFor(form: ClaimForm, claim: FollowOnClaim, earlier: readonly Cla
     const hidden = isMore && countedGroup(form, item.group!);
     // A burst geyser or pipe is damage: "stolen, lost or damaged?" is answered for them (applyGuidedSave).
     if (baseKey === LOSS_KIND_KEY && burstAsked(form)) when.push({ key: BURST_KEY, oneOf: [true], not: true });
+    // A theft needs the case number whatever the client says to "reported?", so that isn't asked once they've said it was stolen.
+    if (baseKey === 'saps' && !sapsRequired) for (const t of theftOptions(form)) when.push({ key: t.key, oneOf: t.oneOf, not: true });
     const note = formNote(master.id, baseKey);
     screen.fields[added(item) ? 'unshift' : 'push']({
       key: item.key,
@@ -414,7 +422,8 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
   if (formSubmitted(claim)) return topUpView(form, claim, earlier);
   const master = masterFormFor(form);
   const facts = factsOf(claim);
-  const sapsRequired = !!claim.sapsRequired;
+  // A theft the client has said so on the form needs the case number too, though the claim wasn't flagged when it opened.
+  const sapsRequired = !!claim.sapsRequired || statesTheft(form, claim.answers);
   const screens = screensFor(form, claim, earlier, sapsRequired);
   const { answers, notKnown } = knownValues(form, claim);
   // The user (16 Nov 2026): a quote or an invoice is never asked of the client: TTT gets those (the broker is reminded,
@@ -428,7 +437,7 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     }] : [];
   });
   const otherHelp = evidenceHelp(master.id, 'other');
-  const open = guidedOpen(form, claim, policeOpen(claim));
+  const open = guidedOpen(form, claim, policeOpen(claim, form));
   const startAt = screens.findIndex((s) => s.fields.some((f) => open.includes(f.key)));
   const detailsConfirmed = claim.answers[DETAILS_CONFIRMED_KEY]?.status === 'answered';
   return {
@@ -444,6 +453,7 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
     answers,
     notKnown,
     startAt: startAt < 0 ? screens.length : startAt,
+    ...(!sapsRequired && theftOptions(form).length ? { policeIf: theftOptions(form) } : {}),
   };
 }
 
@@ -472,8 +482,8 @@ function topUpKeys(form: ClaimForm, claim: FollowOnClaim): Set<string> {
 }
 
 /** Whether the police case's own questions are open on the form: the claim needs them, or the client said it was reported. */
-const policeOpen = (claim: Pick<FollowOnClaim, 'sapsRequired' | 'facts' | 'answers'>) =>
-  !!claim.sapsRequired || claim.facts.saps === true || claim.answers.saps?.value === true;
+const policeOpen = (claim: Pick<FollowOnClaim, 'sapsRequired' | 'facts' | 'answers'>, form: ClaimForm) =>
+  !!claim.sapsRequired || claim.facts.saps === true || claim.answers.saps?.value === true || statesTheft(form, claim.answers);
 
 /** The questions that still apply and have no answer, in the list's order. An evidence item is never one: Tina asks for those. */
 export function guidedOpen(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers' | 'facts' | 'claimType' | 'sapsCaseNumber' | 'sapsStation'>, sapsRequired: boolean): string[] {
@@ -486,7 +496,7 @@ export function guidedOpen(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers'
 
 // ---------------------------------------------------------------------------------------------------- saving
 
-export type GuidedPorts = Pick<FollowOnPorts, 'loadClaim' | 'claimForm' | 'saveAnswers' | 'saveSaps' | 'fileToPipeline' | 'storeVideo' | 'claimEvidence' | 'claimFlags'>
+export type GuidedPorts = Pick<FollowOnPorts, 'loadClaim' | 'claimForm' | 'saveAnswers' | 'saveSaps' | 'setSapsRequired' | 'fileToPipeline' | 'storeVideo' | 'claimEvidence' | 'claimFlags'>
   & Partial<Pick<FollowOnPorts, 'saveFacts' | 'createAgentAction'>>;
 
 export interface GuidedSave {
@@ -568,14 +578,14 @@ export function applyGuidedSave(
     if (!answers[ADDRESS_KEY] && !answers[ADDRESS_CHECK_KEY] && claim.contactAddress?.trim()) answers[ADDRESS_CHECK_KEY] = { value: 'Still the same', status: 'answered', at, source: 'form' };
   }
 
-  const list = () => formItems(form, answers, { ...facts, ...saps.caseNumber ? { sapsCaseNumber: saps.caseNumber } : {}, ...saps.station ? { sapsStation: saps.station } : {} }, sapsRequired || answers.saps?.value === true);
+  const list = () => formItems(form, answers, { ...facts, ...saps.caseNumber ? { sapsCaseNumber: saps.caseNumber } : {}, ...saps.station ? { sapsStation: saps.station } : {} }, sapsRequired || answers.saps?.value === true || statesTheft(form, answers));
   for (let pass = 0, more = true; more && pass < 8 && given.size; pass++) {
     more = false;
     for (const [key, v] of [...given]) {
       const item = list().find((i) => i.key === key);
       // TTTFG-5734: the case number and station of a claim that must have a case are kept whatever the list's "reported?"
       // says, as screensFor shows them: that question is never asked on such a claim.
-      if (!item || item.kind !== 'question' || !(applies(item, answers, facts) || (sapsRequired && isSaps(key)))) continue;
+      if (!item || item.kind !== 'question' || !(applies(item, answers, facts) || ((sapsRequired || statesTheft(form, answers)) && isSaps(key)))) continue;
       given.delete(key);
       more = true;
       // "Yes" with nothing typed, where the box wants the thing itself: a blank, so "Yes" never prints as an ID number.
@@ -627,7 +637,7 @@ async function loaded(ports: GuidedPorts, claimId: string) {
   const claim = await ports.loadClaim(claimId);
   if (!claim.claimFormId) throw new Error(`TTTFG-5562: claim ${claimId} has no claim form yet`);
   const form = asGuided(await ports.claimForm(claim.claimFormId), claim);
-  return { claim, form, sapsRequired: policeOpen(claim) };
+  return { claim, form, sapsRequired: policeOpen(claim, form) };
 }
 
 export async function loadGuided(ports: GuidedPorts, claimId: string, crm: (claim: FollowOnClaim) => Promise<GuidedCrm>, earlier: (claim: FollowOnClaim) => Promise<ClaimAnswers[]>): Promise<GuidedView> {
@@ -655,6 +665,8 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
   if (formSubmitted(claim)) input = topUpInput(input, topUpKeys(form, claim));
   const { answers, saps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
   if (saps.caseNumber || saps.station) await ports.saveSaps(claimId, saps);
+  // TTT (18 Nov 2026): the client said it was stolen, so the claim needs a case from here on, as one Tina read as a theft does.
+  if (!claim.sapsRequired && statesTheft(form, answers)) await ports.setSapsRequired?.(claimId);
   if (JSON.stringify(answers) !== JSON.stringify(claim.answers)) await ports.saveAnswers(claimId, answers);
   // What the walkthrough asks on chat goes on the claim's own columns: the insurer's form and the broker read those.
   const columns = factColumns(form, claim.facts, answers);
@@ -673,9 +685,10 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
   // saveSaps sets riivo_sapsinvolved with a case number, so the questions that hang on the police being involved are open now.
   const after: FollowOnClaim = {
     ...claim, answers, sapsCaseNumber: saps.caseNumber ?? claim.sapsCaseNumber, sapsStation: saps.station ?? claim.sapsStation,
+    sapsRequired: claim.sapsRequired || statesTheft(form, answers),
     facts: { ...claim.facts, ...columns, ...(saps.caseNumber ? { saps: true } : {}) },
   };
-  return { problems, ...knownValues(form, after), open: guidedOpen(form, after, policeOpen(after)) };
+  return { problems, ...knownValues(form, after), open: guidedOpen(form, after, policeOpen(after, form)) };
 }
 
 /**
