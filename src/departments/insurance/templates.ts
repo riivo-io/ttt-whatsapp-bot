@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 46c8ff2). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 2b0e776). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -458,30 +458,15 @@ export const INSURER_CHASE_TEMPLATE = {
   ].join('\n\n'),
 } as const;
 
-export interface UnderReviewVars { insurer: string; number: string; reference: string }
+export interface StatusUpdateVars {
+  insurer: string;
+  reference: string;
+  /** The insurer's claim number, when the claim has one: the under review message gives it (UNDER_REVIEW_TEMPLATE). */
+  number?: string;
+}
 
-/**
- * The user (18 Nov 2026): what the client hears when the broker saves the insurer's claim number. Saving it moves the claim to
- * Under assessment ("under review" to the client), so this one message says so and gives the number (submitted.ts). It replaces
- * TTTFG-5204 AC 7's "Submitted to <insurer>, claim no. <number>", which went when the number set Submitted to insurer.
- * CRM values only, with no approval per message. On WhatsApp it is always the approved template: `meta` and `templateVersion`
- * are its key in the WhatsApp flow's template list (WhatsApp - Automated - Send Templated Message), and Meta must have it.
- * Meta refuses a body that ends with a variable, so the full stop after the number is the body's last word.
- */
-export const UNDER_REVIEW_TEMPLATE = {
-  name: 'Claim - under review',
-  version: 'draft-1',
-  approved: true,
-  meta: 'claim_under_review',
-  templateVersion: 1,
-  /** For Meta: {{1}} the insurer, {{2}} the insurer's claim number. */
-  whatsappBody: 'Your claim submitted to {{1}} is under review.\n\nYour claim number is: {{2}}.',
-  params: (v: UnderReviewVars) => [v.insurer, v.number],
-  render: (v: UnderReviewVars) => `Your claim submitted to ${v.insurer} is under review.\n\nYour claim number is: ${v.number}.`,
-  emailSubject: (v: UnderReviewVars) => `Your claim ${v.reference} is under review`,
-} as const;
-
-export interface StatusUpdateVars { insurer: string; reference: string }
+/** The vars of a message that gives the insurer's number. */
+export type UnderReviewVars = StatusUpdateVars & { number: string };
 
 /**
  * TTTFG-5208 AC 1, 3: what the client hears when a claim moves to a status that tells them something. CRM values only, so no
@@ -489,34 +474,81 @@ export interface StatusUpdateVars { insurer: string; reference: string }
  * (AC 4) and `metaApproved` is Meta's: statusupdate.ts sends nothing until they say so, and the claim's owner tells the
  * client by hand. On WhatsApp, `meta` and `templateVersion` are the key in the WhatsApp flow's template list.
  *
- * No first name (a blank one fails at Meta), no insurer claim number (a claim can get here with none) and no broker's name
- * (TTT, 28 Oct 2026). The list of what the insurer asked for needs TTTFG-5216: nothing holds it on the claim yet.
+ * No first name (a blank one fails at Meta) and no broker's name (TTT, 28 Oct 2026). The list of what the insurer asked for
+ * needs TTTFG-5216: nothing holds it on the claim yet.
+ *
+ * The user (18 Nov 2026): whoever moves the claim, the client hears. `batch` is which Meta switch holds the template back
+ * (CLAIMS_STATUS_META_APPROVED for the first, CLAIMS_WORDING_META_APPROVED for the ones of 18 Nov). `withoutNumber` is the words
+ * for a claim that has no insurer number yet.
  */
 export interface StatusTemplate {
   name: string;
   version: string;
   approved: boolean;
   metaApproved: boolean;
+  batch: 'status' | 'wording';
   meta: string;
   templateVersion: number;
   whatsappBody: string;
   params(v: StatusUpdateVars): string[];
   render(v: StatusUpdateVars): string;
   emailSubject(v: StatusUpdateVars): string;
+  withoutNumber?: StatusTemplate;
 }
 
 /**
- * The user (18 Nov 2026): what the client hears when the broker marks the claim pack as submitted (or the agent sends it to an
- * insurer that takes claims by email): "Update on your claim: your claim has been submitted to <insurer>." and nothing for them to
- * do. Under assessment sends no message of its own any more: it is the saving of the insurer's claim number that tells the client
- * their claim is under review, with the number (UNDER_REVIEW_TEMPLATE). The wording is the user's, so it is approved here; Meta
- * approves per WhatsApp account, and this template comes with its own switch (CLAIMS_WORDING_META_APPROVED), set once Meta has it.
+ * The user (18 Nov 2026): what the client hears when their claim is under review (Under assessment): "Your claim submitted to
+ * <insurer> is under review." and "Your claim number is: <number>.". It goes when the broker saves the insurer's number, which
+ * moves the claim there (submitted.ts), and when anyone moves the claim there by hand (statusupdate.ts). A claim with no number
+ * yet gets the first line only (`withoutNumber`), and the number follows when it is saved. It replaces TTTFG-5204 AC 7's
+ * "Submitted to <insurer>, claim no. <number>" and TTTFG-5208's "<insurer> is now assessing it".
+ * CRM values only, with no approval per message. On WhatsApp it is always the approved template: `meta` and `templateVersion`
+ * are its key in the WhatsApp flow's template list (WhatsApp - Automated - Send Templated Message), and Meta must have it.
+ * Meta refuses a body that ends with a variable, so the full stop after the number is the body's last word.
+ */
+export const UNDER_REVIEW_NO_NUMBER_TEMPLATE: StatusTemplate = {
+  name: 'Claim - under review (no number yet)',
+  version: 'draft-1',
+  approved: true,
+  metaApproved: false,
+  batch: 'wording',
+  meta: 'claim_under_review_no_number',
+  templateVersion: 1,
+  /** For Meta: {{1}} the insurer. */
+  whatsappBody: 'Your claim submitted to {{1}} is under review.',
+  params: (v) => [v.insurer],
+  render: (v) => `Your claim submitted to ${v.insurer} is under review.`,
+  emailSubject: (v) => `Your claim ${v.reference} is under review`,
+};
+
+export const UNDER_REVIEW_TEMPLATE: StatusTemplate = {
+  name: 'Claim - under review',
+  version: 'draft-1',
+  approved: true,
+  metaApproved: false,
+  batch: 'wording',
+  meta: 'claim_under_review',
+  templateVersion: 1,
+  /** For Meta: {{1}} the insurer, {{2}} the insurer's claim number. */
+  whatsappBody: 'Your claim submitted to {{1}} is under review.\n\nYour claim number is: {{2}}.',
+  params: (v) => [v.insurer, v.number ?? ''],
+  render: (v) => `Your claim submitted to ${v.insurer} is under review.\n\nYour claim number is: ${v.number ?? ''}.`,
+  emailSubject: (v) => `Your claim ${v.reference} is under review`,
+  withoutNumber: UNDER_REVIEW_NO_NUMBER_TEMPLATE,
+};
+
+/**
+ * The user (18 Nov 2026): what the client hears when the claim moves to Submitted to insurer, however it moves: the broker marks
+ * the pack as submitted, or moves the claim by hand. "Update on your claim: your claim has been submitted to <insurer>." and
+ * nothing for them to do. The wording is the user's, so it is approved here; Meta approves per WhatsApp account, and the
+ * templates of that day come with their own switch (CLAIMS_WORDING_META_APPROVED), set once Meta has them.
  */
 export const SUBMITTED_UPDATE_TEMPLATE: StatusTemplate = {
   name: 'Claim - submitted to insurer',
   version: 'draft-2',
   approved: true,
   metaApproved: false,
+  batch: 'wording',
   meta: 'claim_submitted_to_insurer',
   templateVersion: 1,
   /** For Meta: {{1}} the insurer. */
@@ -536,6 +568,7 @@ export const ADDITIONAL_INFO_TEMPLATE: StatusTemplate = {
   version: 'riivo-1',
   approved: true,
   metaApproved: false,
+  batch: 'status',
   meta: 'claim_additional_info',
   templateVersion: 1,
   /** For Meta: {{1}} our reference, {{2}} the insurer. */
