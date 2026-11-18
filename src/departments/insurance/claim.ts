@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 2b0e776). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 6bab216). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -115,7 +115,8 @@ export type Outbound =
    * `params` (TTTFG-5212): the template's variables, in order, when it goes out as an approved WhatsApp template (the
    * morning reminder, always). Without them the client is inside the 24-hour window: send `text`.
    */
-  | { kind: 'template'; name: string; version: string; text: string; params?: string[] };
+  /** `buttonUrl`: the template has a URL button ("Add missing items"), and this is where it goes: the host sends the part Meta's button takes. */
+  | { kind: 'template'; name: string; version: string; text: string; params?: string[]; buttonUrl?: string };
 
 export interface ClaimPorts {
   /** The contact whose WhatsApp number this is, or null. Never an ID-number lookup. */

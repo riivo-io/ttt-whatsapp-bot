@@ -61,7 +61,7 @@ import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
 import { claimsContactNumber, roadsideSwitch } from '../domain/claimsHost';
-import { templateSettings, whatsAppTemplateFor } from '../domain/claimsTemplates';
+import { templateSettings, urlButtonSuffix, whatsAppTemplateFor } from '../domain/claimsTemplates';
 import { interactiveFor, LINK_LOGGED, linkInteractive, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, withLinkLine, type OutPart } from '../domain/claimsOutbox';
 import {
     blankForm, cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, openRoadsideDemoRequest, withdrawOpenClaims, writeDemoLog,
@@ -172,14 +172,19 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Prom
             log.outbound.push({ text: `${caption}\n📎 ${fileName}${r.delivered ? '' : "\n(WhatsApp didn't deliver this document.)"}`, at });
         },
         ...(process.env.CLAIMS_REMINDER_TEMPLATE || process.env.CLAIMS_MISSING_TEMPLATE ? {
-            sendTemplate: async (to: string, params: string[], message?: string) => {
+            sendTemplate: async (to: string, params: string[], message?: string, buttonUrl?: string) => {
                 const template = whatsAppTemplateFor(message);
                 if (!template) throw new Error(`No WhatsApp template set up for "${message ?? 'the reminder'}"`);
+                // The user (18 Nov 2026): the form's link is the template's "Add missing items" button; the token is the button's variable.
+                const token = buttonUrl ? urlButtonSuffix(buttonUrl) : undefined;
+                if (buttonUrl && !token) throw new Error(`The claim form link doesn't fit the button of WhatsApp template ${template.name} (it is registered as <SIGNING_PUBLIC_URL>/claim-form/{{1}})`);
                 await box.flush();
                 const at = new Date().toISOString();
-                const r = await metaWhatsAppService.sendTemplate(to, { name: template.name, languageCode: template.language, bodyVariables: params });
+                const r = await metaWhatsAppService.sendTemplate(to, {
+                    name: template.name, languageCode: template.language, bodyVariables: params, ...(token ? { buttonUrlParams: [{ index: 0, text: token }] } : {}),
+                });
                 if (!r.delivered) throw new Error(`WhatsApp template ${template.name} to ${to} refused: ${r.error ?? 'unknown'}`);
-                log.outbound.push({ text: `WhatsApp template ${template.name}: ${params.join(' | ')}`, at });
+                log.outbound.push({ text: `WhatsApp template ${template.name}: ${params.join(' | ')}${token ? ' [button: Add missing items]' : ''}`, at });
             },
         } : {}),
         mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
