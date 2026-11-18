@@ -1461,6 +1461,52 @@ class SupabaseService {
         if (error) throw new Error(`[Supabase] deleteClaimWalkthrough: ${error.message}`);
     }
 
+    // --- TTTFG-5340: the one reply and one lead per unknown number (migration 20261118120000_unknown_number_replies.sql) ---
+
+    /**
+     * Claims the right to answer an unknown number: true for the first message, and again once `windowMs` has passed since
+     * the last reply; false inside the window. One statement decides, so two messages handled at once give one reply.
+     * `leadId` is the lead Tina already made for the number. An error throws (not "already answered"): the worker retries.
+     */
+    async claimUnknownNumberReply(phone: string, now: Date, windowMs: number): Promise<{ claimed: boolean; leadId: string | null }> {
+        const at = now.toISOString();
+        const inserted = await this.client.from('unknown_number_replies').insert({ phone_number: phone, replied_at: at });
+        if (!inserted.error) return { claimed: true, leadId: null };
+        if ((inserted.error as any).code !== '23505') throw new Error(`[Supabase] claimUnknownNumberReply: ${inserted.error.message}`);
+
+        const reopened = await this.client
+            .from('unknown_number_replies')
+            .update({ replied_at: at })
+            .eq('phone_number', phone)
+            .lt('replied_at', new Date(now.getTime() - windowMs).toISOString())
+            .select('lead_id');
+        if (reopened.error) throw new Error(`[Supabase] claimUnknownNumberReply: ${reopened.error.message}`);
+        if (reopened.data?.length) return { claimed: true, leadId: (reopened.data[0] as { lead_id: string | null }).lead_id ?? null };
+        return { claimed: false, leadId: await this.getUnknownNumberLeadId(phone) };
+    }
+
+    /** Gives the claim back (the reply was not delivered), so the person's next message is answered. The lead stays. */
+    async releaseUnknownNumberReply(phone: string): Promise<void> {
+        const { error } = await this.client.from('unknown_number_replies').update({ replied_at: new Date(0).toISOString() }).eq('phone_number', phone);
+        if (error) throw new Error(`[Supabase] releaseUnknownNumberReply: ${error.message}`);
+    }
+
+    /** Keeps the lead Tina made for the number (and its Created action when there is one). */
+    async saveUnknownNumberLead(phone: string, leadId: string, actionId: string | null): Promise<void> {
+        const { error } = await this.client
+            .from('unknown_number_replies')
+            .update({ lead_id: leadId, ...(actionId ? { action_id: actionId } : {}) })
+            .eq('phone_number', phone);
+        if (error) throw new Error(`[Supabase] saveUnknownNumberLead: ${error.message}`);
+    }
+
+    /** The lead Tina made for the number, or null. An error throws: it is not "no lead". */
+    async getUnknownNumberLeadId(phone: string): Promise<string | null> {
+        const { data, error } = await this.client.from('unknown_number_replies').select('lead_id').eq('phone_number', phone).maybeSingle();
+        if (error) throw new Error(`[Supabase] getUnknownNumberLeadId: ${error.message}`);
+        return (data as { lead_id: string | null } | null)?.lead_id ?? null;
+    }
+
     // TTTFG-4830 claims demo: the conversation on a demo number (migration 20261023120000_claim_conversations.sql).
     async getClaimConversation(phone: string): Promise<ClaimConversationRow | null> {
         const { data, error } = await this.client.from('claim_conversations').select('*').eq('phone_number', phone).maybeSingle();

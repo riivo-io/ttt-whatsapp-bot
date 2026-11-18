@@ -35,15 +35,17 @@
       "task": "Replace the cold sign-up template with one fixed reply carrying the tax sign-up link, silent on repeats within 24 hours",
       "owner": "agent",
       "reason": "code and a Supabase migration in this repo (AC 1, 2, 4, 6)",
-      "done": false,
-      "area": "build"
+      "done": true,
+      "area": "build",
+      "verified_by": "agent"
     },
     {
       "task": "Create one Tax lead and a Kind Created agent action owned by the Tax team when an unknown number asks about tax",
       "owner": "agent",
       "reason": "code in this repo, following the email agent's lead and action shape (AC 5, 6)",
-      "done": false,
-      "area": "build"
+      "done": true,
+      "area": "build",
+      "verified_by": "agent"
     },
     {
       "task": "Make the WhatsApp sign-up form update a lead already on that phone number instead of creating a second one",

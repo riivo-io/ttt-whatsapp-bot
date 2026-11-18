@@ -829,6 +829,24 @@ export class DynamicsService {
     }
 
     /**
+     * TTTFG-5340: whether an active contact or lead has this number. searchEntity (so getContactByPhone) reads a CRM error
+     * as "no match", which is harmless for a reply but not for a number about to get a new lead: a known client whose
+     * lookup was throttled would get a second record. This asks again and lets any CRM error throw, so the worker
+     * retries the message instead.
+     */
+    async phoneKnownStrict(phoneNumber: string): Promise<boolean> {
+        const token = await this.getToken();
+        const headers = { 'Authorization': `Bearer ${token}`, 'OData-MaxVersion': '4.0', 'OData-Version': '4.0', 'Accept': 'application/json' };
+        const any = async (collection: string, field: string, id: string): Promise<boolean> => {
+            const filter = `(${this.phoneOrFilter(field, phoneNumber)}) and statecode eq 0`;
+            const res = await axios.get(`${this.baseUrl}/api/data/v9.2/${collection}?$filter=${encodeURIComponent(filter)}&$select=${id}&$top=1`, { headers });
+            return Array.isArray(res.data?.value) && res.data.value.length > 0;
+        };
+        const [contact, lead] = await Promise.all([any('contacts', 'mobilephone', 'contactid'), any('new_leads', 'ttt_mobilephone', 'new_leadid')]);
+        return contact || lead;
+    }
+
+    /**
      * Search for a phone number but return only the entity matching the specified type.
      * Used in test mode to force a specific CRM context.
      */
@@ -1036,13 +1054,15 @@ export class DynamicsService {
                 const lead = await this.searchEntity(
                     'new_leads',
                     `new_leadid eq ${crmId} and statecode eq 0`,
-                    ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+                    ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
                 );
                 if (lead) {
                     return {
                         id: lead.new_leadid,
                         type: 'lead',
                         fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                        // TTTFG-5340: a lead with no email is still the placeholder Tina made for an unknown number.
+                        email: lead.ttt_email || null,
                         loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                         otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                         leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
