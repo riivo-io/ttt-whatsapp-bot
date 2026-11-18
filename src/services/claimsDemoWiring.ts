@@ -28,6 +28,7 @@ import {
 import { dataverseSigningPorts } from '../departments/insurance/signing-dataverse';
 import type { GuidedLinkRow } from '../claimform/links';
 import { earlierClaimAnswers, fileGuided, finishGuided, loadGuided, saveGuided, type GuidedCrm } from '../departments/insurance/guided';
+import { stopRemindersFor } from '../departments/insurance/optout';
 import type { ClaimFormSession } from '../routes/claimForm.route';
 import { roadsideRequestBody } from '../domain/claimsHost';
 import { voiceNoteNote, whatsappCommunicationRow, type WhatsAppParty, type WhatsAppRegarding } from '../domain/whatsappLog';
@@ -480,6 +481,7 @@ export function demoClaimFormSession(
         },
         finish: () => finishGuided(ports, link.claim_id, new Date()),
         carryOn: o.carryOn,
+        stopReminders: async () => void (await stopRemindersFor(ports, link.claim_id, new Date())),
     };
 }
 

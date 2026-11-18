@@ -134,6 +134,7 @@ function session(link: GuidedLinkRow): ClaimFormSession {
         file: (file, _bytes, itemKey) => fileGuided(p, link.claim_id, { ...file, id: `upload:${Date.now()}` }, itemKey, new Date()),
         hear: async () => ({ text: 'I was driving to a job and a white Polo drove into the back of the bakkie.' }),
         finish: () => finishGuided(p, link.claim_id, new Date()),
+        stopReminders: async () => console.log(`  ${link.claim_id}: the client stopped the reminders.`),
         carryOn: async () => {
             if (CARRY === 'fail') throw new Error("the form's caller answered 500");
             if (CARRY === 'slow') await new Promise((r) => setTimeout(r, CARRY_MS));

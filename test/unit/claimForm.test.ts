@@ -68,6 +68,7 @@ function fakeSession(calls: string[]): ClaimFormSession {
         hear: async (bytes, mime) => { calls.push(`hear:${mime}:${bytes.length}`); return mime === 'audio/mp4' ? { problem: 'unclear' } : { text: 'I heard you' }; },
         finish: async () => { calls.push('finish'); return { open: calls.includes('ready') ? [] : ['vehicleMake'] }; },
         carryOn: async () => { calls.push('carryOn'); },
+        stopReminders: async () => { calls.push('stopReminders'); },
     };
 }
 
@@ -185,6 +186,26 @@ test('AC 6: Submit with a required question open sends the client back; ready, T
         assert.match(html, /wa\.me\/27111111111/);
         const again = await fetch(`${s.base}/${tokenOf(url)}/submit`, { method: 'POST' });
         assert.equal(again.status, 410);
+    } finally { await s.close(); }
+});
+
+test('the user (18 Nov 2026): Stop reminders on the page stops them once for the link, and a bad link gets nothing', async () => {
+    const d = deps(() => new Date());
+    const { url } = await createGuidedLink(d, INPUT);
+    const calls: string[] = [];
+    const s = await server(d, calls);
+    try {
+        const r = await fetch(`${s.base}/${tokenOf(url)}/stop-reminders`, { method: 'POST' });
+        assert.equal(r.status, 200);
+        assert.deepEqual(await r.json(), { ok: true });
+        assert.deepEqual(calls, ['stopReminders']);
+        const bad = await fetch(`${s.base}/${'x'.repeat(43)}/stop-reminders`, { method: 'POST' });
+        assert.equal(bad.status, 404);
+        assert.deepEqual(calls, ['stopReminders']);
+        // The page offers it, on every step, and not once the claim is in.
+        const html = await (await fetch(`${s.base}/${tokenOf(url)}`)).text();
+        assert.match(html, /id="stopRem">Stop reminders</);
+        assert.match(html, /post\('\/stop-reminders'\)/);
     } finally { await s.close(); }
 });
 
