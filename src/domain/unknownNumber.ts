@@ -102,6 +102,22 @@ export interface UnknownNumberOutcome {
     leadId: string | null;
 }
 
+/** Keeps the lead against the number, twice if need be. False (and a log line naming the lead) when it could not. */
+async function keep(p: UnknownNumberPorts, phone: string, leadId: string, actionId: string | null, quiet = false): Promise<boolean> {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            await p.remember(phone, leadId, actionId);
+            return true;
+        } catch (e) {
+            if (attempt === 2) {
+                if (!quiet) p.log(`${phone}: the lead ${leadId} was made but could not be kept against the number: ${(e as Error).message}`);
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
 /**
  * An unknown number's message. Answered once in 24 hours, with one lead for good.
  * The lead and its action come before the reply, so a reply that WhatsApp refuses is not a lead the team never hears of; a CRM
@@ -122,16 +138,20 @@ export async function answerUnknownNumber(
         try {
             leadId = await p.createLead(phone);
             leadCreated = true;
-            // The lead is kept at once: a failure after this point must not be able to make a second one.
-            await p.remember(phone, leadId, null);
-            try {
-                const actionId = await p.createAction(phone, leadId, now.toISOString(), sourceMessageId);
-                await p.remember(phone, leadId, actionId);
-            } catch (e) {
-                p.log(`${phone}: the lead ${leadId} was made but its Created action was not: ${(e as Error).message}`);
-            }
         } catch (e) {
             p.log(`${phone}: no lead made: ${(e as Error).message}`);
+        }
+        if (leadId) {
+            // The lead is kept at once, and the keeping is tried twice: a lead that is made but not kept is not a placeholder, and
+            // the number would be served as an ordinary lead. (createLead adopts a lead already on the number, so it is never doubled.)
+            const kept = await keep(p, phone, leadId, null);
+            if (kept) {
+                try {
+                    await keep(p, phone, leadId, await p.createAction(phone, leadId, now.toISOString(), sourceMessageId), true);
+                } catch (e) {
+                    p.log(`${phone}: the lead ${leadId} was made but its Created action was not: ${(e as Error).message}`);
+                }
+            }
         }
     }
 

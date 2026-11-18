@@ -43,7 +43,7 @@ import {
 import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
 import { routeClientMessage, serviceRoutingOn } from '../services/serviceRouting.service';
 import { handleUnknownNumber, isUnknownNumberPlaceholder } from '../services/unknownNumber.service';
-import { routeUnknownNumber } from '../domain/unknownNumber';
+import { routeUnknownNumber, WHATSAPP_LEAD_SOURCE } from '../domain/unknownNumber';
 import { saveSignUpLead } from '../domain/signUpLead';
 import { ROUTE_IDS } from '../domain/serviceRoute';
 import { claimsDemoContact, handleClaimsDemoBatchCheck, handleClaimsDemoMessage, handleClaimsFormDone, handleClaimsDemoReminder } from '../services/claimsDemo.service';
@@ -484,14 +484,13 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
     // GUIDs are prod-only, so createLead retries with the service principal
     // systemuser as a cross-environment fallback, and finally strips ownerid
     // entirely if Dataverse still rejects.
-    const WHATSAPP_LEAD_SOURCE = 463630005;
     const TAX_CREW_TEAM_ID = 'eb735c44-7b5a-f111-bec7-000d3ada6ac0';
     const TAX_CREW_FALLBACK_OWNER_ID = '873db3ff-d563-f011-bec3-000d3ab7e7df';
 
     // TTTFG-5340 AC 5: an unknown number that asked about tax already has a lead (Tina made it). The form updates that lead
     // instead of making a second one. A CRM error while looking for it throws, and the worker retries the message.
     const saved = await saveSignUpLead({
-        findByPhone: (phone) => dynamicsService.findActiveLeadByPhone(phone),
+        findByPhone: async (phone) => dynamicsService.findActiveLeadByPhone(phone, await supabaseService.getUnknownNumberLeadId(phone, { tolerateMissingTable: true })),
         update: (leadId, changes) => dynamicsService.updateLeadFromSignUp(leadId, changes, from),
         create: async () => {
             const created = await dynamicsService.createLead({
@@ -993,7 +992,9 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             // TTTFG-5340 (SPEC-05 "Unknown numbers"): every other message from a number on no contact or lead gets one fixed reply
             // with the tax sign-up link and one Tax lead, and a repeat inside 24 hours gets nothing. No tax question is answered, no
             // ID number is asked for or used, and no contact is touched. A lookup that failed is not an unknown number: a known
-            // client whose lookup was throttled must not get a second record, so the message is retried instead.
+            // client whose lookup was throttled must not get a second record, so the message is retried instead. That guard is
+            // here, where a record is made, and not on the claims and referral branches above: they make no record, and roadside
+            // help must not wait on the CRM (TTTFG-5299).
             tax: async () => {
                 if (!placeholderLead && (resolved.lookupFailed || await dynamicsService.phoneKnownStrict(from))) {
                     throw new Error(`[Processor] ${from}: the CRM lookup did not settle who this is; the message will be retried`);

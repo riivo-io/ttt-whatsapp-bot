@@ -220,6 +220,27 @@ test('a send that throws gives the claim back and throws on, so the worker\'s re
     assert.equal(w.leads.length, 1);
 });
 
+test('a lead that is made but could not be kept is kept on a second try, and the Created action still follows', async () => {
+    const w = world();
+    let tries = 0;
+    const remember = w.ports.remember;
+    w.ports.remember = async (phone, leadId, actionId) => { if (++tries === 1) throw new Error('Supabase blip'); return remember(phone, leadId, actionId); };
+    const out = await answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1');
+    assert.deepEqual(out, { replied: true, leadCreated: true, leadId: 'lead-1' });
+    assert.equal(w.replies.get(STRANGER)!.leadId, 'lead-1');
+    assert.equal(w.actions.length, 1);
+});
+
+test('a lead that cannot be kept at all is named in the log, the reply still goes, and no Created action is written', async () => {
+    const w = world();
+    w.ports.remember = async () => { throw new Error('Supabase is down'); };
+    const out = await answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1');
+    assert.deepEqual(out, { replied: true, leadCreated: true, leadId: 'lead-1' });
+    assert.match(w.log.join('\n'), /lead-1 was made but could not be kept against the number/);
+    assert.equal(w.sent.length, 1);
+    assert.equal(w.actions.length, 0);
+});
+
 // ---- AC 8: a known number is served as before ------------------------------------------------------------------------
 
 test('AC 8: only the lead Tina made, with no email yet, is still the unknown number; a client\'s or a real lead\'s number never is', () => {

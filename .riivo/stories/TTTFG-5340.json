@@ -67,26 +67,29 @@
       "task": "Land the unknown-number roadside path from TTTFG-5299 on main",
       "owner": "developer",
       "reason": "your own In Progress story; AC 7 has nothing to preserve until it ships",
-      "done": false,
-      "area": "other"
+      "done": true,
+      "area": "other",
+      "verified_by": "developer"
     },
     {
       "task": "Add the AC 7 scenario: an unknown number that has broken down gets the assist number, no sign-up reply and no tax lead",
       "owner": "agent",
       "reason": "test in this repo, once the roadside path exists (AC 7)",
-      "done": false,
+      "done": true,
       "area": "build",
       "needs": [
         6
-      ]
+      ],
+      "verified_by": "agent"
     },
     {
       "task": "Update the repo docs and the Confluence technical page for the unknown-number path",
       "owner": "agent",
       "reason": "documentation subtask; no secrets or sign-off involved",
-      "done": false,
+      "done": true,
       "area": "other",
-      "jira": "TTTFG-5341"
+      "jira": "TTTFG-5341",
+      "verified_by": "agent"
     },
     {
       "task": "Find where the online sign-up creates its lead and agree with its owner how it matches on phone number",
@@ -116,6 +119,24 @@
       "reason": "deployments are the developer's, and merging deploys Tina to production",
       "done": false,
       "area": "deployment"
+    },
+    {
+      "task": "Fix: Code review: return and select the lead's email on the phone lookups the worker uses, so a signed-up lead is no longer the unknown number",
+      "owner": "agent",
+      "reason": "checkpoint 2 feedback",
+      "done": true,
+      "area": "build",
+      "fix": true,
+      "verified_by": "agent"
+    },
+    {
+      "task": "Fix: Code review: keep the lead against the number with a retry and adopt a lead already on the number instead of creating a second; the sign-up form completes the placeholder lead first; one WHATSAPP_LEAD_SOURCE; skip the Supabase read for a lead with an email; louder log when no Tax team is found",
+      "owner": "agent",
+      "reason": "checkpoint 2 feedback",
+      "done": true,
+      "area": "build",
+      "fix": true,
+      "verified_by": "agent"
     }
   ],
   "approval": {
@@ -131,6 +152,13 @@
         "name": "unknown_number_replies"
       }
     ]
+  },
+  "acks": {
+    "verify": {
+      "at": "2026-11-18T07:44:16Z",
+      "how": "tests",
+      "result": "pass"
+    }
   },
   "developer": "ad.hiemstra@gmail.com",
   "started_at": "2026-11-02T12:34:52Z",

@@ -628,7 +628,7 @@ export class DynamicsService {
             this.searchEntity(
                 'new_leads',
                 `(${leadsFilter}) and statecode eq 0`,
-                ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             ),
             staffModeEnabled
                 ? this.searchEntity(
@@ -673,6 +673,8 @@ export class DynamicsService {
                 id: lead.new_leadid,
                 type: 'lead',
                 fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                // TTTFG-5340: a lead with no email is still the placeholder Tina made for an unknown number.
+                email: lead.ttt_email || null,
                 loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                 otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                 leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
@@ -862,12 +864,13 @@ export class DynamicsService {
             const lead = await this.searchEntity(
                 'new_leads',
                 `(${this.phoneOrFilter('ttt_mobilephone', phoneNumber)}) and statecode eq 0`,
-                ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             );
             if (lead) return {
                 id: lead.new_leadid,
                 type: 'lead',
                 fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                email: lead.ttt_email || null,
                 loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                 otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                 leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
@@ -1505,16 +1508,19 @@ export class DynamicsService {
 
     /**
      * TTTFG-5340 AC 5: the active lead on a phone number, with its notes. Unlike searchEntity a CRM error throws: "no lead"
-     * must mean there is none, or the WhatsApp sign-up form would make a second lead for the same number.
+     * must mean there is none, or the WhatsApp sign-up form would make a second lead for the same number. `preferLeadId`
+     * (the lead Tina made for an unknown number) wins when the number has more than one lead.
      */
-    async findActiveLeadByPhone(phoneNumber: string): Promise<{ id: string; notes: string | null } | null> {
+    async findActiveLeadByPhone(phoneNumber: string, preferLeadId?: string | null): Promise<{ id: string; notes: string | null } | null> {
         const token = await this.getToken();
         const filter = `(${this.phoneOrFilter('ttt_mobilephone', phoneNumber)}) and statecode eq 0`;
         const res = await axios.get(
-            `${this.baseUrl}/api/data/v9.2/new_leads?$filter=${encodeURIComponent(filter)}&$select=new_leadid,riivo_notes&$orderby=createdon asc&$top=1`,
+            `${this.baseUrl}/api/data/v9.2/new_leads?$filter=${encodeURIComponent(filter)}&$select=new_leadid,riivo_notes&$orderby=createdon asc&$top=10`,
             { headers: { 'Authorization': `Bearer ${token}`, 'OData-MaxVersion': '4.0', 'OData-Version': '4.0', 'Accept': 'application/json' } },
         );
-        const lead = res.data?.value?.[0];
+        const rows: { new_leadid: string; riivo_notes?: string | null }[] = Array.isArray(res.data?.value) ? res.data.value : [];
+        // The lead Tina made for this number is the one the person's own form completes; else the oldest on the number.
+        const lead = (preferLeadId && rows.find((r) => r.new_leadid === preferLeadId)) || rows[0];
         return lead ? { id: lead.new_leadid, notes: lead.riivo_notes || null } : null;
     }
 

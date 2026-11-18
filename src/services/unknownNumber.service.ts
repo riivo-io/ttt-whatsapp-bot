@@ -19,8 +19,8 @@ let taxTeam: Promise<string | null> | undefined;
 function taxTeamId(): Promise<string | null> {
     taxTeam ??= dynamicsService
         .webApi<{ value: { teamid: string }[] }>('GET', "teams?$select=teamid&$top=1&$filter=teamtype eq 0 and name eq 'Tax'")
-        .then((r) => { const id = r.value[0]?.teamid ?? null; if (!id) taxTeam = undefined; return id; })
-        .catch((e) => { taxTeam = undefined; console.warn('[UnknownNumber] Tax team lookup failed:', (e as Error).message); return null; });
+        .then((r) => { const id = r.value[0]?.teamid ?? null; if (!id) { taxTeam = undefined; console.error("[UnknownNumber] no team named 'Tax': the lead and its action will have no Tax owner"); } return id; })
+        .catch((e) => { taxTeam = undefined; console.error('[UnknownNumber] Tax team lookup failed: the lead and its action will have no Tax owner:', (e as Error).message); return null; });
     return taxTeam;
 }
 
@@ -33,6 +33,9 @@ export function unknownNumberPorts(): UnknownNumberPorts {
         log: (line) => console.log(`[UnknownNumber] ${line}`),
 
         async createLead(phone) {
+            // A lead already on the number (made by an earlier attempt whose bookkeeping failed) is adopted, never doubled.
+            const existing = await dynamicsService.findActiveLeadByPhone(phone);
+            if (existing) return existing.id;
             const created = await dynamicsService.createLead(placeholderLeadParams(phone, (await taxTeamId()) ?? undefined));
             if (!created?.new_leadid) throw new Error('the CRM did not make the lead');
             return String(created.new_leadid);
@@ -58,5 +61,7 @@ export function handleUnknownNumber(from: string, wamid?: string): Promise<Unkno
  * table; an error throws, and the worker retries the message rather than serve a stranger as a lead.
  */
 export async function isUnknownNumberPlaceholder(phone: string, lead: { id: string; email?: string | null }): Promise<boolean> {
+    // A lead with an email is a person who signed up: not a placeholder, so most leads cost no Supabase read at all.
+    if (lead.email?.trim()) return false;
     return isPlaceholderLead(await supabaseService.getUnknownNumberLeadId(phone, { tolerateMissingTable: true }), lead);
 }
