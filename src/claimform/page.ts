@@ -310,6 +310,14 @@ const SCRIPT = String.raw`
     return out;
   }
   function route() {
+    // The user (18 Nov 2026): the missing-items form (V.topUp): its questions, then the files, and Send. Nothing to check
+    // or sign: the claim is signed already.
+    if (V.topUp) {
+      var only = [];
+      visibleScreens().forEach(function (i) { only.push({ id: 'screen', i: i }); });
+      only.push({ id: 'photos' });
+      return only;
+    }
     var steps = [{ id: 'details' }];
     visibleScreens().forEach(function (i) { steps.push({ id: 'screen', i: i }); });
     steps.push({ id: 'photos' }, { id: 'review' });
@@ -929,6 +937,7 @@ const SCRIPT = String.raw`
     if (!submitting) {
       if (step.id === 'review') toReview = false;
       $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm'
+        : V.topUp && step.id === 'photos' && !morePages ? 'Send'
         : toReview && (step.id === 'screen' || step.id === 'photos') ? 'Back to summary' : 'Continue';
     }
     $('next').disabled = busy;
@@ -1144,7 +1153,7 @@ const SCRIPT = String.raw`
     if (step.id === 'review' && V.sign) return move(1);
     if (step.id === 'sign') return submit(signature());
     if (step.id === 'review') return submit();
-    if (step.id === 'photos') return toReview ? backToReview() : morePages ? advance(last) : move(1);
+    if (step.id === 'photos') return toReview ? backToReview() : morePages ? advance(last) : V.topUp ? submit() : move(1);
     var c = collect(page);
     if (c.answers.length || c.notKnown.length || c.cleared.length) {
       forgetSaved(c.answers.map(function (a) { return a.key; }).concat(c.notKnown, c.cleared));
@@ -1158,6 +1167,9 @@ const SCRIPT = String.raw`
     errors = {};
     render();
   }
+  /** The user (18 Nov 2026): the missing-items form's last words. Nothing to sign: the claim is signed already. */
+  var TOP_UP_DONE = 'We have added this to your claim. Tina will let you know on WhatsApp if anything else is still needed.';
+  function doneHtml(title, text) { return '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>' + esc(title) + '</h1><p class="help">' + esc(text) + '</p></div>'; }
   function submit(sig) {
     if (V.sign && !sig) { errors = { sign: 'Please sign in the box first.' }; return render(); }
     busy = true; submitting = true; $('next').disabled = true;
@@ -1193,7 +1205,7 @@ const SCRIPT = String.raw`
         $('foot').hidden = true; $('notice').hidden = true;
         $('sec').textContent = '';
         $('prog').style.width = '100%';
-        $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. A consultant from TTT will be in touch with you shortly.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
+        $('body').innerHTML = V.topUp ? doneHtml('Thank you', TOP_UP_DONE) : '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. A consultant from TTT will be in touch with you shortly.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
       }).catch(function (e) {
         clearTimeout(slow);
         busy = false; submitting = false;
@@ -1770,6 +1782,14 @@ const SCRIPT = String.raw`
     V = s;
     adopt(s);
     if ($('brandTitle')) $('brandTitle').textContent = s.title;
+    // The missing-items form with nothing left on it: everything came in some other way since the link went out.
+    if (s.topUp && !s.screens.length && !s.evidence.length) {
+      finished = true;
+      $('foot').hidden = true;
+      $('sec').textContent = '';
+      $('body').innerHTML = doneHtml('Nothing more needed', 'We have everything we need from you for now. Tina will let you know on WhatsApp if anything else comes up.');
+      return;
+    }
     if (!s.detailsConfirmed) here = { id: 'details' };
     else {
       here = s.startAt >= s.screens.length ? { id: 'photos' } : { id: 'screen', i: s.startAt, anchor: anchorFor(s.startAt, function (f) { return A[f.key] === undefined && !NK[f.key]; }) };

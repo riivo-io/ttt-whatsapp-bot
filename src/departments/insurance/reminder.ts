@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 5a5ddb7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -51,13 +51,13 @@
 // state is left alone and a reply goes through "which claim?".
 import { DEPARTMENT, type Conversation, type Owner } from './claim';
 import {
-  CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
+  CLAIM_SETTINGS_DEFAULTS, list, resumeFollowOn, formSubmitted, type FollowOnClaim, resumeMissing, stillNeedLines, stillNeedNames, stillNeedState, type ClaimSettings, type ClaimStatus,
   type StoredClaimForm,
 } from './followon';
 import { chased } from './progress';
 import { claimWords, isOpenClaim, NO_RESUME_STATE, type OpenClaim, type ResumePorts, type ResumeState } from './resume';
 import type { ClaimAnswers } from './contracts';
-import { FORM_REMINDER_EMAIL_TEMPLATE, formStillNeeded, REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
+import { FORM_REMINDER_EMAIL_TEMPLATE, formStillNeeded, missingOnForm, REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 export interface ReminderSettings extends ClaimSettings {
   /** The first reminder goes on this calendar day after the client's last message (a test by hand: 0, today). */
@@ -306,7 +306,7 @@ export async function remindTurn(
     }
 
     firstName ??= (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there';
-    const vars = { firstName, claim: label, list: list(stillNeedNames(missing, claim.answers)) };
+    const vars = { firstName, claim: label, list: await signedList(ports, claim, missing) };
     const text = REMINDER_TEMPLATE.render(vars);
     await ports.send(conv.phone, { kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text, params: REMINDER_TEMPLATE.params(vars) });
     await ports.createAgentAction({
@@ -405,6 +405,22 @@ async function remindForm(
 }
 
 /**
+ * The template's list of what's still needed. The user (18 Nov 2026): on a submitted claim, with the link to the
+ * missing-items form after it (guided.ts topUp), in the same {{3}}, so the approved template carries it. A link that can't
+ * be made: the list alone, as before.
+ */
+async function signedList(ports: ReminderPorts, claim: FollowOnClaim, missing: ReturnType<typeof resumeMissing>): Promise<string> {
+  const names = list(stillNeedNames(missing, claim.answers));
+  if (!ports.guidedFormLink || !formSubmitted(claim)) return names;
+  try {
+    return missingOnForm(names, (await ports.guidedFormLink(claim.id)).url);
+  } catch (e) {
+    console.error(`The missing-items link for claim ${claim.reference} couldn't be made for the reminder: ${e}`);
+    return names;
+  }
+}
+
+/**
  * The user (16 Nov 2026): one signed claim at a SIGNED_STAGES status whose client still owes something required (followon.ts
  * resumeMissing): they signed without it, as nothing on the form holds that up. The same clock, Sundays and broker steps as
  * any reminder, from the client's last message or the last screen they saved; the same templates. A quote or an invoice is
@@ -465,7 +481,7 @@ async function remindSigned(
     return { outcome: { reference: o.reference, sent: 'email', lines, ...broker }};
   }
   const firstName = (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there';
-  const vars = { firstName, claim: label, list: list(stillNeedNames(missing, claim.answers)) };
+  const vars = { firstName, claim: label, list: await signedList(ports, claim, missing) };
   const text = REMINDER_TEMPLATE.render(vars);
   await ports.send(conv.phone, { kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text, params: REMINDER_TEMPLATE.params(vars) });
   await ports.createAgentAction({

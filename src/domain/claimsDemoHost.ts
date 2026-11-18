@@ -27,7 +27,7 @@
  * src/services/claimsDemo.service.ts wires the real ones.
  */
 import { claimTurn, DEPARTMENT } from '../departments/insurance/claim';
-import { followOnTurn, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
+import { followOnTurn, formSubmitted, type ClientFile, type ResumeFile } from '../departments/insurance/followon';
 import { prefersChat } from '../departments/insurance/guided';
 import { claimRoute, type IntentModel } from '../departments/insurance/intent';
 import type { RoadsidePorts, RoadsideState } from '../departments/insurance/roadside';
@@ -403,7 +403,7 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
                 await deps.scheduleBatchCheck(m.phone, token, quietSpell(r.state.followOn?.waitingFor));
             } catch (e) {
                 console.warn('[ClaimsDemo] Scheduling the batch check failed; listing what is open now:', (e as Error).message);
-                const listed = await followOnTurn(ports, conv(), r.state.followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
+                const listed = await followOnTurn(ports, conv(), r.state.followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true, ...guided(deps) });
                 c.resume = { followOn: listed.state, pending: null };
             }
         }
@@ -445,7 +445,7 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
     let last: string | undefined;
     const ports = deps.ports(c.requestId, (text) => { last = text; });
     const conversation = claimsConversation(phone, c.requestId, deps.signUpLink, deps.contactNumber);
-    let r = await followOnTurn(ports, conversation, followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true });
+    let r = await followOnTurn(ports, conversation, followOn, { kind: 'nudge', wamid: token }, now, { waitForMore: true, ...guided(deps) });
     const again = r.state?.waiting;
     if (again && again !== token) {
         try {
@@ -453,7 +453,7 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
             await deps.scheduleBatchCheck(phone, again, quietSpell(r.state?.waitingFor));
         } catch (e) {
             console.warn('[ClaimsDemo] Scheduling the next check failed; running it now:', (e as Error).message);
-            r = await followOnTurn(ports, conversation, r.state, { kind: 'nudge', wamid: again }, now, { waitForMore: true });
+            r = await followOnTurn(ports, conversation, r.state, { kind: 'nudge', wamid: again }, now, { waitForMore: true, ...guided(deps) });
         }
     }
     c.resume = { followOn: r.state, pending: null };
@@ -461,6 +461,9 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
     await deps.save(phone, c);
     return 'listed';
 }
+
+/** The user (18 Nov 2026): the guided form's switch on every follow-on turn, so what's still missing goes with its link. */
+const guided = (deps: Pick<ClaimsDemoDeps, 'guidedForm'>) => (deps.guidedForm ? { guidedForm: true } : {});
 
 /**
  * TTTFG-5562 (AC 6): the client submitted the guided form. The claim carries on as a chat-answered one does: what's still
@@ -471,10 +474,24 @@ export async function claimsFormDone(deps: ClaimsDemoDeps, phone: string, claimI
     const c = await deps.load(phone);
     const followOn = c?.resume.followOn;
     if (!c || !followOn || followOn.claimId !== claimId) {
-        // The client has moved on to something else on WhatsApp, so Tina can't carry on here. The answers are on the claim:
-        // the broker is told, so a submitted form is never simply left.
         const ports = deps.ports(c?.requestId ?? '', () => undefined);
         const claim = await ports.loadClaim(claimId);
+        // The user (18 Nov 2026): the missing-items form of a claim already submitted. Its turn needs no state of this
+        // conversation (the follow-on rebuilds it from the claim), so Tina thanks the client and lists what's left. A
+        // conversation on another claim keeps its own state.
+        if (formSubmitted(claim)) {
+            let last: string | undefined;
+            const own = deps.ports(c?.requestId ?? '', (text) => { last = text; });
+            const r = await followOnTurn(own, claimsConversation(phone, c?.requestId ?? '', deps.signUpLink, deps.contactNumber), null,
+                { kind: 'form-done', wamid: `${claimId}:form-done`, claimId }, now, guided(deps));
+            const kept: DemoConversation = c ?? { contactId: claim.contactId ?? '', requestId: '', walk: null, resume: NO_RESUME_STATE, held: [], lastSent: null };
+            if (!followOn) kept.resume = { followOn: r.state, pending: null };
+            if (last !== undefined) kept.lastSent = last;
+            await deps.save(phone, kept);
+            return 'carried-on';
+        }
+        // The client has moved on to something else on WhatsApp, so Tina can't carry on here. The answers are on the claim:
+        // the broker is told, so a submitted form is never simply left.
         await ports.createAgentAction({
             kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claimId }, contactId: claim.contactId, at: now.toISOString(),
             detail: `The client submitted the claim form for ${claim.reference}, but their WhatsApp conversation has moved on, so no signing link went out. Please send them the form to sign.`,
@@ -484,7 +501,9 @@ export async function claimsFormDone(deps: ClaimsDemoDeps, phone: string, claimI
     let last: string | undefined;
     const ports = deps.ports(c.requestId, (text) => { last = text; });
     const conversation = claimsConversation(phone, c.requestId, deps.signUpLink, deps.contactNumber);
-    const r = await followOnTurn(ports, conversation, followOn, { kind: 'form-done', wamid: `${claimId}:form-done` }, now, deps.scheduleBatchCheck ? { waitForMore: true } : {});
+    const r = await followOnTurn(ports, conversation, followOn, { kind: 'form-done', wamid: `${claimId}:form-done`, claimId }, now, {
+        ...(deps.scheduleBatchCheck ? { waitForMore: true } : {}), ...guided(deps),
+    });
     c.resume = { followOn: r.state, pending: null };
     if (last !== undefined) c.lastSent = last;
     await deps.save(phone, c);

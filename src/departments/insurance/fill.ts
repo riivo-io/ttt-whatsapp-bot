@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill.ts (commit 5a5ddb7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: fill an insurer's claim form from its field map (TTTFG-5172), the client's answers (riivo_answers,
 // TTTFG-5176) and the CRM rows. Pure: PDF bytes, config and values in; filled PDF bytes and the blank boxes out.
@@ -25,7 +25,7 @@
 //
 // Text goes through Helvetica (WinAnsi), so a character it can't encode is reduced to its base letter (ğ to g) or, for
 // emoji and the like, dropped. Either way the client sees the result before signing.
-import { PDFArray, PDFCheckBox, PDFDict, PDFDocument, PDFDropdown, PDFName, PDFRadioGroup, PDFTextField, StandardFonts, type PDFFont } from 'pdf-lib';
+import { PDFArray, PDFCheckBox, PDFDict, PDFDocument, PDFDropdown, PDFHexString, PDFName, PDFRadioGroup, PDFTextField, StandardFonts, type PDFFont, type PDFImage } from 'pdf-lib';
 import type { ClaimAnswers, ClaimForm, Condition, FieldMapEntry, QuestionItem } from './contracts';
 
 /** The CRM tables a `crm:` source may read. The rows are passed in, so the fill stays pure. Policy data is read-only. */
@@ -318,6 +318,76 @@ export interface FillResult {
   bytes: Uint8Array;
   blankFields: BlankField[];
   drawn: Drawn[];
+  /** The user (18 Nov 2026): the client's images put in the form's drawing boxes (FieldMapEntry `picture`). */
+  pictures: PlacedPicture[];
+}
+
+/** A client's image for a `picture` box: the claim's latest document for that evidence item. */
+export interface FormPicture { key: string; fileRef: string; fileName: string; bytes: Uint8Array }
+/** Which file went in which box, as the filled PDF records it (formPicturesOf). */
+export interface PlacedPicture { key: string; fileRef: string }
+
+/** The Info entry that says which of the claim's files are drawn on the form, so the pack doesn't send them again. */
+const ON_FORM = 'RiivoOnForm';
+/** The document's Info dictionary (made if missing). pdf-lib keeps the method private; its setTitle and the like use it. */
+const infoOf = (doc: PDFDocument) => (doc as unknown as { getInfoDict(): PDFDict }).getInfoDict();
+
+/** The images on a filled (or signed) form, from its Info entry. A PDF without one, or one that can't be read: none. */
+export async function formPicturesOf(pdf: Uint8Array): Promise<PlacedPicture[]> {
+  try {
+    const doc = await PDFDocument.load(pdf, { updateMetadata: false });
+    const v = infoOf(doc).lookup(PDFName.of(ON_FORM));
+    if (!(v instanceof PDFHexString)) return [];
+    const list = JSON.parse(v.decodeText()) as unknown;
+    return Array.isArray(list) ? list.filter((p): p is PlacedPicture => !!p && typeof p.key === 'string' && typeof p.fileRef === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** A PNG or a JPEG, by its first bytes; anything else (HEIC, WebP, a PDF) can't go on the form. */
+async function embedImage(doc: PDFDocument, bytes: Uint8Array): Promise<PDFImage | null> {
+  try {
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return await doc.embedPng(bytes);
+    if (bytes[0] === 0xff && bytes[1] === 0xd8) return await doc.embedJpg(bytes);
+  } catch {
+    // A broken file stays a file of its own.
+  }
+  return null;
+}
+
+/** Draws the image as large as fits in the box, centred, keeping its shape. */
+function drawFitted(doc: PDFDocument, pageIndex: number, image: PDFImage, box: { x: number; y: number; width: number; height: number }) {
+  const scale = Math.min(box.width / image.width, box.height / image.height);
+  const width = image.width * scale, height = image.height * scale;
+  doc.getPage(pageIndex).drawImage(image, { x: box.x + (box.width - width) / 2, y: box.y + (box.height - height) / 2, width, height });
+}
+
+/**
+ * The user (18 Nov 2026): the client's drawing in the form's box. On a field, its widget's box (and the empty field is taken
+ * off, so its appearance can't cover the drawing); on a flat form, the entry's x, y, `maxWidth` and `height`.
+ */
+async function placePicture(doc: PDFDocument, entry: FieldMapEntry, picture: FormPicture): Promise<boolean> {
+  const image = await embedImage(doc, picture.bytes);
+  if (!image) return false;
+  if ('pdfField' in entry.target) {
+    const acro = doc.getForm();
+    const field = acro.getFieldMaybe(entry.target.pdfField);
+    const widget = field?.acroField.getWidgets()[0];
+    if (!field || !widget) return false;
+    const page = doc.findPageForAnnotationRef(doc.context.getObjectRef(widget.dict)!);
+    const pageIndex = page ? doc.getPages().indexOf(page) : -1;
+    if (pageIndex < 0) return false;
+    const r = widget.getRectangle();
+    acro.removeField(field);
+    drawFitted(doc, pageIndex, image, r);
+    return true;
+  }
+  const { page, x, y, maxWidth, height } = entry.target;
+  if (page > doc.getPageCount() || !maxWidth || !height) return false;
+  // As for text, y is the top of the box and `height` runs down from it.
+  drawFitted(doc, page - 1, image, { x, y: y - height, width: maxWidth, height });
+  return true;
 }
 
 function labelFor(entry: FieldMapEntry, questions: QuestionItem[]): string {
@@ -365,12 +435,13 @@ export async function repairAcroForm(pdf: Uint8Array): Promise<Uint8Array> {
 }
 
 /** Fills `pdf` from the form's field map. The PDF is the insurer's blank form; the generic row has none (summarysheet.ts). */
-export async function fillClaimForm(pdf: Uint8Array, form: ClaimForm, answers: ClaimAnswers, crm: CrmValues): Promise<FillResult> {
+export async function fillClaimForm(pdf: Uint8Array, form: ClaimForm, answers: ClaimAnswers, crm: CrmValues, pictures: readonly FormPicture[] = []): Promise<FillResult> {
   const doc = await PDFDocument.load(form.formPdf ? await repairAcroForm(pdf) : pdf);
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const acro = doc.getForm();
   const blankFields: BlankField[] = [];
   const drawn: Drawn[] = [];
+  const placed: PlacedPicture[] = [];
   // How many boxes a value printed one character per box has: a value with more characters is never cut short.
   const charBoxes = new Map<string, number>();
   for (const e of form.fieldMap) {
@@ -383,7 +454,11 @@ export async function fillClaimForm(pdf: Uint8Array, form: ClaimForm, answers: C
       continue;
     }
     const { entry } = choice;
-    if (entry.source === 'none') continue;
+    if (entry.source === 'none') {
+      const picture = entry.picture ? pictures.find((p) => p.key === entry.picture) : undefined;
+      if (picture && !placed.some((p) => p.key === picture.key) && await placePicture(doc, entry, picture)) placed.push({ key: picture.key, fileRef: picture.fileRef });
+      continue;
+    }
     const blank = (reason: BlankReason) => addBlank(blankFields, { key: entry.source, label: labelFor(entry, form.questionList), reason });
     const r = resolveSource(entry.source, form, answers, crm);
     if ('notApplicable' in r) continue;
@@ -445,7 +520,8 @@ export async function fillClaimForm(pdf: Uint8Array, form: ClaimForm, answers: C
     drawn.push({ page, x, y, size, lines });
   }
 
-  return { bytes: await doc.save(), blankFields, drawn };
+  if (placed.length) infoOf(doc).set(PDFName.of(ON_FORM), PDFHexString.fromText(JSON.stringify(placed)));
+  return { bytes: await doc.save(), blankFields, drawn, pictures: placed };
 }
 
 /**

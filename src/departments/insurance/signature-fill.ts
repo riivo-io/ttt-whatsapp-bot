@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signature-fill.ts (commit 5a5ddb7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the fill half of the requestClaimSignature seam (TTTFG-5248 steps 6 to 8). TTTFG-5176 (WhatsApp) and
 // TTTFG-5188 (email) call it at the end of the conversation, once every item is in or passed over (TTTFG-5196). It
@@ -28,7 +28,7 @@
 // to riivo_policy.
 import { createHash } from 'node:crypto';
 import type { ClaimAnswers, ClaimForm, RequestClaimSignature, SignatureResult } from './contracts';
-import { blankFieldsText, fillClaimForm, splitKey, type BlankField, type CrmValues } from './fill';
+import { blankFieldsText, fillClaimForm, splitKey, type BlankField, type CrmValues, type FormPicture } from './fill';
 import { signatureStamps, type SignStamp } from './signing';
 import { summarySheet } from './summarysheet';
 
@@ -93,6 +93,11 @@ export interface ClaimFillPorts {
   crmValues(claim: ClaimForFill): Promise<CrmValues>;
   /** The insurer's blank PDF (riivo_claimform.riivo_formurl). */
   blankForm(formPdf: string): Promise<Uint8Array>;
+  /**
+   * The user (18 Nov 2026): the claim's latest document for an evidence item (the drawing of the accident), with its bytes,
+   * for a `picture` box on the form. Null: none yet. Absent: the host can't read files back, so drawings stay files of their own.
+   */
+  picture?(claim: ClaimForFill, key: string): Promise<FormPicture | null>;
   /** Saves to the client's SharePoint claim folder. With `replaces`, overwrites that item rather than adding one. */
   saveToClaimFolder(claim: ClaimForFill, fileName: string, bytes: Uint8Array, replaces?: string): Promise<{ fileRef: string }>;
   /** The claim's riivo_clientdocument row of this type, if there is one. */
@@ -126,7 +131,7 @@ export async function fillAndFile(ports: ClaimFillPorts, claimId: string): Promi
   const form = await ports.claimForm(claim);
   const crm = await ports.crmValues(claim);
   const filled = form.formPdf
-    ? await fillClaimForm(await ports.blankForm(form.formPdf), form, claim.answers, crm)
+    ? await fillClaimForm(await ports.blankForm(form.formPdf), form, claim.answers, crm, await formPictures(ports, claim, form))
     : await summarySheet(form, claim.answers, crm);
   const { bytes, blankFields } = filled;
   const stamps = 'stamps' in filled ? filled.stamps : await signatureStamps(form, bytes);
@@ -147,6 +152,20 @@ export async function fillAndFile(ports: ClaimFillPorts, claimId: string): Promi
 
   const document: UnsignedDocument = { fileName, fileRef, clientDocumentId, bytes, fileHash, stamps };
   return { result: await ports.signingStep(claim.id, document), document, blankFields };
+}
+
+/**
+ * The images the form's `picture` boxes take. One that can't be read is left out: the drawing then goes to the insurer
+ * as its own file, as before, and the form is still filled.
+ */
+async function formPictures(ports: ClaimFillPorts, claim: ClaimForFill, form: ClaimForm): Promise<FormPicture[]> {
+  if (!ports.picture) return [];
+  const keys = [...new Set(form.fieldMap.flatMap((e) => (e.picture ? [e.picture] : [])))];
+  const found = await Promise.all(keys.map((k) => ports.picture!(claim, k).catch((e) => {
+    console.error(`The ${k} image for claim ${claim.reference ?? claim.id} couldn't be read for the form: ${e}`);
+    return null;
+  })));
+  return found.filter((p): p is FormPicture => !!p);
 }
 
 /** The seam TTTFG-5176 calls at the end of the conversation (TTTFG-5196). */

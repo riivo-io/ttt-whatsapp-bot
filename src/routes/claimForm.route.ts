@@ -7,7 +7,9 @@
  *   POST /claim-form/:token/file       one photo or document (raw bytes), ?item=<evidence key>
  *   POST /claim-form/:token/submit     the client is done: Tina carries on on WhatsApp, or tells the email agent.
  *                                      { signature }: the client's signature from the form's last screen (a WhatsApp
- *                                      link, when the signing page is set up: the view's `sign`)
+ *                                      link, when the signing page is set up: the view's `sign`). The user (18 Nov
+ *                                      2026): on a submitted claim it is the missing-items form (the view's `topUp`):
+ *                                      no signature, and Tina carries on with what's still to come.
  *   POST /claim-form/api/links         TTTFG-5188: a link for an email claim, with the signing API's key
  *   POST /claim-form/api/form-signature  whether an email claim's client signed at the end of its form, with the same key
  *   POST /claim-form/api/sign-with-form  signs the email agent's new signing request with that signature, with the same key
@@ -30,8 +32,8 @@ export interface ClaimFormSession {
     /** The file's bytes through the same pipeline as a file sent on WhatsApp. */
     file(file: Omit<ClientFile, 'id'>, bytes: Buffer, itemKey: string | undefined): Promise<{ count: number }>;
     hear(bytes: Buffer, mimeType: string, questionKey: string | undefined): Promise<{ text: string } | { problem: string }>;
-    /** Required questions still open, or none: the form is ready. */
-    finish(): Promise<{ open: string[] }>;
+    /** Required questions still open, or none: the form is ready. `topUp`: it was the missing-items form, with nothing to sign. */
+    finish(): Promise<{ open: string[]; topUp?: true }>;
     /** Tells Tina the client is done, on the client's own queue. */
     carryOn(): Promise<void>;
 }
@@ -235,7 +237,10 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!d) return void off(res);
         try {
             const link = await linked(d, req, res);
-            if (link) res.json({ ...(await d.session(link).view()), ...(link.callback_url ? { emailed: true } : {}), ...(signsHere(d, link) ? { sign: true } : {}) });
+            if (!link) return;
+            const view = await d.session(link).view();
+            // The missing-items form signs nothing: the claim is signed already.
+            res.json({ ...view, ...(link.callback_url ? { emailed: true } : {}), ...(signsHere(d, link) && !view.topUp ? { sign: true } : {}) });
         } catch (e) { failed('state', res, e); }
     });
 
@@ -291,14 +296,22 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         try {
             const link = res.locals.link as GuidedLinkRow;
             const signature = typeof req.body?.signature === 'string' ? req.body.signature : '';
-            // The same check as the signing page's: a PNG from the pad, of a pad's size.
-            if (signsHere(d, link) && !signaturePng(signature)) return void res.status(400).json({ ok: false, message: 'Please sign in the box.' });
             const session = d.session(link);
+            // The same check as the signing page's: a PNG from the pad, of a pad's size. Not on the missing-items form
+            // (the user, 18 Nov 2026), which has nothing to sign: the view says which it is.
+            if (signsHere(d, link) && !signaturePng(signature) && !(await session.view()).topUp) return void res.status(400).json({ ok: false, message: 'Please sign in the box.' });
             const r = await inTurn(link.id, () => session.finish());
             if (r.open.length) {
                 // Question keys only, never an answer. When a client says Submit did nothing, this says what the form still wanted.
                 console.warn(`[ClaimForm] submit held for link ${link.id}${link.callback_url ? ' (email claim)' : ''}: still open: ${r.open.slice(0, 25).join(', ')}`);
                 return void res.json({ ok: false, open: r.open });
+            }
+            if (r.topUp) {
+                // Its files and answers are on the claim already; Tina thanks the client and lists what's left. An email
+                // claim's agent has no such step: its claim just has them.
+                if (!link.callback_url) await session.carryOn();
+                await finishGuidedLink(d, link.id);
+                return void res.json({ ok: true, open: [] });
             }
             if (signsHere(d, link)) {
                 // Kept on the link until Tina has filled the form. If it can't be kept, the client gets a signing link as before.

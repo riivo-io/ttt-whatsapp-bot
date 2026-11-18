@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 16fd232). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 5a5ddb7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -201,6 +201,14 @@ export const FieldMapEntrySchema = z.object({
    * `dateFormat` prints part of the date, for a form that splits it ("on this __ day of ______ 20__").
    */
   sign: z.enum(['signature', 'date']).optional(),
+  /**
+   * The user (18 Nov 2026): a box for a drawing (source `none` only), filled with the client's image for this evidence
+   * item (`accidentSketch`) when the form is filled: the latest one on the claim, a PNG or a JPEG, scaled to fit and
+   * centred. On a flat form x, y is the box's top-left corner (as for text) and `maxWidth` and `height` its size; on a field, the
+   * field's own box (the empty field is taken off, so nothing covers the drawing). No image yet: the box stays as it is,
+   * and a drawing that comes later goes to the insurer as its own file.
+   */
+  picture: z.string().min(1).optional(),
   dateFormat: z.enum(['date', 'day', 'month', 'yy']).optional(),
 });
 export type FieldMapEntry = z.infer<typeof FieldMapEntrySchema>;
