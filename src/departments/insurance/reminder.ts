@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 6bab216). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit 533469b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -439,7 +439,7 @@ async function signedList(ports: ReminderPorts, claim: FollowOnClaim, missing: R
 /**
  * The WhatsApp template for one claim's morning reminder, with its variables, the text the client sees and the text the record
  * keeps. The user (18 Nov 2026): a claim the client has submitted gets MISSING_REMINDER_TEMPLATE ("Update on your claim: Things we
- * still need from you: …, tap Add missing items below, you don't need to sign again", with the link as its button) when the host has it (`settings.missingTemplate`) and the
+ * still need from you: the items as bullets, tap Add missing items below, you don't need to sign again", with the link as its button) when the host has it (`settings.missingTemplate`) and the
  * link can be made; every other reminder goes as REMINDER_TEMPLATE, as before. The record never keeps the form's link.
  */
 async function whatsAppReminder(
@@ -448,7 +448,7 @@ async function whatsAppReminder(
   const link = settings.missingTemplate ? await missingFormLink(ports, claim) : undefined;
   if (link) {
     const t = MISSING_REMINDER_TEMPLATE;
-    const vars = { claim: label, list: list(stillNeedNames(missing, claim.answers)) };
+    const vars = { claim: label, items: stillNeedLines(missing, claim.answers) };
     // The link is the template's button, so it is in neither the text nor the record (it is the client's key to the form).
     return { name: t.name, version: t.version, text: t.render(vars), params: t.params(vars), buttonUrl: link, recorded: t.render(vars) };
   }

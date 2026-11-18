@@ -4,21 +4,25 @@
  *
  *   CLAIMS_REMINDER_TEMPLATE        the morning reminder (REMINDER_TEMPLATE.whatsappBody, 3 variables); CLAIMS_REMINDER_TEMPLATE_LANG
  *   CLAIMS_MISSING_TEMPLATE         the user (18 Nov 2026): the morning reminder for a claim the client has submitted and still owes
- *                                   something on (MISSING_REMINDER_TEMPLATE.whatsappBody, 3 variables); CLAIMS_MISSING_TEMPLATE_LANG
+ *                                   something on, with the items as bullets (MISSING_REMINDER_TEMPLATE.whatsappBody(n)). A variable
+ *                                   can't hold a line break, so there is a template for each number of bullets, named by this and the
+ *                                   number: "<this>_1" to "<this>_5". CLAIMS_MISSING_TEMPLATE_LANG
  *                                   (default: the reminder's). Unset: the package sends that reminder as REMINDER_TEMPLATE, as before.
  *                                   It has a URL button, "Add missing items", registered as <SIGNING_PUBLIC_URL>/claim-form/{{1}}.
  *
  * Each message goes as its own template and never as the other: their variables differ.
  */
-import { MISSING_REMINDER_TEMPLATE } from '../departments/insurance/templates';
+import { MISSING_REMINDER_MAX_ITEMS, MISSING_REMINDER_TEMPLATE } from '../departments/insurance/templates';
 
 export interface WhatsAppTemplate { name: string; language: string }
 
-export function whatsAppTemplateFor(message: string | undefined, env: NodeJS.ProcessEnv = process.env): WhatsAppTemplate | undefined {
+export function whatsAppTemplateFor(message: string | undefined, env: NodeJS.ProcessEnv = process.env, bullets?: number): WhatsAppTemplate | undefined {
     const reminder = { name: env.CLAIMS_REMINDER_TEMPLATE?.trim(), language: env.CLAIMS_REMINDER_TEMPLATE_LANG?.trim() || 'en' };
     if (message === MISSING_REMINDER_TEMPLATE.name) {
-        const name = env.CLAIMS_MISSING_TEMPLATE?.trim();
-        return name ? { name, language: env.CLAIMS_MISSING_TEMPLATE_LANG?.trim() || reminder.language } : undefined;
+        const base = env.CLAIMS_MISSING_TEMPLATE?.trim();
+        // The template for this many bullets: "<base>_3". Without a count there is no template to name.
+        return base && bullets && bullets >= 1 && bullets <= MISSING_REMINDER_MAX_ITEMS
+            ? { name: `${base}_${bullets}`, language: env.CLAIMS_MISSING_TEMPLATE_LANG?.trim() || reminder.language } : undefined;
     }
     return reminder.name ? { name: reminder.name, language: reminder.language } : undefined;
 }

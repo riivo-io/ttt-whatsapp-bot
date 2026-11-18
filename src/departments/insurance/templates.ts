@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 6bab216). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 533469b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -131,29 +131,47 @@ export const REMINDER_TEMPLATE = {
 export interface MissingReminderVars {
   /** "motor accident claim (CLM-000301)". */
   claim: string;
-  /** What is still needed in one line (stillNeedNames joined by list()): "the SAPS case number and the quotes". */
-  list: string;
+  /** What is still needed, one line each (followon.ts stillNeedLines): "SAPS case number". Any number: the template takes up to MAX_ITEMS. */
+  items: readonly string[];
+}
+
+/** The most bullets one reminder template carries; the templates are numbered 1 to this, one for each number of bullets. */
+export const MISSING_REMINDER_MAX_ITEMS = 5;
+
+/** What the bullets are: the items, or when there are more than the templates carry, the first few and "And N more" (the form lists all). */
+export function missingReminderItems(items: readonly string[]): string[] {
+  const max = MISSING_REMINDER_MAX_ITEMS;
+  return items.length <= max ? [...items] : [...items.slice(0, max - 1), `And ${items.length - (max - 1)} more`];
 }
 
 /**
  * The user (18 Nov 2026): the morning reminder for a claim the client has submitted and still owes something on, in the
- * client's words: "Update on your claim: Things we still need from you: <list>. To add it to your claim, tap Add missing items below.
- * You don't need to sign again." It never asks them to send it on WhatsApp. The link to the missing-items form is the template's
- * URL button, "Add missing items", as on the list Tina sends in the chat (followon.ts MISSING_LINK_LABEL): the message carries the
- * link as `buttonUrl` and the host fills the button with it. A WhatsApp template variable can't hold a line break, so the list is
- * one line here (the email's is bulleted).
- * Its own approved template (Tina's CLAIMS_MISSING_TEMPLATE), because REMINDER_TEMPLATE's body ends "Please send them here" and has
- * no button. Until that is set up the reminder goes as REMINDER_TEMPLATE (reminder.ts signedList).
+ * client's words and in the look of the list Tina sends in the chat: "Update on your claim", "Things we still need from you:" with
+ * the items as a bulleted list, "tap Add missing items below. You don't need to sign again.", and the link to the missing-items form
+ * as the template's URL button, "Add missing items" (the message carries it as `buttonUrl` and the host fills the button). It never
+ * asks them to send it on WhatsApp.
+ * A WhatsApp template variable can't hold a line break, so each bullet is a variable of its own, and the template has as many
+ * as there are items: the host sends the one numbered for them (`<name>_3` for three items). Each is its own approved template
+ * (Tina's CLAIMS_MISSING_TEMPLATE is the name they share, before the number), because REMINDER_TEMPLATE's body ends "Please send them
+ * here" and has no list or button. Until that is set up the reminder goes as REMINDER_TEMPLATE (reminder.ts signedList).
  */
 export const MISSING_REMINDER_TEMPLATE = {
   name: 'Claim - still needed, add missing items (morning reminder)',
-  version: 'draft-2',
+  version: 'draft-3',
   approved: false,
-  /** The template's body variables, in order. */
-  params: (v: MissingReminderVars) => [v.claim, v.list],
-  render: (v: MissingReminderVars): string => fillTemplate(MISSING_REMINDER_TEMPLATE.whatsappBody, MISSING_REMINDER_TEMPLATE.params(v)),
-  /** For Meta: {{1}} the claim ("motor accident claim (CLM-000301)"), {{2}} the list in one line. Plus a URL button, `button`. */
-  whatsappBody: "Update on your {{1}}. Things we still need from you: {{2}}. To add it to your claim, tap Add missing items below. You don't need to sign again.",
+  /** The template's body variables, in order: the claim, then one for each bullet. The template to send is numbered by `params.length - 1`. */
+  params: (v: MissingReminderVars) => [v.claim, ...missingReminderItems(v.items)],
+  /** For Meta, the template for `n` bullets: {{1}} the claim, {{2}} to {{n + 1}} the bullets. Plus a URL button, `button`. */
+  whatsappBody: (n: number): string => [
+    'Update on your {{1}}.',
+    '*Things we still need from you:*',
+    Array.from({ length: n }, (_, i) => `- {{${i + 2}}}`).join('\n'),
+    `To add ${n === 1 ? 'it' : 'them'} to your claim, tap Add missing items below. You don't need to sign again.`,
+  ].join('\n\n'),
+  render: (v: MissingReminderVars): string => {
+    const params = MISSING_REMINDER_TEMPLATE.params(v);
+    return fillTemplate(MISSING_REMINDER_TEMPLATE.whatsappBody(params.length - 1), params);
+  },
   /** The button's text at Meta (25 characters at most); its URL is the claim form's link ending in one variable, the form's token. */
   button: 'Add missing items',
 } as const;

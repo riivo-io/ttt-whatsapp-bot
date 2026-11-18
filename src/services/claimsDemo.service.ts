@@ -173,7 +173,8 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Prom
         },
         ...(process.env.CLAIMS_REMINDER_TEMPLATE || process.env.CLAIMS_MISSING_TEMPLATE ? {
             sendTemplate: async (to: string, params: string[], message?: string, buttonUrl?: string) => {
-                const template = whatsAppTemplateFor(message);
+                // The missing-items reminder has a template for each number of bullets: its body variables are the claim, then one a bullet.
+                const template = whatsAppTemplateFor(message, process.env, params.length - 1);
                 if (!template) throw new Error(`No WhatsApp template set up for "${message ?? 'the reminder'}"`);
                 // The user (18 Nov 2026): the form's link is the template's "Add missing items" button; the token is the button's variable.
                 const token = buttonUrl ? urlButtonSuffix(buttonUrl) : undefined;
