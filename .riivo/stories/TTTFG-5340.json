@@ -162,11 +162,25 @@
       }
     ]
   },
+  "handover": {
+    "at": "2026-11-18T07:50:55Z",
+    "evidence": "tests"
+  },
   "acks": {
     "verify": {
       "at": "2026-11-18T07:44:16Z",
       "how": "tests",
       "result": "pass"
+    },
+    "review": {
+      "at": "2026-11-18T07:50:55Z",
+      "tool": "code-review",
+      "findings": 18,
+      "open": 4
+    },
+    "claude_md": {
+      "at": "2026-11-18T07:50:55Z",
+      "updated": false
     }
   },
   "developer": "ad.hiemstra@gmail.com",
