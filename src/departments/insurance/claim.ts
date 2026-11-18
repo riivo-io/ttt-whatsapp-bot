@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 5a5ddb7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit c3f3a6e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -9,7 +9,7 @@
 // into Tina (epic TTTFG-4830).
 import { blockedBy, claimGate } from './gate';
 import {
-  advance, askedKey, atNight, complete, incidentLabel, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
+  advance, askedKey, atNight, CLAIM_CATEGORIES, complete, incidentLabel, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
   STOPPED_TEXT, VOICE_OR_TEXT,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
 } from './walkthrough';
@@ -533,8 +533,11 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
         ? [`Is everything in the summary above correct? ${SUMMARY_ASK}`, `Is that all correct? ${SUMMARY_ASK}`][(again - 1) % 2]
         : summary(state);
     default: {
-      // 6 Nov 2026: with more than one policy, what happened is Tina's first question, before the policy.
-      if (step === 'claim-type' && !state.policyId && !(tries[askedKey('claimType')] ?? 0)) return INCIDENT_FIRST_QUESTION;
+      // 18 Nov 2026: the kind of claim is Tina's first question, before the policy, picked from CLAIM_CATEGORY_CHOICES.
+      if (step === 'claim-type' && !state.policyId) {
+        const n = tries[askedKey('claimType')] ?? 0;
+        return n ? CATEGORY_AGAIN[(n - 1) % CATEGORY_AGAIN.length] : CATEGORY_QUESTION;
+      }
       // TTTFG-4830: a yes/no asked for the first time brings its details question with it ("If yes to 1: please send me
       // their details"), so the yes and the details can come in one reply. Two or more questions are numbered, so the
       // client can answer by number, with a blank line between them so each stands out. A yes/no asked on its own is
@@ -614,10 +617,20 @@ export const CLAIM_TYPE_CHOICES: Choice[] = [
   { title: 'Something else' },
 ];
 /**
- * 6 Nov 2026: the first question for a client with more than one policy, answered in their own words (no taps). Tina
- * works out the kind of claim from it, then offers the policies that fit.
+ * 6 Nov 2026: the first question for a client with more than one policy, answered in their own words (no taps). Since
+ * 18 Nov 2026 only a conversation saved before then can still be waiting on it; CATEGORY_QUESTION took its place.
  */
 export const INCIDENT_FIRST_QUESTION = 'What happened? Just tell me in a few words, for example "someone crashed into my car" or "someone stole my TV".';
+
+/** 18 Nov 2026: the four kinds of claim (walkthrough.ts CLAIM_CATEGORIES), tapped before the policy. */
+export const CLAIM_CATEGORY_CHOICES: Choice[] = CLAIM_CATEGORIES.map(({ title, description }) => ({ title, description }));
+/** 18 Nov 2026: Tina's first question when the client hasn't said what happened ("I'd like to open an insurance claim"). */
+export const CATEGORY_QUESTION = 'What is your claim for? Please pick one from the list.';
+/** 18 Nov 2026: the same question again, after a reply that didn't say. Typed words still work. */
+const CATEGORY_AGAIN = [
+  'Which of these is it: a car accident, a stolen or hijacked car, a windscreen, or your home or belongings? Tap one, or tell me in a few words.',
+  'Is the claim about your car, your windscreen, or your home and belongings? Please tap one from the list.',
+];
 
 /** An insurer's name without "Ltd" or "(Pty) Ltd", so it fits a tap after what happened ("Theft – Santam"). */
 export const shortInsurer = (name: string) => name.replace(/\s*(\(Pty\)\s*)?(Ltd|Limited)\.?\s*$/i, '').trim() || name;
@@ -695,8 +708,8 @@ export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] |
     case 'danger':
       return READY;
     case 'claim-type':
-      // 6 Nov 2026: asked before the policy, what happened is answered in the client's own words, not picked from a list.
-      return state.policyId ? CLAIM_TYPE_CHOICES : undefined;
+      // 18 Nov 2026: asked before the policy, the kind of claim is one of four taps.
+      return state.policyId ? CLAIM_TYPE_CHOICES : CLAIM_CATEGORY_CHOICES;
     case 'summary':
       return SUMMARY_CHOICES;
     default:
@@ -705,10 +718,17 @@ export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] |
   }
 }
 
-const FOLLOW_UP_DETAIL: Record<Exclude<FollowUpReason, 'client-question'>, string> = {
+const FOLLOW_UP_DETAIL: Record<Exclude<FollowUpReason, 'client-question' | 'no-policy-for-claim'>, string> = {
   'no-active-policy': 'Client asked on WhatsApp to report a claim but has no active policy on the CRM. Please contact them.',
   'policy-not-on-file': 'Client asked on WhatsApp to report a claim on a policy that is not on the CRM. Please contact them.',
 };
+
+/** 18 Nov 2026: what kind of policy a claim needs, in the client's words ("a car policy"). */
+const policyWord = (t?: ClaimType) => (t === 'Property loss or damage' || t === 'Portable possessions' ? 'a household' : 'a car');
+
+/** 18 Nov 2026: the Follow-up for a client who picked a kind of claim none of their policies is for. */
+export const noPolicyForClaimDetail = (t?: ClaimType) =>
+  `Client asked on WhatsApp to report a ${claimLabel(t) || 'claim'} claim but has no active ${policyWord(t).replace(/^an? /, '')} policy on the CRM. Please contact them.`;
 
 /** TTTFG-4830: the Follow-up for a client's question Tina leaves to a person. */
 export const clientQuestionDetail = (question: string) =>
@@ -746,7 +766,8 @@ export async function claimTurn(
   let passedOn: { owner: Owner; dueOn?: string } | undefined;
   for (const e of turn.effects.filter((x): x is Extract<Effect, { kind: 'follow-up' }> => x.kind === 'follow-up')) {
     const owner = await ownerFor(ports, e.to === 'broker' ? working?.policyId : undefined);
-    const detail = e.reason === 'client-question' ? clientQuestionDetail(e.question ?? '') : FOLLOW_UP_DETAIL[e.reason];
+    const detail = e.reason === 'client-question' ? clientQuestionDetail(e.question ?? '')
+      : e.reason === 'no-policy-for-claim' ? noPolicyForClaimDetail(e.claimType) : FOLLOW_UP_DETAIL[e.reason];
     const row = await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_request', id: conv.requestId }, contactId, detail, at,
     });
@@ -802,7 +823,10 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
       return `You picked your ${p ? `${p.insurer} ${p.product} policy` : 'policy'}, but this sounds like a claim about ${what}.`;
     }
     case 'passed-on': {
-      const why = say.reason === 'no-active-policy' ? "I can't see an active policy for you on our system" : "I can only open a claim on a policy we have on file";
+      const why = say.reason === 'no-active-policy' ? "I can't see an active policy for you on our system"
+        // 18 Nov 2026: the client picked a kind of claim none of their policies is for.
+        : say.reason === 'no-policy-for-claim' ? `I can't see ${policyWord(say.claimType)} policy for you on our system`
+        : "I can only open a claim on a policy we have on file";
       const by = passedOn?.dueOn ? ` by ${new Date(passedOn.dueOn).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', weekday: 'long', day: 'numeric', month: 'long' })}` : '';
       return `${why}, so I've passed this to our insurance team, who will contact you${by}.`;
     }

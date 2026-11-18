@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit 5a5ddb7). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/understand.ts (commit c3f3a6e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: Claude reads one WhatsApp message from the client and says what it means for the step Tina is on. Code
 // decides what happens next (walkthrough.ts). This is the "use Claude only to understand each answer" half of the
@@ -13,7 +13,7 @@
 //
 // Pure, apart from the model port. No zod: the host (the email agent or Tina) may pin a different zod major.
 import {
-  atNight, CANCEL_WORDS, CLAIM_TYPES, isGeyser, isTheft, MIN_DESCRIPTION_WORDS, missingFor, partOfDay, QUESTION_HELP, questionHelp, sastInstant, sastParts,
+  atNight, CANCEL_WORDS, CLAIM_CATEGORIES, CLAIM_TYPES, isGeyser, isTheft, MIN_DESCRIPTION_WORDS, missingFor, partOfDay, QUESTION_HELP, questionHelp, sastInstant, sastParts,
   SPOKEN_HELP, STOP_HELP,
   type Answer, type ClaimType, type Fact, type Facts, type Step, type WalkthroughState,
 } from './walkthrough';
@@ -280,6 +280,12 @@ function validDate(v: string | undefined, now: Date): string | undefined {
   return v <= sastParts(now.toISOString()).date ? v : undefined;
 }
 
+/** 18 Nov 2026: the kind of claim when the whole message is one of the four taps (its title), else undefined. */
+export function categoryTap(text: string): ClaimType | undefined {
+  const t = text.trim().replace(/[.!]+$/, '').toLowerCase();
+  return CLAIM_CATEGORIES.find((c) => c.title.toLowerCase() === t)?.claimType;
+}
+
 /** TTTFG-4830 (QC): the taps for "Would you like me to stop?" (claim.ts STOP_CHOICES), read without a model. */
 const STOP_TAPS: Record<string, 'yes' | 'no'> = { 'stop here': 'yes', 'carry on': 'no' };
 
@@ -311,6 +317,9 @@ export async function understand(
   // TTTFG-4830 (28 Oct 2026, TTT's feedback): "cancel" or "cancel my claim" asks whether to stop, without a model.
   if (CANCEL_WORDS.test(text.trim())) return { kind: 'stop' };
   if (state.step === 'ready' && !state.stopping && READY_WORDS.test(text)) return { kind: 'yes' };
+  // 18 Nov 2026: a tap on the kind of claim, asked before the policy (walkthrough.ts CLAIM_CATEGORIES).
+  const category = state.step === 'claim-type' && !state.policyId && !state.stopping ? categoryTap(text) : undefined;
+  if (category) return { kind: 'facts', facts: { claimType: category } };
   const contractor = plumberAsked(state) && !state.stopping ? contractorIn(text) : undefined;
   const { system, user } = understandPrompt(state, lastQuestion, text, now, opts.spoken);
   let raw: unknown;

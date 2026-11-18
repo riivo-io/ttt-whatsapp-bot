@@ -157,7 +157,7 @@ test('the whole claim: walkthrough, the questions, the photo, then the form to s
     let t = DAY1;
     assert.equal(await say(w, 'Someone drove into the back of my car at the Claremont robot', t), 'started');
     assert.deepEqual(w.requests, ['Someone drove into the back of my car at the Claremont robot']);
-    assert.match(w.since().join('\n'), /Discovery Insure/); // the policy question
+    assert.match(w.since().join('\n'), /Discovery Insure/); // 18 Nov 2026: the only policy is taken; the on-scene list names its tow line
 
     let outcome = '';
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
@@ -211,9 +211,13 @@ test('TTTFG-4830 (28 Oct 2026): the report is read before the walkthrough starts
     assert.equal(reads.length, 1);
     assert.equal(reads[0].sentBefore, 0);
     assert.match(reads[0].user, /Someone drove into the back of my car at the Claremont robot/);
-    // A car accident: only the motor policy is offered; the household one is kept in case the client says no.
-    assert.deepEqual(w.since(), ['That sounds like a claim on your Discovery Insure Motor policy (DI-9). Is that right?']);
+    // A car accident: the motor policy is the only one for it, so it is taken (18 Nov 2026); the household one is kept
+    // in case the kind of claim is put right at the summary.
+    const out = w.since();
+    assert.equal(out.length, 1);
+    assert.match(out[0], /^While you're still at the scene/);
     const walk = w.store.get(PHONE)!.walk!;
+    assert.equal(walk.policyId, 'pol-car');
     assert.deepEqual(walk.policies.map((p) => p.id), ['pol-car']);
     assert.deepEqual(walk.allPolicies?.map((p) => p.id), ['pol-home', 'pol-car']);
     assert.equal(walk.facts.claimType, 'Motor accident');
@@ -323,7 +327,8 @@ test('Claude unavailable during the walkthrough or on the first message: the sam
     w.since();
     const step = w.store.get(PHONE)!.walk!.step;
     w.deps.understandModel = async () => { throw new Error('timeout'); };
-    assert.equal(await say(w, 'Yes', tick(DAY1, 2)), 'busy');
+    // 18 Nov 2026: the only policy was taken, so Tina waits for "Ready" (read without Claude); anything else needs Claude.
+    assert.equal(await say(w, 'It happened on the N1 this morning', tick(DAY1, 2)), 'busy');
     assert.deepEqual(w.since(), [BUSY]);
     assert.equal(w.store.get(PHONE)!.walk!.step, step);
 });
@@ -678,7 +683,7 @@ test('TTTFG-4830 (QC, 28 Oct): "this claim is fraud, I never logged it" on the l
 
     // The "Open a new claim" tap is read without Claude, and the walkthrough starts.
     assert.equal(await say(w, 'Open a new claim', (t = tick(t, 1))), 'new-claim');
-    assert.match(w.since().join('\n'), /Discovery Insure/); // the policy question
+    assert.equal(w.since().at(-1), 'What is your claim for? Please pick one from the list.'); // 18 Nov 2026: the kind of claim first
     assert.notEqual(w.store.get(PHONE)?.walk, null);
 });
 
@@ -715,8 +720,8 @@ function guidedWorld() {
 }
 async function openClaim(w: ReturnType<typeof world>) {
     let t = DAY1;
-    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
-    let outcome = '';
+    // 18 Nov 2026: with the form, a car accident on the only motor policy opens at once.
+    let outcome = await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
     return t;
