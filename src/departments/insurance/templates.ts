@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit a1504ad). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 46c8ff2). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -94,6 +94,11 @@ export interface ReminderVars {
   lines: readonly string[];
   /** Some of it is questions Tina asks one by one (a claim the client left half way), not things to send. */
   questionsLeft?: boolean;
+  /**
+   * The user (18 Nov 2026): a claim the client has already submitted gets the link to the missing-items form (guided.ts topUp)
+   * instead of "reply to this email". Absent for a claim not yet submitted, or when no link could be made.
+   */
+  missingLink?: string;
 }
 
 export interface ReminderTemplateVars {
@@ -123,6 +128,34 @@ export const REMINDER_TEMPLATE = {
   whatsappBody: "Good morning {{1}}, it's Tina from TTT. For your {{2}} we still need {{3}}. Please send them here when you have them.",
 } as const;
 
+export interface MissingReminderVars {
+  /** "motor accident claim (CLM-000301)". */
+  claim: string;
+  /** What is still needed in one line (stillNeedNames joined by list()): "the SAPS case number and the quotes". */
+  list: string;
+  /** A fresh link to the missing-items form (guided.ts topUp). */
+  link: string;
+}
+
+/**
+ * The user (18 Nov 2026): the morning reminder for a claim the client has submitted and still owes something on, in the
+ * client's words: "Update on your claim: Things we still need from you: <list>. To add it to your claim, tap <link>. You don't need
+ * to sign again." It never asks them to send it on WhatsApp. A WhatsApp template variable can't hold a line break, so the list is
+ * one line here (the email's is bulleted), and the link sits in the text because Tina's template sender has no URL button.
+ * Its own approved template (Tina's CLAIMS_MISSING_TEMPLATE), because REMINDER_TEMPLATE's body ends "Please send them here".
+ * Until that is set up the reminder goes as REMINDER_TEMPLATE (reminder.ts signedList).
+ */
+export const MISSING_REMINDER_TEMPLATE = {
+  name: 'Claim - still needed, add missing items (morning reminder)',
+  version: 'draft-1',
+  approved: false,
+  /** The template's variables, in order. */
+  params: (v: MissingReminderVars) => [v.claim, v.list, v.link],
+  render: (v: MissingReminderVars): string => fillTemplate(MISSING_REMINDER_TEMPLATE.whatsappBody, MISSING_REMINDER_TEMPLATE.params(v)),
+  /** For Meta: {{1}} the claim ("motor accident claim (CLM-000301)"), {{2}} the list in one line, {{3}} the link. */
+  whatsappBody: "Update on your {{1}}. Things we still need from you: {{2}}. To add it to your claim, tap this link: {{3}} You don't need to sign again.",
+} as const;
+
 /**
  * TTTFG-5212 AC 2: the reminder for a claim that came in by email, by email (never on WhatsApp too). The same rules as
  * the WhatsApp one; how to send is a reply to the email. Sent by the host's email sender (TTTFG-4973's templated
@@ -130,14 +163,28 @@ export const REMINDER_TEMPLATE = {
  */
 export const REMINDER_EMAIL_TEMPLATE = {
   name: 'Claim - still needed (reminder email)',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
-  subject: (v: Pick<ReminderVars, 'claim'>) => `Your ${v.claim}: what we still need`,
+  subject: (v: Pick<ReminderVars, 'claim' | 'missingLink'>) => (v.missingLink ? `Update on your ${v.claim}` : `Your ${v.claim}: what we still need`),
+  /**
+   * draft-2 (the user, 18 Nov 2026): on a claim the client has submitted, "Update on your claim: Things we still need from you:",
+   * the list, then "tap Add missing items", and no need to sign again. The reply wording stays for a claim not yet submitted.
+   */
   render: (v: ReminderVars) => {
     const them = itOrThem(v.lines);
+    const list = v.lines.map((l) => `- ${l}`).join('\n');
+    if (v.missingLink) {
+      return [
+        `Good morning ${v.firstName},`,
+        `Update on your ${v.claim}:`,
+        `Things we still need from you:\n${list}`,
+        ...addMissingItems(v.lines, v.missingLink),
+        'Kind regards,\nTTT',
+      ].join('\n\n');
+    }
     return [
       `Good morning ${v.firstName},`,
-      `Things we still need from you for your ${v.claim}:\n${v.lines.map((l) => `- ${l}`).join('\n')}`,
+      `Things we still need from you for your ${v.claim}:\n${list}`,
       v.questionsLeft
         ? 'Please reply to this email with the answers, and attach any photos or documents to your reply.'
         : `Please reply to this email with ${them} when you have ${them}. You can attach photos and documents to your reply.`,
@@ -251,19 +298,43 @@ export interface FormDoneEmailVars {
    * invoice: TTT gets those.
    */
   stillNeed?: readonly string[];
+  /**
+   * The user (18 Nov 2026): the link to the missing-items form (guided.ts topUp), for a form signed on the form itself. With it
+   * the list is followed by "tap Add missing items" and nothing is asked by reply; without it (no link could be made, or a
+   * signing link is still to be used) the client is asked to reply, as before.
+   */
+  missingLink?: string;
 }
 
-/** The user (9 Nov 2026): the email claim's last email, once the form is submitted and signed: WhatsApp's thank-you. */
+/** The label of the missing-items form's link, in an email as on WhatsApp (followon.ts MISSING_LINK_LABEL). */
+export const MISSING_ITEMS_LABEL = 'Add missing items';
+
+/**
+ * The user (18 Nov 2026): what follows the bulleted list of "Things we still need from you" when the client can add it on the
+ * missing-items form: tap the link, and nothing to sign again. The same words by email (a labelled link on its own line)
+ * and on WhatsApp's own message; never "send it here".
+ */
+export const addMissingItems = (lines: readonly string[], link: string) => [
+  `To add ${itOrThem(lines)} to your claim, tap ${MISSING_ITEMS_LABEL} below. You don't need to sign again.`,
+  `${MISSING_ITEMS_LABEL}: ${link}`,
+];
+
+/**
+ * The user (9 Nov 2026): the email claim's last email, once the form is submitted and signed: WhatsApp's thank-you.
+ * draft-2 (the user, 18 Nov 2026): what is still to come comes with the link to the missing-items form, not a reply to send.
+ */
 export const FORM_DONE_EMAIL_TEMPLATE = {
   name: 'Claim - form submitted (email)',
-  version: 'draft-1',
+  version: 'draft-2',
   approved: false,
   subject: (v: Pick<FormDoneEmailVars, 'reference'>) => `Your claim is submitted (${v.reference})`,
   render: (v: FormDoneEmailVars) => [
     [FORM_THANKS, v.linkSent ? 'Please check and sign the form using the link we emailed you.' : '', FORM_CLOSING].filter(Boolean).join(' '),
     ...(v.stillNeed?.length ? [
       `Things we still need from you:\n${v.stillNeed.map((l) => `- ${l}`).join('\n')}`,
-      `Please reply to this email with ${itOrThem(v.stillNeed)} when you have ${itOrThem(v.stillNeed)}, or send ${itOrThem(v.stillNeed)} to Tina on WhatsApp. We will remind you each morning until ${itOrThem(v.stillNeed) === 'it' ? 'it is' : 'they are'} in.`,
+      ...(v.missingLink ? addMissingItems(v.stillNeed, v.missingLink) : [
+        `Please reply to this email with ${itOrThem(v.stillNeed)} when you have ${itOrThem(v.stillNeed)}, or send ${itOrThem(v.stillNeed)} to Tina on WhatsApp. We will remind you each morning until ${itOrThem(v.stillNeed) === 'it' ? 'it is' : 'they are'} in.`,
+      ]),
     ] : []),
     'Kind regards,\nTTT',
   ].join('\n\n'),
@@ -387,24 +458,27 @@ export const INSURER_CHASE_TEMPLATE = {
   ].join('\n\n'),
 } as const;
 
-export interface SubmittedVars { insurer: string; number: string; reference: string }
+export interface UnderReviewVars { insurer: string; number: string; reference: string }
 
 /**
- * TTTFG-5204 AC 7: what the client hears when their claim moves to Submitted to insurer. CRM values only, with no approval
- * per message, so TTT approves the wording once. On WhatsApp it is always the approved template: `meta` and `templateVersion`
+ * The user (18 Nov 2026): what the client hears when the broker saves the insurer's claim number. Saving it moves the claim to
+ * Under assessment ("under review" to the client), so this one message says so and gives the number (submitted.ts). It replaces
+ * TTTFG-5204 AC 7's "Submitted to <insurer>, claim no. <number>", which went when the number set Submitted to insurer.
+ * CRM values only, with no approval per message. On WhatsApp it is always the approved template: `meta` and `templateVersion`
  * are its key in the WhatsApp flow's template list (WhatsApp - Automated - Send Templated Message), and Meta must have it.
+ * Meta refuses a body that ends with a variable, so the full stop after the number is the body's last word.
  */
-export const SUBMITTED_TEMPLATE = {
-  name: 'Claim - submitted to insurer',
+export const UNDER_REVIEW_TEMPLATE = {
+  name: 'Claim - under review',
   version: 'draft-1',
-  approved: false,
-  meta: 'claim_submitted',
+  approved: true,
+  meta: 'claim_under_review',
   templateVersion: 1,
   /** For Meta: {{1}} the insurer, {{2}} the insurer's claim number. */
-  whatsappBody: 'Submitted to {{1}}, claim no. {{2}}.',
-  params: (v: SubmittedVars) => [v.insurer, v.number],
-  render: (v: SubmittedVars) => `Submitted to ${v.insurer}, claim no. ${v.number}.`,
-  emailSubject: (v: SubmittedVars) => `Your claim is with ${v.insurer} (${v.reference})`,
+  whatsappBody: 'Your claim submitted to {{1}} is under review.\n\nYour claim number is: {{2}}.',
+  params: (v: UnderReviewVars) => [v.insurer, v.number],
+  render: (v: UnderReviewVars) => `Your claim submitted to ${v.insurer} is under review.\n\nYour claim number is: ${v.number}.`,
+  emailSubject: (v: UnderReviewVars) => `Your claim ${v.reference} is under review`,
 } as const;
 
 export interface StatusUpdateVars { insurer: string; reference: string }
@@ -431,24 +505,32 @@ export interface StatusTemplate {
   emailSubject(v: StatusUpdateVars): string;
 }
 
+/**
+ * The user (18 Nov 2026): what the client hears when the broker marks the claim pack as submitted (or the agent sends it to an
+ * insurer that takes claims by email): "Update on your claim: your claim has been submitted to <insurer>." and nothing for them to
+ * do. Under assessment sends no message of its own any more: it is the saving of the insurer's claim number that tells the client
+ * their claim is under review, with the number (UNDER_REVIEW_TEMPLATE). The wording is the user's, so it is approved here; Meta
+ * approves per WhatsApp account, and this template comes with its own switch (CLAIMS_WORDING_META_APPROVED), set once Meta has it.
+ */
+export const SUBMITTED_UPDATE_TEMPLATE: StatusTemplate = {
+  name: 'Claim - submitted to insurer',
+  version: 'draft-2',
+  approved: true,
+  metaApproved: false,
+  meta: 'claim_submitted_to_insurer',
+  templateVersion: 1,
+  /** For Meta: {{1}} the insurer. */
+  whatsappBody: "Update on your claim: your claim has been submitted to {{1}}. You don't need to do anything for now. We will keep you updated on the status of your claim.",
+  params: (v) => [v.insurer],
+  render: (v) => `Update on your claim: your claim has been submitted to ${v.insurer}. You don't need to do anything for now. We will keep you updated on the status of your claim.`,
+  emailSubject: (v) => `Your claim ${v.reference} has been submitted to ${v.insurer}`,
+};
+
 // riivo's best guess, approved by riivo on 6 Nov 2026 so the story can be tested; TTT's Insurance and Advice department
 // still has to confirm it (AC 4), and their wording goes in as a new version. `metaApproved` stays false here: Meta approves
 // per WhatsApp account, so each environment says so with CLAIMS_STATUS_META_APPROVED (statusupdate-dataverse.ts).
-// Meta refuses a body that starts or ends with a variable, or is mostly variables, so both carry fixed text around them.
-export const UNDER_ASSESSMENT_TEMPLATE: StatusTemplate = {
-  name: 'Claim - under assessment',
-  version: 'riivo-1',
-  approved: true,
-  metaApproved: false,
-  meta: 'claim_under_assessment',
-  templateVersion: 1,
-  /** For Meta: {{1}} our reference, {{2}} the insurer. */
-  whatsappBody: 'An update on your claim {{1}}: {{2}} is now assessing it. You don\'t need to do anything for now. We will be in touch when there is news.',
-  params: (v) => [v.reference, v.insurer],
-  render: (v) => `An update on your claim ${v.reference}: ${v.insurer} is now assessing it. You don't need to do anything for now. We will be in touch when there is news.`,
-  emailSubject: (v) => `Your claim ${v.reference} is being assessed`,
-};
-
+// Meta refuses a body that starts or ends with a variable, or is mostly variables, so it carries fixed text around them.
+// Unchanged on 18 Nov 2026 (the user: additional info requested stays as it is).
 export const ADDITIONAL_INFO_TEMPLATE: StatusTemplate = {
   name: 'Claim - additional info requested',
   version: 'riivo-1',

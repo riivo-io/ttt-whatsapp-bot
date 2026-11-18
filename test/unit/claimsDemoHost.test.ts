@@ -825,7 +825,9 @@ test('the user (18 Nov 2026): after Submit, what is still missing is a list with
     assert.equal(await claimsFormDone(w.deps, PHONE, claim.id, tick(t, 1)), 'carried-on');
     const said = w.since().join('\n');
     assert.match(said, /\*Things we still need from you:\*\n\n- Photos of the damage/);
-    assert.match(said, /Tap \*Add missing items\* to add (it|them) to your claim, or send (it|them) here\./);
+    // The user, 18 Nov 2026: the form is the way to add it; never "or send it here".
+    assert.match(said, /Tap \*Add missing items\* to add (it|them) to your claim\./);
+    assert.doesNotMatch(said, /send (it|them) here/);
     assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'still-need');
 });
 
