@@ -51,8 +51,9 @@
       "task": "Make the WhatsApp sign-up form update a lead already on that phone number instead of creating a second one",
       "owner": "agent",
       "reason": "code in this repo, the part of AC 5 Tina controls",
-      "done": false,
-      "area": "build"
+      "done": true,
+      "area": "build",
+      "verified_by": "agent"
     },
     {
       "task": "Add scenario tests for the Jane Smith message, repeats, CRM failures and known clients, plus a DEV rehearsal script and test steps",

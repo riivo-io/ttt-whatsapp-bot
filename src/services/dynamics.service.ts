@@ -1504,6 +1504,40 @@ export class DynamicsService {
     }
 
     /**
+     * TTTFG-5340 AC 5: the active lead on a phone number, with its notes. Unlike searchEntity a CRM error throws: "no lead"
+     * must mean there is none, or the WhatsApp sign-up form would make a second lead for the same number.
+     */
+    async findActiveLeadByPhone(phoneNumber: string): Promise<{ id: string; notes: string | null } | null> {
+        const token = await this.getToken();
+        const filter = `(${this.phoneOrFilter('ttt_mobilephone', phoneNumber)}) and statecode eq 0`;
+        const res = await axios.get(
+            `${this.baseUrl}/api/data/v9.2/new_leads?$filter=${encodeURIComponent(filter)}&$select=new_leadid,riivo_notes&$orderby=createdon asc&$top=1`,
+            { headers: { 'Authorization': `Bearer ${token}`, 'OData-MaxVersion': '4.0', 'OData-Version': '4.0', 'Accept': 'application/json' } },
+        );
+        const lead = res.data?.value?.[0];
+        return lead ? { id: lead.new_leadid, notes: lead.riivo_notes || null } : null;
+    }
+
+    /** TTTFG-5340 AC 5: what the WhatsApp sign-up form typed, on the lead already on the number. Owner and lead source stay. */
+    async updateLeadFromSignUp(leadId: string, changes: {
+        firstName: string; lastName: string; email: string; notes?: string; clientType?: number; leadType?: number;
+    }, triggeredBy: string): Promise<boolean> {
+        const payload: Record<string, unknown> = { ttt_firstname: changes.firstName, ttt_lastname: changes.lastName, ttt_email: changes.email };
+        if (changes.notes) payload['riivo_notes'] = changes.notes;
+        if (typeof changes.clientType === 'number') payload['riivo_clienttype'] = changes.clientType;
+        if (typeof changes.leadType === 'number') payload['riivo_leadtype'] = changes.leadType;
+        try {
+            await this.webApi('PATCH', `new_leads(${leadId})`, payload);
+            console.log(`[Dynamics CRM] Updated lead ${leadId} from the WhatsApp sign-up form`);
+            await supabaseService.logCrmWrite({ crmEntity: 'new_leads', crmRecordId: leadId, action: 'update', payload, triggeredBy });
+            return true;
+        } catch (error: any) {
+            console.error('[Dynamics CRM] Failed to update lead from the sign-up form:', error?.message);
+            return false;
+        }
+    }
+
+    /**
      * Create a Contact in Dynamics. All fields below are Business Required on
      * the Contact table, so omitting any of them will cause Dataverse to reject
      * the POST. The chat layer (create_contact tool) is responsible for

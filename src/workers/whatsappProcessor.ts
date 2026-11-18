@@ -44,6 +44,7 @@ import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/
 import { routeClientMessage, serviceRoutingOn } from '../services/serviceRouting.service';
 import { handleUnknownNumber, isUnknownNumberPlaceholder } from '../services/unknownNumber.service';
 import { routeUnknownNumber } from '../domain/unknownNumber';
+import { saveSignUpLead } from '../domain/signUpLead';
 import { ROUTE_IDS } from '../domain/serviceRoute';
 import { claimsDemoContact, handleClaimsDemoBatchCheck, handleClaimsDemoMessage, handleClaimsFormDone, handleClaimsDemoReminder } from '../services/claimsDemo.service';
 
@@ -487,23 +488,36 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
     const TAX_CREW_TEAM_ID = 'eb735c44-7b5a-f111-bec7-000d3ada6ac0';
     const TAX_CREW_FALLBACK_OWNER_ID = '873db3ff-d563-f011-bec3-000d3ab7e7df';
 
-    const created = await dynamicsService.createLead({
-        firstName,
-        lastName,
-        phone: from,
-        email,
-        notes: combinedNotes,
+    // TTTFG-5340 AC 5: an unknown number that asked about tax already has a lead (Tina made it). The form updates that lead
+    // instead of making a second one. A CRM error while looking for it throws, and the worker retries the message.
+    const saved = await saveSignUpLead({
+        findByPhone: (phone) => dynamicsService.findActiveLeadByPhone(phone),
+        update: (leadId, changes) => dynamicsService.updateLeadFromSignUp(leadId, changes, from),
+        create: async () => {
+            const created = await dynamicsService.createLead({
+                firstName,
+                lastName,
+                phone: from,
+                email,
+                notes: combinedNotes,
+                clientType: typeof clientType === 'number' && !Number.isNaN(clientType) ? clientType : undefined,
+                leadType: typeof leadType === 'number' && !Number.isNaN(leadType) ? leadType : undefined,
+                leadSource: WHATSAPP_LEAD_SOURCE,
+                referredByContactId,
+                ownerSystemUserId,
+                ownerTeamId: ownerSystemUserId ? undefined : TAX_CREW_TEAM_ID,
+                ownerFallbackSystemUserId: TAX_CREW_FALLBACK_OWNER_ID,
+            });
+            return created?.new_leadid ?? null;
+        },
+    }, from, {
+        firstName, lastName, email, notes: combinedNotes,
         clientType: typeof clientType === 'number' && !Number.isNaN(clientType) ? clientType : undefined,
         leadType: typeof leadType === 'number' && !Number.isNaN(leadType) ? leadType : undefined,
-        leadSource: WHATSAPP_LEAD_SOURCE,
-        referredByContactId,
-        ownerSystemUserId,
-        ownerTeamId: ownerSystemUserId ? undefined : TAX_CREW_TEAM_ID,
-        ownerFallbackSystemUserId: TAX_CREW_FALLBACK_OWNER_ID,
     });
 
-    if (!created) {
-        console.error(`[Processor] createLead failed for ${from}`);
+    if (!saved) {
+        console.error(`[Processor] saving the sign-up lead failed for ${from}`);
         await metaWhatsAppService.sendMessage(
             from,
             "Thanks for signing up! We hit a snag saving your details — a consultant will reach out shortly. If you'd prefer, you can also register at https://ttt-tax.co.za/client-onboarding."
@@ -511,7 +525,7 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
         return;
     }
 
-    console.log(`[Processor] Sign-up flow created lead ${created.new_leadid} for ${from}`);
+    console.log(`[Processor] Sign-up flow ${saved.how} lead ${saved.leadId} for ${from}`);
 
     // Fire-and-await the LOE app's team-notification + thank-you emailer.
     // Failures are logged and swallowed inside the helper — the lead is already
@@ -522,10 +536,10 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
         phone: from,
         service: serviceLabelFromLeadType(leadType),
         clientType,
-        dynamicsId: created.new_leadid,
+        dynamicsId: saved.leadId,
     });
 
-    const loeLink = buildLoeMagicLink(created.new_leadid);
+    const loeLink = buildLoeMagicLink(saved.leadId);
     if (loeLink) {
         const welcome = `Thanks ${firstName}, you're signed up with TTT Financial Group. 🎉\n\nNext up is your Letter of Engagement (LoE). It's the legally binding contract between you and TTT that lets us act for you at SARS. It sets out the scope of work and the responsibilities on both sides. SARS won't let us file or correspond on your behalf without it, so this one is non-negotiable.\n\nSign yours here (link valid 72 hours):\n${loeLink}\n\nIt takes about 2 minutes. As soon as it's signed I'll message you with the next step.`;
         await metaWhatsAppService.sendMessage(from, welcome);
