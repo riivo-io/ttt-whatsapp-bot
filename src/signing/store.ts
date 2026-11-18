@@ -62,10 +62,12 @@ export interface SigningRequestRow {
      * sweep can't send the same callback at the same time. Null once delivered, or given up.
      */
     callback_next_at: string | null;
+    /** When the sweep deleted this request's PDFs from the bucket (signing.ts KEEP_FILES_DAYS); null while they are kept. */
+    files_purged_at: string | null;
 }
 
 export type NewSigningRequest = Omit<SigningRequestRow,
-    'document_path' | 'status' | 'opened_at' | 'signed_at' | 'signed_path' | 'audit' | 'callback_status' | 'callback_attempts' | 'callback_error' | 'callback_next_at'>;
+    'document_path' | 'status' | 'opened_at' | 'signed_at' | 'signed_path' | 'audit' | 'callback_status' | 'callback_attempts' | 'callback_error' | 'callback_next_at' | 'files_purged_at'>;
 
 export interface SigningStore {
     insert(row: NewSigningRequest, pdf: Uint8Array): Promise<SigningRequestRow>;
@@ -88,6 +90,13 @@ export interface SigningStore {
     leaseCallback(id: string, expected: string | null, until: string): Promise<boolean>;
     /** Open requests past their expiry become expired; returns how many. */
     expireOpen(now: Date): Promise<number>;
+    /**
+     * Requests whose PDFs may go: closed (used, expired or superseded), expired on or before `expiredBefore`, files not
+     * yet deleted, and, for a signed one, its callback delivered (until then the signed copy here is the only one).
+     */
+    filesToPurge(expiredBefore: Date, limit: number): Promise<SigningRequestRow[]>;
+    /** Deletes the request's PDFs (everything under <id>/) and stamps files_purged_at. The row and its audit stay. */
+    purgeFiles(row: SigningRequestRow, now: Date): Promise<void>;
 }
 
 // ------------------------------------------------------------------------------------------------- in memory
@@ -104,7 +113,7 @@ export function memorySigningStore(): SigningStore & { rows: Map<string, Signing
             files.set(document_path, pdf);
             const full: SigningRequestRow = {
                 ...row, document_path, status: 'open', opened_at: null, signed_at: null, signed_path: null, audit: null,
-                callback_status: null, callback_attempts: 0, callback_error: null, callback_next_at: null,
+                callback_status: null, callback_attempts: 0, callback_error: null, callback_next_at: null, files_purged_at: null,
             };
             rows.set(row.id, full);
             return copy(full);
@@ -149,6 +158,16 @@ export function memorySigningStore(): SigningStore & { rows: Map<string, Signing
             let n = 0;
             for (const r of rows.values()) if (r.status === 'open' && Date.parse(r.expires_at) <= now.getTime()) { r.status = 'expired'; n++; }
             return n;
+        },
+        async filesToPurge(before, limit) {
+            return [...rows.values()]
+                .filter((r) => r.status !== 'open' && !r.files_purged_at && Date.parse(r.expires_at) <= before.getTime()
+                    && (r.status !== 'used' || r.callback_status === 'done'))
+                .slice(0, limit).map(copy);
+        },
+        async purgeFiles(r, now) {
+            for (const p of [...files.keys()]) if (p.startsWith(`${r.id}/`)) files.delete(p);
+            rows.get(r.id)!.files_purged_at = now.toISOString();
         },
     };
 }
@@ -220,6 +239,22 @@ export function supabaseSigningStore(client: SupabaseClient = createClient(proce
             const { data, error } = await client.from(TABLE).update({ status: 'expired' }).eq('status', 'open').lte('expires_at', now.toISOString()).select('id');
             fail('expireOpen', error);
             return data?.length ?? 0;
+        },
+        async filesToPurge(before, limit) {
+            const { data, error } = await client.from(TABLE).select('*').neq('status', 'open').is('files_purged_at', null)
+                .lte('expires_at', before.toISOString()).or('status.neq.used,callback_status.eq.done')
+                .order('expires_at', { ascending: true }).limit(limit);
+            fail('filesToPurge', error);
+            return (data as SigningRequestRow[]) ?? [];
+        },
+        async purgeFiles(r, now) {
+            const { data: listed, error: listError } = await client.storage.from(BUCKET).list(r.id);
+            fail(`list ${r.id}`, listError);
+            const paths = new Set([r.document_path, r.signed_path, ...(listed ?? []).map((f) => `${r.id}/${f.name}`)].filter((p): p is string => !!p));
+            const { error: removeError } = await client.storage.from(BUCKET).remove([...paths]);
+            fail(`remove ${r.id}`, removeError);
+            const { error } = await client.from(TABLE).update({ files_purged_at: now.toISOString() }).eq('id', r.id);
+            fail('purgeFiles', error);
         },
     };
 }

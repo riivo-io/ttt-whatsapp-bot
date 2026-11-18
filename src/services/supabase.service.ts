@@ -32,6 +32,12 @@ interface Session {
     bad_debt: boolean;
     bad_debt_detail: BadDebtDetail | null;
     bad_debt_invoices_sent_at: string | null;
+    /** Service routing (docs/PLAN-service-routing.md): the side this conversation settled on. */
+    service_side?: 'tax' | 'insurance' | null;
+    /** Service routing: a message waiting on the client's Insurance/Tax tap or the insurance offer. */
+    route_pending?: { kind: 'ask' | 'offer'; text: string; at: string } | null;
+    /** Service routing: the insurance hand-over this session has open (later messages go on its request). */
+    insurance_handover?: { requestId: string; ownerKind: 'user' | 'team'; contactId: string } | null;
 }
 
 /**
@@ -1152,6 +1158,16 @@ class SupabaseService {
             return null;
         }
         return (data as Session) || null;
+    }
+
+    /**
+     * Service routing: write the session's side, waiting message and insurance hand-over. Only the keys given are
+     * written. Throws on failure: a side or hand-over that isn't remembered would send the next message the wrong way.
+     */
+    async setSessionRoute(sessionId: string, patch: Partial<Pick<Session, 'service_side' | 'route_pending' | 'insurance_handover'>>): Promise<void> {
+        if (Object.keys(patch).length === 0) return;
+        const { error } = await this.client.from('sessions').update(patch).eq('id', sessionId);
+        if (error) throw new Error(`[Supabase] Failed to set the session route: ${error.message}`);
     }
 
     async setSessionPendingCase(sessionId: string, caseId: string | null): Promise<void> {

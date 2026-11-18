@@ -15,6 +15,8 @@
  *   npx tsx src/scripts/claims-chat.ts --phone +27600005101 --gate "Your claim has been approved"
  *                                                                          check 9: send that text on the client's latest claim
  *   npx tsx src/scripts/claims-chat.ts --phone +27600005101 --reset       forget the walkthrough in progress
+ * TTTFG-5299: roadside help is on here (as Tina with ROADSIDE_ENABLED=true): "I've broken down on the N1" gets the
+ * insurer's assist number. A number that matches no contact goes down the unknown-number path.
  *
  * Sign-in: `az login` as a DEV user (the Dataverse token). Claude: ANTHROPIC_API_KEY, else the DEV email agent's Key
  * Vault secret (az keyvault secret show; needs Key Vault read on tttagentdevkv62pa5f).
@@ -25,8 +27,10 @@ import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import { sendText, type Owner } from '../departments/insurance/claim';
-import { dataverseClaimPorts, type Dv } from '../departments/insurance/dataverse';
-import { claimFromClient, claimFromUnknownNumber, claimsContactNumber, type ClaimsHostDeps, type StoredWalkthrough } from '../domain/claimsHost';
+import { dataverseClaimPorts, dataverseRoadsidePorts, type Dv } from '../departments/insurance/dataverse';
+import {
+    claimFromClient, claimFromUnknownNumber, claimsContactNumber, roadsideRequestBody, type ClaimsHostDeps, type StoredWalkthrough,
+} from '../domain/claimsHost';
 
 const DEV = 'https://tttdevelopment.crm4.dynamics.com';
 const INSURANCE_APP = '9eb7f4ec-38b3-f011-bbd2-7ced8d7556e1';
@@ -115,6 +119,13 @@ function deps(): ClaimsHostDeps {
         remove: async (p) => { fs.rmSync(file(p), { force: true }); },
         intentModel: toolModel(process.env.CLAIMS_INTENT_MODEL || 'claude-haiku-4-5-20251001', 'record_claim_intent'),
         understandModel: toolModel(process.env.CLAIMS_UNDERSTAND_MODEL || 'claude-sonnet-4-6', 'record_answer'),
+        roadsideEnabled: true,
+        roadsideModel: toolModel(process.env.CLAIMS_ROADSIDE_MODEL || process.env.CLAIMS_INTENT_MODEL || 'claude-haiku-4-5-20251001', 'record_roadside_intent'),
+        async openRoadsideRequest(contactId, p, text) {
+            const r = await dv<{ riivo_requestid: string }>('POST', 'riivo_requests?$select=riivo_requestid', roadsideRequestBody(contactId, p, text), { returnRow: true });
+            console.log(`  [CRM] request opened (Insurance, topic Roadside assistance): ${link(ADMIN_HUB, 'riivo_request', r.riivo_requestid)}`);
+            return r.riivo_requestid;
+        },
         async openRequest(contactId, p, text) {
             // Same payload as Tina's claims.service.ts openRequest (owned by whoever runs this, as Tina's app user owns it).
             const r = await dv<{ riivo_requestid: string }>('POST', 'riivo_requests?$select=riivo_requestid', {
@@ -126,7 +137,7 @@ function deps(): ClaimsHostDeps {
         },
         logIncoming: (requestId, text) => logWhatsApp('Incoming', text, requestId),
         ports(requestId, contact) {
-            const ports = dataverseClaimPorts({
+            const ports = dataverseRoadsidePorts({
                 dv,
                 send: async (_to, m) => {
                     show(m.kind === 'template' ? `Tina [template ${m.name}, ${m.version}]` : 'Tina', m.text);
@@ -142,7 +153,7 @@ async function say(text: string) {
     const d = deps();
     // Tina's resolveSender: the contact on this WhatsApp number (an exact, single match).
     const contact = await dataverseClaimPorts({ dv, send: async () => {} }).contactByWhatsApp(phone!);
-    const out = contact ? await claimFromClient(d, phone!, contact, text, new Date()) : await claimFromUnknownNumber(d, phone!, text);
+    const out = contact ? await claimFromClient(d, phone!, contact, text, new Date()) : await claimFromUnknownNumber(d, phone!, text, new Date());
     if (!out.handled) {
         console.log(contact ? "\n  (Not a claim report: Tina's normal reply would answer this one.)" : "\n  (Unknown number, not a claim: Tina's sign-up template would answer this one.)");
         return;

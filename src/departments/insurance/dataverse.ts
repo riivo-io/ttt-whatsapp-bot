@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/dataverse.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: ClaimPorts against Dataverse (the riivo_claim table from TTTFG-4885). The host passes in its own
 // Dataverse call (`Dv`, the same signature as the email agent's adapters/dataverse.ts `dv`) and its WhatsApp send, so
@@ -12,6 +12,7 @@
 //   day, Monday to Friday, public holidays not yet skipped. Someone hurt with no assist number is Urgent, due in 2
 //   working hours.
 import { type AgentActionRow, type ClaimPorts, type ClaimRow, type Outbound, type PolicyOwner } from './claim';
+import type { Insurer, RoadsidePorts } from './roadside';
 import type { ClaimType, Policy } from './walkthrough';
 
 /** A Dataverse Web API call. formatted: choice labels as annotations. returnRow: a POST answers with the new row. */
@@ -22,7 +23,7 @@ const CLAIM_TYPE: Record<ClaimType, number> = {
   'Windscreen': 463630003, 'Portable possessions': 463630004, 'Other': 463630005,
 };
 const CLAIM_STATUS_FNOL_LOGGED = 463630000;
-const CLAIM_CHANNEL_WHATSAPP = 463630001;
+const CLAIM_CHANNEL = { Email: 463630000, WhatsApp: 463630001 } as const;
 const POLICY_ACTIVE = 463630000;
 
 const KIND = { 'Follow-up': 463630006, 'Created': 463630007 } as const;
@@ -85,6 +86,23 @@ export interface ClaimsDataverseOptions {
   send: (to: string, message: Outbound) => Promise<void>;
   /** The riivo_InsuranceAdviceTeamId environment variable's value; read from Dataverse when not given. */
   insuranceTeamId?: string;
+}
+
+/**
+ * TTTFG-5299: the claim ports plus the insurers, for roadside help. Every active riivo_provider with its assist number:
+ * an unknown number names its insurer, and only these names and numbers are matched (AC 2, 9). Read only.
+ */
+export function dataverseRoadsidePorts(o: ClaimsDataverseOptions): RoadsidePorts {
+  return {
+    ...dataverseClaimPorts(o),
+    async insurers(): Promise<Insurer[]> {
+      const r = await o.dv<{ value: { riivo_providerid: string; riivo_providername?: string | null; riivo_assistnumber?: string | null }[] }>('GET',
+        'riivo_providers?$select=riivo_providerid,riivo_providername,riivo_assistnumber&$filter=statecode eq 0&$orderby=riivo_providername asc');
+      return r.value.filter((p) => p.riivo_providername?.trim()).map((p) => ({
+        id: p.riivo_providerid, name: p.riivo_providername!.trim(), ...(p.riivo_assistnumber?.trim() ? { assistNumber: p.riivo_assistnumber.trim() } : {}),
+      }));
+    },
+  };
 }
 
 export function dataverseClaimPorts(o: ClaimsDataverseOptions): ClaimPorts {
@@ -159,17 +177,19 @@ export function dataverseClaimPorts(o: ClaimsDataverseOptions): ClaimPorts {
         'riivo_Policy@odata.bind': `/riivo_policies(${guid(row.policyId)})`,
         'riivo_Provider@odata.bind': `/riivo_providers(${guid(row.providerId)})`,
         'ownerid@odata.bind': row.owner.kind === 'user' ? `/systemusers(${guid(row.owner.id)})` : `/teams(${guid(row.owner.id)})`,
-        riivo_claimtype: CLAIM_TYPE[row.claimType],
+        ...(row.claimType ? { riivo_claimtype: CLAIM_TYPE[row.claimType] } : {}),
         riivo_claimstatus: CLAIM_STATUS_FNOL_LOGGED,
-        riivo_channel: CLAIM_CHANNEL_WHATSAPP,
+        riivo_channel: CLAIM_CHANNEL[row.channel],
         riivo_reportedon: row.reportedOn,
+        // TTTFG-5188 AC 4: a detail an email doesn't state stays blank, and undefined leaves the JSON.
         riivo_incidentdate: row.incidentAt,
-        riivo_incidentplace: row.place.slice(0, 200),
-        riivo_description: row.description.slice(0, 10000),
-        riivo_thirdpartiesinvolved: row.thirdParties,
+        riivo_incidentplace: row.place?.slice(0, 200),
+        riivo_description: row.description?.slice(0, 10000),
+        // A yes/no column left out of the POST defaults to No, which an email didn't say: null keeps it blank (DEV, 2 Nov 2026).
+        riivo_thirdpartiesinvolved: row.thirdParties ?? null,
         riivo_thirdpartydetails: row.thirdPartyDetails?.slice(0, 2000) ?? null,
-        riivo_sapsinvolved: row.saps,
-        riivo_injuries: row.injuries,
+        riivo_sapsinvolved: row.saps ?? null,
+        riivo_injuries: row.injuries ?? null,
         riivo_injurydetails: row.injuryDetails?.slice(0, 2000) ?? null,
         riivo_lastclientmessageon: row.lastClientMessageOn,
       }, { returnRow: true });
@@ -184,22 +204,25 @@ export function dataverseClaimPorts(o: ClaimsDataverseOptions): ClaimPorts {
       const followUp = row.kind === 'Follow-up';
       const dueOn = followUp ? (row.dueOn ?? (row.urgent ? twoWorkingHours(row.at) : nextWorkingDay(row.at))) : undefined;
       const created = await dv<{ riivo_agentactionid: string }>('POST', 'riivo_agentactions?$select=riivo_agentactionid', {
+        ...(row.id ? { riivo_agentactionid: row.id } : {}),
         riivo_name: row.detail.slice(0, 300),
         riivo_kind: KIND[row.kind],
-        // A Created row records something already done; a Follow-up is open work for a person.
-        riivo_status: followUp ? STATUS_OPEN : STATUS_DONE,
-        riivo_channel: ACTION_CHANNEL[row.channel ?? 'WhatsApp'],
+        // A Created row records something already done; a Follow-up is open work for a person. TTTFG-5299 AC 7: a roadside
+        // Created row stays open, so the broker sees in My Day that their client needed help.
+        riivo_status: followUp || row.open ? STATUS_OPEN : STATUS_DONE,
+        riivo_channel: row.channel === null ? null : ACTION_CHANNEL[row.channel ?? 'WhatsApp'],
         riivo_department: DEPARTMENT_INSURANCE,
         riivo_promise: followUp ? row.detail.slice(0, 2000) : null,
         riivo_duedate: dueOn ?? null,
         riivo_urgency: followUp ? (row.urgent ? URGENCY.Urgent : URGENCY.High) : URGENCY.Normal,
         riivo_urgencyreason: followUp
           ? (row.urgencyReason ?? (row.urgent ? 'Someone is hurt and the insurer has no assist number on file' : 'Promised to the client'))
-          : 'The agent created a record to check',
+          : (row.urgencyReason ?? 'The agent created a record to check'),
         riivo_actedon: followUp ? null : row.at,
         // Until TTTFG-4853's Regarding lookup: the claim or request this row is about.
         riivo_sourcemessageid: `${row.regarding.table}:${row.regarding.id}`,
-        riivo_subject: row.template ? `${row.template.name} (${row.template.version})` : null,
+        ...(row.conversationId ? { riivo_conversationid: row.conversationId } : {}),
+        riivo_subject: row.subject ?? (row.template ? `${row.template.name} (${row.template.version})` : null),
         riivo_finaltext: row.template?.text ?? null,
         'ownerid@odata.bind': row.owner.kind === 'user' ? `/systemusers(${guid(row.owner.id)})` : `/teams(${guid(row.owner.id)})`,
         ...(row.contactId ? { 'riivo_Client_contact@odata.bind': `/contacts(${guid(row.contactId)})` } : {}),

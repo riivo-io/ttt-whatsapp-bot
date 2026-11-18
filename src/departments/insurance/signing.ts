@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/signing.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5196: the claim's side of the signing page. The page itself (Tina's src/signing/) is generic: it takes a PDF,
 // its SHA-256, the channel with the number or address the link went to, where to stamp and a callback URL, and knows
@@ -26,7 +26,6 @@ import { createHash } from 'node:crypto';
 import { PDFDocument, type PDFPage, type PDFRef } from 'pdf-lib';
 import { DEPARTMENT, PACK_FOLLOW_UP, type AgentActionRow, type Owner } from './claim';
 import type { ClaimForm, SignatureResult } from './contracts';
-import { READY_TO_REGISTER, readyToRegister } from './followon';
 import type { ClaimForFill, SigningStep, UnsignedDocument } from './signature-fill';
 import { claimFormFileName } from './signature-fill';
 import { SIGN_FORM_TEMPLATE } from './templates';
@@ -142,8 +141,26 @@ export interface LinkMessage {
   subject: string;
 }
 
+/** The signature the client drew at the end of the guided form, with what the signing page records with one. */
+export interface FormSignature {
+  /** A PNG data URL, as the signing page's pad makes it. */
+  signature: string;
+  ip: string | null;
+  userAgent: string | null;
+}
+
 export interface ClaimSigningPorts {
   signingClaim(claimId: string): Promise<SigningClaim>;
+  /**
+   * The user (9 Nov 2026): the client signed at the end of the guided form. The signature waiting for this claim, or
+   * null. Absent: there is no such signature, and the link goes as before.
+   */
+  formSignature?(claimId: string): Promise<FormSignature | null>;
+  /**
+   * Signs the new request with that signature (the signing page's own signing: the same hash check, stamp, audit and
+   * callback) and waits for the callback, which files the signed copy and sets the claim to Signed. False: it couldn't.
+   */
+  signWithFormSignature?(request: SigningRequestCreated, signature: FormSignature): Promise<boolean>;
   /** TTTFG-4869: the template is signed off (broker lead and FAIS reviewer) and, on WhatsApp, approved by Meta. */
   signedOff(template: typeof SIGN_FORM_TEMPLATE, channel: SignChannel): boolean;
   createSigningRequest(input: SigningRequestInput): Promise<SigningRequestCreated>;
@@ -172,6 +189,24 @@ export function claimSigningStep(ports: ClaimSigningPorts): SigningStep {
     if (!claim.channel) return followUp('the claim has no channel');
     const name = CHANNEL_NAME[claim.channel];
     const to = claim.channel === 'whatsapp' ? claim.whatsApp : claim.email;
+
+    // Signed on the form: the filled form is signed now and no link goes. No message goes either, so the link's
+    // template needn't be signed off. If it can't be signed, the link goes as before (a new request supersedes this one).
+    const onForm = ports.formSignature && ports.signWithFormSignature && to && document.stamps?.some((s) => s.kind === 'signature')
+      ? await ports.formSignature(claimId).catch(() => null) : null;
+    if (onForm && to) {
+      try {
+        const request = await ports.createSigningRequest({
+          document: document.bytes, documentHash: document.fileHash ?? sha256(document.bytes), fileName: document.fileName,
+          title: `Claim form for ${claim.insurer} (${claim.reference})`, channel: claim.channel, sentTo: to,
+          caller: 'claim', callerRecordId: claimId, stamps: document.stamps,
+        });
+        // The user (13 Nov 2026): no Done row for a signature. The claim's signature status and its signed form say so.
+        if (await ports.signWithFormSignature!(request, onForm)) return 'signed';
+      } catch (e) {
+        console.error(`Signing ${claim.reference} with the form's signature failed: ${(e as Error).message}`);
+      }
+    }
     if (!to) return followUp(`there is no ${claim.channel === 'whatsapp' ? 'WhatsApp number' : 'email address'} on the claim`);
     const send = ports.send[claim.channel];
     if (!send) return followUp(`signing links can't go out on ${name} yet`);
@@ -311,15 +346,10 @@ export async function onClaimFormSigned(ports: ClaimSignedPorts, cb: SignedCallb
   const found = await ports.findSignedDocument(claim.id);
   if (found) await ports.updateSignedDocument?.(found.id, row);
   const { id } = found ?? await ports.createSignedDocument(row);
-  await ports.createAgentAction({
-    ...actionBase, kind: 'Created',
-    detail: `The client signed the claim form for ${claim.reference} on the signing page (link sent on ${CHANNEL_NAME[cb.audit.channel]} to ${cb.audit.sentTo}).`,
-  });
-  // TTTFG-4830 (C3, 29 Oct 2026): the broker hears again once the form is signed ("Form signed: yes"), the claim's cue to
-  // register it. Before Signed, like the rest; the callback that comes again after Signed doesn't send it twice.
-  await ports.createAgentAction({
-    ...actionBase, kind: 'Follow-up', detail: readyToRegister(claim, [], 'Signed'), template: { name: READY_TO_REGISTER.name, version: READY_TO_REGISTER.version },
-  });
+  // The user (13 Nov 2026): no Done row for the signature, however it was signed: the claim's signature status, the audit
+  // on it and the signed form say so. And no ready-to-register Follow-up here any more (TTTFG-4830 C3): the pack made
+  // right after the signature is the broker's cue to register the claim, and its Review item says what they need
+  // (followon.ts registerNotes).
   await ports.markSigned(claim.id, cb.audit.signedAt, JSON.stringify(cb.audit));
   await packAfterSigned(ports, claim, cb.audit.signedAt);
   return { filed: { fileRef, documentId: id } };
@@ -337,7 +367,7 @@ async function packAfterSigned(ports: ClaimSignedPorts, claim: SignedClaim, at: 
     const msg = String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').slice(0, 300);
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner: claim.owner, regarding: { table: 'riivo_claim', id: claim.id }, contactId: claim.contactId, at,
-      detail: `${PACK_FOLLOW_UP}${claim.reference}: the client signed, but the agent could not check whether the pack is due: ${msg}. Please check the claim, and put the pack together by hand if every required item is in.`,
+      detail: `${PACK_FOLLOW_UP}${claim.reference}: the client signed, but the agent could not check whether the pack is due: ${msg}. Please check the claim, and put the pack together by hand.`,
     });
   }
 }

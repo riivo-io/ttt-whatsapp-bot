@@ -233,7 +233,7 @@ export class MetaWhatsAppService {
      * TTTFG-4830 (claims demo): an interactive message (reply buttons or a list) built by the caller, as sendMessage
      * sends text: returns the message id and throws when Meta refuses it, so the caller can fall back to text.
      */
-    async sendInteractive(to: string, interactive: { type: 'button' | 'list'; body: { text: string }; action: object }): Promise<string | null> {
+    async sendInteractive(to: string, interactive: { type: 'button' | 'list' | 'cta_url'; body: { text: string }; action: object }): Promise<string | null> {
         if (!this.token || !this.phoneNumberId) {
             console.error('Cannot send interactive message: Meta configuration missing');
             return null;

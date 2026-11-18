@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: stop a claim and continue later (SPEC-04 "Tina's claim walkthrough", stop and continue; spec user story 6
 // and the WhatsApp half of 8). Runs on every client message that isn't part of a 5168 walkthrough in progress, before
@@ -43,8 +43,10 @@ import type { ClaimType, Facts, WalkthroughState } from './walkthrough';
  * TTTFG-5200 recomputes the score when a late optional item arrives; Additional info requested because the insurer
  * has asked the client for more.
  */
+// The user (13 Nov 2026): Submitted to insurer and Under assessment are open too. A client who signed without their
+// quote sends it after the claim went to the insurer, and Tina must take it on that claim (reminder.ts remindQuote).
 export const OPEN_CLAIM_STATUSES = [
-  'FNOL logged', 'Cover verified', 'Form sent', 'Awaiting client docs', 'Pack complete', 'Additional info requested',
+  'FNOL logged', 'Cover verified', 'Form sent', 'Awaiting client docs', 'Pack complete', 'Submitted to insurer', 'Under assessment', 'Additional info requested',
 ] as const satisfies readonly ClaimStatus[];
 export type OpenClaimStatus = (typeof OPEN_CLAIM_STATUSES)[number];
 export const isOpenClaim = (status: ClaimStatus): status is OpenClaimStatus => (OPEN_CLAIM_STATUSES as readonly string[]).includes(status);
@@ -61,6 +63,11 @@ export interface OpenClaim {
   lastClientMessageOn?: string;
   /** TTTFG-5212: riivo_channel, where the claim came in. Absent (not set): WhatsApp. */
   channel?: 'WhatsApp' | 'Email';
+  /** TTTFG-5188: riivo_policy and riivo_description, to tell which claim an email is about. */
+  policyId?: string;
+  description?: string;
+  /** TTTFG-5188: riivo_incidentdate is blank, and incidentAt is when the claim was opened: not the day it happened. */
+  noIncidentDate?: true;
   /**
    * TTTFG-4830: the client said the claim isn't theirs (NOT_THEIRS, a Follow-up the broker hasn't closed) and hasn't
    * said since that it is (THEIRS). Tina asks nothing about it, and the morning reminder passes it over.
@@ -582,7 +589,10 @@ export async function resumeTurn(
     case 'start-new': {
       if (d.dispute) await ports.createAgentAction(notTheirsRow(await ports.loadClaim(d.dispute.claimId), d.dispute.said, at));
       if (d.held.length) await sendText(ports, conv, heldFilesKept(d.held.length), null, at);
-      const t = await claimTurn(ports, conv, null, { kind: 'start', facts: d.facts }, now);
+      // The user (12 Nov 2026): a client with a claim already open gets the form for the new one too. Without `guided`
+      // here, a yes to "Is this a new claim?" got the whole walkthrough on WhatsApp first, and the link only after it.
+      const guided = !!settings.guidedForm && !!ports.guidedFormLink;
+      const t = await claimTurn(ports, conv, null, { kind: 'start', facts: d.facts, ...(guided ? { guided: true } : {}) }, now);
       return { route: 'new-claim', walkthrough: t.state, held: d.held };
     }
 
@@ -638,7 +648,7 @@ export async function resumeTurn(
   }
 }
 
-const labelOf = (c: FollowOnClaim): ClaimLabel => ({ reference: c.reference, claimType: c.claimType, incidentAt: c.facts.incidentAt });
+const labelOf = (c: FollowOnClaim): ClaimLabel => ({ reference: c.reference, claimType: c.claimType, incidentAt: c.facts.incidentAt ?? new Date().toISOString() });
 
 /** TTTFG-4830: the broker's urgent Follow-up for a claim the client says isn't theirs. */
 const notTheirsRow = (claim: FollowOnClaim, said: string, at: string): AgentActionRow => ({

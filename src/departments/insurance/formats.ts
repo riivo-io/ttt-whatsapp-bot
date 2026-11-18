@@ -1,11 +1,11 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/formats.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-4830: answers that don't look right. A phone number with a digit too many, an email address without its "@" or
 // an ID number with a wrong check digit is almost always a typo, and on a claim form it means the insurer can't reach a
 // witness or match a driver. Tina points it out once, in plain words, and asks again; followon.ts decides what happens.
 //
 // The format comes from the question's key, which every claim form config (TTTFG-5172) names the same way: `…Phone`,
-// `…IdNumber`, `…Email`, and a contact question that asks for "phone number and email address". Only free-text
+// `…IdNumber`, `…Email`, and a contact question that asks for a "phone number" with a name, a place or an email address. Only free-text
 // questions are checked, and only what the client actually typed as a number or an address: "no", "don't know" and a
 // passport number (letters as well as digits) pass, so no question becomes impossible to answer.
 //
@@ -13,16 +13,18 @@
 // usual length (8 to 15 digits).
 import type { QuestionItem } from './contracts';
 
-export type AnswerFormat = 'phone' | 'email' | 'sa-id' | 'contact';
+export type AnswerFormat = 'phone' | 'email' | 'sa-id' | 'contact' | 'saps-case';
 
 /** The format a free-text question's answer should have, from its key (group entries `<key>.<n>` included). */
 export function formatOf(item: Pick<QuestionItem, 'key' | 'kind' | 'answerType' | 'prompt'>): AnswerFormat | undefined {
   if (item.kind !== 'question' || item.answerType !== 'text') return undefined;
   const key = item.key.replace(/\.\d+$/, '');
+  if (key === 'sapsCaseNumber') return 'saps-case';
   if (/IdNumber$/.test(key)) return 'sa-id';
   if (/Phone$/.test(key)) return 'phone';
   if (/Email$/i.test(key)) return 'email';
-  if (/phone number/i.test(item.prompt) && /email/i.test(item.prompt)) return 'contact';
+  // A question that asks for a phone number along with something else (a name, a place, an email address).
+  if (/phone number/i.test(item.prompt)) return 'contact';
   return undefined;
 }
 
@@ -80,6 +82,18 @@ export function idProblem(typed: string): string | null {
   return null;
 }
 
+/**
+ * The user (13 Nov 2026): a SAPS case number has digits ("CAS 123/10/2026"). Anything without one ("....", "n/a",
+ * "dont have") isn't a case number at all, so it is pointed out. The user (16 Nov 2026): nothing holds up signing any more, so a
+ * client who keeps it anyway is not stopped. One with digits but an unusual shape is the client's to give, and goes through.
+ */
+export const isCaseNumber = (typed: string) => /\d/.test(typed);
+
+function sapsCaseProblem(typed: string): string | null {
+  return isCaseNumber(typed) ? null
+    : 'That doesn\'t look like a case number. It\'s on the slip the police station gave you, for example CAS 123/10/2026.';
+}
+
 /** Phone numbers inside free text: a run of digits (spaces, dashes and brackets allowed) at least 7 digits long. */
 const PHONE_IN_TEXT = /\+?\(?\d[\d\s()-]{5,}\d/g;
 
@@ -94,6 +108,8 @@ export function formatProblem(item: Pick<QuestionItem, 'key' | 'kind' | 'answerT
       return emailProblem(value);
     case 'sa-id':
       return idProblem(value);
+    case 'saps-case':
+      return sapsCaseProblem(value);
     case 'contact': {
       for (const token of value.split(/[\s,;]+/).filter((x) => x.includes('@'))) {
         const p = emailProblem(token);

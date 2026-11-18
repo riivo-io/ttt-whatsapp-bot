@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claim.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5168: one claim turn on WhatsApp. Runs the walkthrough (walkthrough.ts), then carries out what it asks:
 // reads the client and their policies, opens the riivo_claim, sets its owner, sends the acknowledgement template and
@@ -7,9 +7,9 @@
 // Seam for tests: ClaimPorts. Dataverse, WhatsApp and the clock are faked there. The real adapters come with
 // TTTFG-4885 (riivo_claim, riivo_provider.riivo_assistnumber) and the SPEC-05 story that loads department packages
 // into Tina (epic TTTFG-4830).
-import { claimGate } from './gate';
+import { blockedBy, claimGate } from './gate';
 import {
-  advance, askedKey, atNight, complete, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
+  advance, askedKey, atNight, complete, incidentLabel, isGeyser, isTheft, partiesNotAsked, PAUSED_TEXT, sastParts, start, STOP_AGAIN, STOP_QUESTION,
   STOPPED_TEXT, VOICE_OR_TEXT,
   type Answer, type ClaimType, type Effect, type Fact, type Facts, type FollowUpReason, type Policy, type Say, type Step, type WalkthroughState,
 } from './walkthrough';
@@ -42,17 +42,19 @@ export interface ClaimRow {
   contactId: string;
   policyId: string;
   providerId: string;
-  claimType: ClaimType;
+  /** TTTFG-5188 AC 4: on an email claim, a detail the email doesn't state stays blank, so these may be absent. */
+  claimType?: ClaimType;
   reportedOn: string;
-  incidentAt: string;
-  place: string;
-  description: string;
-  thirdParties: boolean;
+  /** TTTFG-5562: not yet known on a claim opened for the guided form, which asks them. */
+  incidentAt?: string;
+  place?: string;
+  description?: string;
+  thirdParties?: boolean;
   thirdPartyDetails?: string;
-  saps: boolean;
-  injuries: boolean;
+  saps?: boolean;
+  injuries?: boolean;
   injuryDetails?: string;
-  channel: 'WhatsApp';
+  channel: 'WhatsApp' | 'Email';
   status: 'FNOL logged';
   lastClientMessageOn: string;
   owner: Owner;
@@ -60,6 +62,8 @@ export interface ClaimRow {
 
 /** A riivo_agentaction row: the audit trail (SPEC-04 "AI governance") and the follow-ups (SPEC-05 "Follow-ups"). */
 export interface AgentActionRow {
+  /** TTTFG-5267: a row id from a key, so a second write with it is refused. Absent: Dataverse gives it one. */
+  id?: string;
   kind: 'Created' | 'Follow-up';
   department: typeof DEPARTMENT;
   owner: Owner;
@@ -69,10 +73,22 @@ export interface AgentActionRow {
   detail: string;
   /** A Follow-up a person must act on now: Urgent, due within 2 working hours. */
   urgent?: true;
-  /** TTTFG-4830: why it is urgent (riivo_urgencyreason), when it isn't the 5168 one (someone hurt, no assist number). */
+  /**
+   * TTTFG-5299 AC 7: a Created row that stays open for a person to see in My Day (roadside help: the broker sees that
+   * their client needed help). Absent: a Created row is written done, a record of what the agent did.
+   */
+  open?: true;
+  /**
+   * TTTFG-4830: why it is urgent (riivo_urgencyreason), when it isn't the 5168 one (someone hurt, no assist number).
+   * TTTFG-5299: on an open Created row, why it is in My Day.
+   */
   urgencyReason?: string;
-  /** TTTFG-5212: the channel the row is about (riivo_channel). Absent: WhatsApp, Tina's. */
-  channel?: 'WhatsApp' | 'Email';
+  /** TTTFG-5212: the channel the row is about (riivo_channel). Absent: WhatsApp, Tina's. Null: the claim has none (TTTFG-5208). */
+  channel?: 'WhatsApp' | 'Email' | null;
+  /** TTTFG-5188: the Outlook thread the row came from (riivo_conversationid), so a later email in it finds the claim. */
+  conversationId?: string;
+  /** TTTFG-5188: riivo_subject, when it isn't a template's name and version. */
+  subject?: string;
   at: string;
   /**
    * For a template send: which template and which version went out, and the text exactly as sent. For a Follow-up in
@@ -90,7 +106,11 @@ export interface Choice { title: string; description?: string; reply?: string }
 
 export type Outbound =
   /** `choices` (TTTFG-4830): the message asks one closed question, and these answer it. */
-  | { kind: 'text'; text: string; choices?: Choice[] }
+  | {
+    kind: 'text'; text: string; choices?: Choice[];
+    /** TTTFG-5562: the message carries a link, as a button where WhatsApp can show one. */
+    link?: { url: string; label: string };
+  }
   /**
    * `params` (TTTFG-5212): the template's variables, in order, when it goes out as an approved WhatsApp template (the
    * morning reminder, always). Without them the client is inside the 24-hour window: send `text`.
@@ -120,11 +140,14 @@ export interface Conversation {
   /** The Insurance and Advice online sign-up link, for the unknown-number reply. */
   signUpLink: string;
   /**
-   * TTTFG-4830 (28 Oct 2026): a TTT number the client can call about the claim (the host's setting), said where the
-   * client may need a person quickly (a burst geyser). Absent: not said.
+   * TTTFG-4830 (28 Oct 2026): a TTT number the client can call about the claim (the host's setting). Not said since
+   * TTTFG-5299 (9 Nov 2026): a claim that isn't about a car gets no number to call. Kept so the hosts still compile.
    */
   contactNumber?: string;
 }
+
+/** The AI disclosure, the same words on WhatsApp and by email. */
+export const AI_HANDLING_LINE = 'TTT uses AI tools to enhance your experience. Your claim will be reviewed by a broker at TTT.';
 
 /**
  * TTTFG-5168 AC 8: the acknowledgement. Fixed text filled with CRM data; Claude writes none of it, because the AI
@@ -140,8 +163,7 @@ export const FNOL_TEMPLATE = {
   version: 'draft-3',
   approved: false,
   render: (v: { firstName: string; reference: string }) =>
-    `Thanks ${v.firstName}, your claim is logged. Your claim reference is *${v.reference}*.\n\n` +
-    'TTT uses AI tools to enhance your experience. Your claim will be reviewed by a broker at TTT.',
+    `Thanks${v.firstName ? ` ${v.firstName}` : ''}, your claim is logged. Your claim reference is *${v.reference}*.\n\n${AI_HANDLING_LINE}`,
 } as const;
 
 /** SPEC-05 "Unknown numbers": the one reply an unknown number gets. */
@@ -202,8 +224,6 @@ const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
   windscreen: {
     description: 'What happened to the glass? For example a stone hit the windscreen on the highway.',
     place: 'Where did it happen? For example the road you were on.',
-    thirdParties: 'Was another vehicle involved, for example a truck that threw up a stone?',
-    thirdPartyDetails: 'Do you have any of their details, for example the vehicle registration or the company name?',
   },
   'motor-theft': {
     description: 'Please tell me in your own words what happened, for example where the car was parked and when you noticed it was gone.',
@@ -252,11 +272,6 @@ const BY_KIND: Record<ClaimKind, Partial<Record<Fact, string>>> = {
   other: {},
 };
 
-/**
- * TTTFG-4830: what to do if anyone is hurt or in danger, at the start of the reply to the policy. A line, not a question
- * (28 Oct 2026): before, "Is anyone hurt or in danger?" waited on a yes before the client got the number to call.
- */
-export const SAFETY_TEXT = '*If anyone is hurt or in danger, call 10111 now*, and come back to me once everyone is safe.';
 
 /**
  * TTTFG-4830: what to gather while the client is still at the scene, by kind of claim, sent once the kind is known
@@ -266,10 +281,10 @@ export const SAFETY_TEXT = '*If anyone is hurt or in danger, call 10111 now*, an
  */
 const EASIER = 'They make your claim easier:';
 /**
- * `note` (TTTFG-4830, 28 Oct 2026): a line after the list. `assistLine`: the insurer's assist number, when it's on file,
- * for a plumber the client needs now (a burst geyser).
+ * `note` (TTTFG-4830, 28 Oct 2026): a line after the list. TTTFG-5299 (9 Nov 2026): only a car gets a number to call (the
+ * tow line); the burst geyser's assist line and TTT's number are gone, and no list names 10111.
  */
-export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLine?: true; note?: string; assistLine?: true }> = {
+export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLine?: true; note?: string }> = {
   motor: {
     lead: `While you're still at the scene, try to get these. ${EASIER}`, towLine: true,
     items: [
@@ -287,8 +302,6 @@ export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLin
       'If a truck threw something up: its *registration* or company name',
       '*Where* it happened: the road, and the nearest exit or landmark',
     ],
-    // TTT's feedback (28 Oct 2026): the insurer appoints the glass repairer, so the client needs no quote.
-    note: "You don't need to get a quote: your insurer will arrange the repair.",
   },
   'motor-theft': {
     lead: `As soon as you can, try to do these. ${EASIER}`,
@@ -304,7 +317,7 @@ export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLin
   hijacking: {
     lead: `Once you're safe, try to do these. ${EASIER}`,
     items: [
-      'Report it to the *police (SAPS)* on 10111 and get the case number',
+      'Report it to the *police (SAPS)* and get the case number',
       'Call your *tracking company* now, if the car has one',
       'Write down what you remember: *how many* there were, what they looked like, and their car',
       '*Which way* they went',
@@ -320,7 +333,7 @@ export const ON_SCENE: Record<ClaimKind, { lead: string; items: string[]; towLin
     ],
   },
   geyser: {
-    lead: `If you're at the property, try to do these. ${EASIER}`, assistLine: true,
+    lead: `If you're at the property, try to do these. ${EASIER}`,
     items: [
       "*Turn off the water* at the mains, and *switch off the geyser* at the electrical box, if it's safe",
       'Take *photos* of the damage before you clean up',
@@ -373,27 +386,13 @@ export const READY_TEXT = "Next, I'll ask about what happened. Your insurer need
  * TTTFG-4830: the on-scene checklist for this claim, then READY_TEXT. A car that may need a tow gets the insurer's
  * assist line for it, when it's on file.
  */
-export function onSceneText(state: WalkthroughState, contactNumber?: string): string {
+export function onSceneText(state: WalkthroughState): string {
   const c = ON_SCENE[claimKind(state.facts, state.opening)];
   const policy = state.policies.find((p) => p.id === state.policyId);
   const number = policy?.assistNumber?.trim();
   const tow = c.towLine && number ? `Need a tow? Call ${policy!.insurer} on ${number}. Don't use a tow truck you didn't call.` : undefined;
-  const assist = c.assistLine ? assistLine(state, contactNumber) : undefined;
-  return [c.lead, c.items.map((item, i) => `${i + 1}. ${item}`).join('\n'), ...(tow ? [tow] : []), ...(assist ? [assist] : []), ...(c.note ? [c.note] : []), READY_TEXT]
+  return [c.lead, c.items.map((item, i) => `${i + 1}. ${item}`).join('\n'), ...(tow ? [tow] : []), ...(c.note ? [c.note] : []), READY_TEXT]
     .join('\n\n');
-}
-
-/**
- * TTTFG-4830 (28 Oct 2026, TTT's feedback): a burst geyser may need a plumber before the claim is through: the insurer's
- * assist line and TTT's number, when they're on file. In the on-scene list, or with the plumber question when the geyser
- * came out only after it (Say 'ask' `assist`).
- */
-function assistLine(state: WalkthroughState, contactNumber?: string): string | undefined {
-  const policy = state.policies.find((p) => p.id === state.policyId);
-  const number = policy?.assistNumber?.trim();
-  if (!number && !contactNumber) return undefined;
-  return [number ? `Need a plumber urgently? Call ${policy!.insurer}'s assist line on ${number}.` : '', contactNumber ? `You can also call TTT on ${contactNumber}.` : '']
-    .filter(Boolean).join(' ');
 }
 
 const EXAMPLE_TIME = 'Your best estimate is fine, for example "about 11pm" or "around 6 in the morning".';
@@ -497,7 +496,8 @@ const when = (iso: string) => {
   return new Date(t).toLocaleString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
-const describe = (p: Policy) => `${p.insurer} ${p.product} policy (${p.policyNumber})`;
+/** How a policy is named to the client: "Discovery Insure Motor policy (DI-1)". TTTFG-5299: roadside's taps use it too. */
+export const describe = (p: Policy) => `${p.insurer} ${p.product} policy (${p.policyNumber})`;
 
 /**
  * Default wording for a question. Plain and short; Claude may phrase it instead (never for the fixed messages).
@@ -510,14 +510,19 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
   const again = tries[step] ?? 0;
   switch (step) {
     case 'policy': {
-      const list = state.policies.map((p, i) => `${i + 1}. ${describe(p)}`).join('\n');
+      // 6 Nov 2026: what happened goes in front of each policy ("Theft – Hybrid Household policy (HY-1)").
+      const label = incidentLabel(state.facts, state.opening);
+      const list = state.policies.map((p, i) => `${i + 1}. ${label ? `${label} – ` : ''}${describe(p)}`).join('\n');
       const one = state.policies.length === 1 ? describe(state.policies[0]) : '';
       if (one) {
-        return [`Is this claim about your ${one}?`, `Sorry, I just need to check: is this claim about your ${one}? Please answer yes or no.`,
+        // 6 Nov 2026: Tina worked out from what happened which policy it goes on (the client's others don't fit it).
+        const suggest = label && state.allPolicies && !state.policyChecked ? `That sounds like a claim on your ${one}. Is that right?` : '';
+        return [suggest || `Is this claim about your ${one}?`, `Sorry, I just need to check: is this claim about your ${one}? Please answer yes or no.`,
           `Is it your ${one}? Yes or no?`][again ? ((again - 1) % 2) + 1 : 0];
       }
       // TTTFG-4830: the policies are also the choices the client taps (policyChoices), so the first ask needn't list them.
-      return ['Which policy is this claim about?', `Which one is it? Please pick it from the list, or reply with its number:\n${list}`,
+      // 6 Nov 2026: what happened is asked first, so the question names it, and so does each policy to pick from.
+      return [label ? `Which policy should your ${label.toLowerCase()} claim go on?` : 'Which policy is this claim about?', `Which one is it? Please pick it from the list, or reply with its number:\n${list}`,
         `Please reply with 1${state.policies.length > 1 ? `, 2${state.policies.length > 2 ? ' or another number' : ''}` : ''}:\n${list}`][again ? ((again - 1) % 2) + 1 : 0];
     }
     case 'ready':
@@ -528,6 +533,8 @@ export function question(step: Step, missing: Fact[], state: WalkthroughState, c
         ? [`Is everything in the summary above correct? ${SUMMARY_ASK}`, `Is that all correct? ${SUMMARY_ASK}`][(again - 1) % 2]
         : summary(state);
     default: {
+      // 6 Nov 2026: with more than one policy, what happened is Tina's first question, before the policy.
+      if (step === 'claim-type' && !state.policyId && !(tries[askedKey('claimType')] ?? 0)) return INCIDENT_FIRST_QUESTION;
       // TTTFG-4830: a yes/no asked for the first time brings its details question with it ("If yes to 1: please send me
       // their details"), so the yes and the details can come in one reply. Two or more questions are numbered, so the
       // client can answer by number, with a blank line between them so each stands out. A yes/no asked on its own is
@@ -567,7 +574,10 @@ export function summary(state: WalkthroughState): string {
     `*Where:* ${f.place}`,
     `*What happened:* ${f.description}`,
     ...(f.contractor ? [`*Plumber:* ${plumber[f.contractor]}`] : []),
-    theft ? `*Who did it or saw it:* ${f.thirdPartyDetails ?? 'not known'}` : `*Anyone else involved:* ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
+    // 16 Nov 2026: a windscreen isn't asked who else was involved, so it isn't read back unless the client said.
+    ...(f.claimType === 'Windscreen' && f.thirdParties === undefined ? [] : [
+      theft ? `*Who did it or saw it:* ${f.thirdPartyDetails ?? 'not known'}` : `*Anyone else involved:* ${yesNo(f.thirdParties)}${f.thirdPartyDetails ? ` (${f.thirdPartyDetails})` : ''}`,
+    ]),
     ...(skipped.saps === false && !f.saps ? [] : [theft ? `*Reported to the police (SAPS):* ${yesNo(f.saps)}` : `*Police (SAPS) involved:* ${yesNo(f.saps)}`]),
     ...(skipped.injuries === false && !f.injuries ? [] : [`*Anyone injured:* ${yesNo(f.injuries)}${f.injuryDetails ? ` (${f.injuryDetails})` : ''}`]),
   ];
@@ -603,9 +613,72 @@ export const CLAIM_TYPE_CHOICES: Choice[] = [
   { title: 'Lost or stolen item', description: 'Something you carry, like a phone, a laptop or a bag' },
   { title: 'Something else' },
 ];
-/** The client's policies, by insurer; the tap says the policy's number in the list, as a typed reply would. */
-const policyChoices = (ps: Policy[]): Choice[] =>
-  ps.map((p, i) => ({ title: p.insurer, description: `${p.product} policy (${p.policyNumber})`, reply: `${i + 1}. ${describe(p)}` }));
+/**
+ * 6 Nov 2026: the first question for a client with more than one policy, answered in their own words (no taps). Tina
+ * works out the kind of claim from it, then offers the policies that fit.
+ */
+export const INCIDENT_FIRST_QUESTION = 'What happened? Just tell me in a few words, for example "someone crashed into my car" or "someone stole my TV".';
+
+/** An insurer's name without "Ltd" or "(Pty) Ltd", so it fits a tap after what happened ("Theft – Santam"). */
+export const shortInsurer = (name: string) => name.replace(/\s*(\(Pty\)\s*)?(Ltd|Limited)\.?\s*$/i, '').trim() || name;
+
+/** The most characters of a list row's title WhatsApp shows; a longer one is cut with "…" (Tina's ROW_TITLE, domain/claimsOutbox.ts). */
+export const ROW_TITLE_MAX = 24;
+
+/** Words an insurer's name can end in without being what tells it from another ("Discovery Insure", "Hollard Insurance"). */
+const NAME_TAIL = new Set(['pty', '(pty)', 'ltd', 'limited', 'insurance', 'insure', 'insurers', 'insurer', 'assurance', 'holdings', 'group', 'company', 'co', 'sa', 'short', 'term', 'short-term']);
+
+/**
+ * 16 Nov 2026: the insurer's main name, for a list row's title, where the whole name does not fit: "Discovery Insure" is
+ * "Discovery", "Momentum Short Term Insurance" is "Momentum", "Santam Ltd" is "Santam". A name that is only such words stays as it is.
+ * The whole name stays in the line under the title (describe).
+ */
+export function mainInsurer(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  while (words.length > 1 && NAME_TAIL.has(words[words.length - 1].toLowerCase().replace(/\.$/, ''))) words.pop();
+  return words.join(' ') || name.trim();
+}
+
+const clip = (t: string, max: number) => (t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}…`);
+/** What happened, a little shorter, where the full label and the insurer's name would not fit in a title. */
+const SHORT_LABEL: Record<string, string> = { 'Car accident': 'Accident', 'Damage at home': 'Home damage', 'Burst geyser': 'Geyser' };
+
+/**
+ * 16 Nov 2026: the title of a policy in the tap list, never more than the 24 characters WhatsApp shows. What happened and the
+ * insurer ("Theft – Hybrid"); the name without "Ltd" when that fits, else the insurer's main name ("Car accident – Discovery").
+ * The policy's number follows when it is asked for and fits. The insurer's name always stays whole: if what happened does not
+ * fit beside it, its short form is tried ("Accident – Old Mutual"), and with no room for that the title is the insurer alone
+ * ("Auto & General"). The whole policy goes in the line under the title (describe), which is also where a client tells two
+ * policies at one insurer apart when the number does not fit.
+ */
+export function policyTitle(label: string, insurer: string, number?: string, max = ROW_TITLE_MAX): string {
+  const names = [...new Set([shortInsurer(insurer), mainInsurer(insurer)])];
+  const whats = label ? [...new Set([label, SHORT_LABEL[label]].filter((w): w is string => !!w))] : [''];
+  for (const what of whats) {
+    const lead = what ? `${what} – ` : '';
+    const tries = [...(number ? names.map((n) => `${lead}${n} (${number})`) : []), ...names.map((n) => `${lead}${n}`)];
+    const fits = tries.find((t) => t.length <= max);
+    if (fits) return fits;
+  }
+  return clip(names[names.length - 1], max);
+}
+
+/**
+ * The client's policies, by insurer; the tap says the policy's number in the list, as a typed reply would. 6 Nov 2026:
+ * what happened goes in front ("Theft – Hybrid", "Theft – Momentum"), so the client sees which policy it goes on.
+ * 16 Nov 2026: the title is the insurer's main name, so it is not cut ("Car accident – Discovery"); see policyTitle.
+ */
+const policyChoices = (state: WalkthroughState): Choice[] => {
+  const label = incidentLabel(state.facts, state.opening);
+  // Two policies with one insurer would read the same: their numbers tell them apart (in the title when it fits, else in the line under it).
+  const twice = (p: Policy) => state.policies.filter((x) => policyTitle(label, x.insurer) === policyTitle(label, p.insurer)).length > 1;
+  return state.policies.map((p, i) => ({
+    title: policyTitle(label, p.insurer, twice(p) ? p.policyNumber : undefined),
+    // The whole policy is in the line under the title, which WhatsApp shows in full.
+    description: describe(p),
+    reply: `${i + 1}. ${describe(p)}`,
+  }));
+};
 
 /**
  * TTTFG-4830: what the client can tap to answer what this Say asks, or nothing when the answer is the client's own
@@ -617,12 +690,13 @@ export function choicesFor(say: Say, state: WalkthroughState | null): Choice[] |
   if (say.kind !== 'ask' || say.correcting || !state) return undefined;
   switch (say.step) {
     case 'policy':
-      return state.policies.length === 1 ? YES_NO : policyChoices(state.policies);
+      return state.policies.length === 1 ? YES_NO : policyChoices(state);
     case 'ready':
     case 'danger':
       return READY;
     case 'claim-type':
-      return CLAIM_TYPE_CHOICES;
+      // 6 Nov 2026: asked before the policy, what happened is answered in the client's own words, not picked from a list.
+      return state.policyId ? CLAIM_TYPE_CHOICES : undefined;
     case 'summary':
       return SUMMARY_CHOICES;
     default:
@@ -651,7 +725,9 @@ export interface TurnResult {
 
 /** One message from the client: { kind: 'start' } when Anchor first routes a claim here, else what Claude understood. */
 export async function claimTurn(
-  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null, input: { kind: 'start'; facts?: Facts; opening?: string } | Answer, now: Date,
+  ports: ClaimPorts, conv: Conversation, state: WalkthroughState | null,
+  /** `policyId` (TTTFG-5299 AC 8): the policy roadside help settled, so the claim goes on from it. */
+  input: { kind: 'start'; facts?: Facts; opening?: string; guided?: boolean; policyId?: string } | Answer, now: Date,
 ): Promise<TurnResult> {
   const at = now.toISOString();
   let turn;
@@ -659,7 +735,8 @@ export async function claimTurn(
   if (input.kind === 'start' || !state) {
     const contact = await ports.contactByWhatsApp(conv.phone);
     contactId = contact?.id;
-    turn = start(contact, contact ? await ports.activePolicies(contact.id) : [], input.kind === 'start' ? input.facts : undefined, input.kind === 'start' ? input.opening : undefined);
+    turn = start(contact, contact ? await ports.activePolicies(contact.id) : [], input.kind === 'start' ? input.facts : undefined, input.kind === 'start' ? input.opening : undefined, input.kind === 'start' && input.guided,
+      input.kind === 'start' ? input.policyId : undefined);
   } else {
     turn = advance(state, input as Answer);
   }
@@ -683,14 +760,17 @@ export async function claimTurn(
   }
 
   if (turn.effects.some((e) => e.kind === 'open-claim')) {
-    if (!state || !complete(state)) throw new Error('TTTFG-5168: open-claim before the walkthrough is complete');
-    const claim = await openClaim(ports, conv, state, at);
+    // TTTFG-5562: for the guided form, the policy and the kind of claim are enough: the form asks the rest.
+    const from = turn.state?.guided ? turn.state : state;
+    if (!from || !(from.guided ? from.policyId && from.facts.claimType : complete(from))) throw new Error('TTTFG-5168: open-claim before the walkthrough is complete');
+    const claim = await openClaim(ports, conv, from as WalkthroughState & { policyId: string }, at);
     return { state: null, claim, lastSent: claim.text };
   }
   return { state: turn.state, lastSent };
 }
 
-async function ownerFor(ports: ClaimPorts, policyId: string | undefined): Promise<Owner> {
+/** Who owns a follow-up: the policy's broker, else the Insurance and Advice team (claimOwner). TTTFG-5299: roadside's rows too. */
+export async function ownerFor(ports: ClaimPorts, policyId: string | undefined): Promise<Owner> {
   const team = await ports.insuranceTeam();
   return claimOwner(policyId ? await ports.policyOwner(policyId) : null, team);
 }
@@ -699,8 +779,6 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
   switch (say.kind) {
     case 'unknown-number':
       return unknownNumberText(conv.signUpLink);
-    case 'safety':
-      return SAFETY_TEXT;
     case 'help':
     case 'lead':
       return say.text;
@@ -713,7 +791,7 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
     case 'to-broker':
       return toBrokerText();
     case 'on-scene':
-      return onSceneText(state!, conv.contactNumber);
+      return onSceneText(state!);
     case 'one-at-a-time':
       return ONE_AT_A_TIME_TEXT;
     case 'not-known':
@@ -729,9 +807,7 @@ function render(say: Say, state: WalkthroughState | null, conv: Conversation, pa
       return `${why}, so I've passed this to our insurance team, who will contact you${by}.`;
     }
     case 'ask': {
-      const q = question(say.step, say.missing, state!, say.correcting, say.tries);
-      const assist = say.assist ? assistLine(state!, conv.contactNumber) : undefined;
-      return assist ? `${assist}\n\n${q}` : q;
+      return question(say.step, say.missing, state!, say.correcting, say.tries);
     }
   }
 }
@@ -748,7 +824,7 @@ export async function sendText(
     await ports.createAgentAction({
       kind: 'Follow-up', department: DEPARTMENT, owner,
       regarding: claim ? { table: 'riivo_claim', id: claim.id } : { table: 'riivo_request', id: conv.requestId }, contactId,
-      detail: `Tina's reply was blocked by the ${gate.rule} rule ("${gate.matched}"). The client got the holding line. Please update them.`,
+      detail: `Tina's reply was blocked by ${blockedBy(gate)}. The client got the holding line. Please update them.`,
       at,
     });
   }
@@ -759,17 +835,25 @@ export async function sendText(
 /** TTTFG-4830: on the claim's description when the client uses their own plumber; followon.ts forTtt reads it. */
 export const OWN_PLUMBER_NOTE = 'The client will use their own plumber.';
 
+/**
+ * The user (16 Nov 2026): the client will use their own plumber, so the broker is reminded to get in touch with them. The
+ * plumber's quote and invoice are TTT's to get, not the client's (the form never asks for them).
+ */
+export const ownPlumberDetail = (reference: string) =>
+  `Claim ${reference}: the client will use their own plumber. Please get in touch with the client to talk it through, `
+  + `including the plumber's quote and invoice: the form doesn't ask the client for them.`;
+
 async function openClaim(ports: ClaimPorts, conv: Conversation, state: WalkthroughState & { policyId: string }, at: string) {
   const policy = state.policies.find((p) => p.id === state.policyId)!;
   const owner = await ownerFor(ports, policy.id);
-  const f = state.facts as Required<Pick<Facts, 'claimType' | 'incidentAt' | 'place' | 'description' | 'thirdParties' | 'saps' | 'injuries'>> & Facts;
+  const f = state.facts as Required<Pick<Facts, 'claimType'>> & Facts;
   // TTTFG-4830 (28 Oct 2026): what the claim's columns can't hold goes on the description, for the broker.
   const notes = [f.timeUnknown ? 'Time not known.' : '', f.contractor === 'insurer' ? 'The client would like the insurer to send a plumber.' : '',
     f.contractor === 'own' ? OWN_PLUMBER_NOTE : '',
     f.contractor === 'not-known' ? "The client didn't say whether the insurer should send a plumber." : ''].filter(Boolean).join(' ');
   const { id, reference } = await ports.createClaim({
     contactId: state.contactId, policyId: policy.id, providerId: policy.providerId,
-    claimType: f.claimType, reportedOn: at, incidentAt: f.incidentAt, place: f.place, description: notes ? `${f.description} (${notes})` : f.description,
+    claimType: f.claimType, reportedOn: at, incidentAt: f.incidentAt, place: f.place, description: notes && f.description ? `${f.description} (${notes})` : f.description,
     thirdParties: f.thirdParties, thirdPartyDetails: f.thirdPartyDetails, saps: f.saps, injuries: f.injuries, injuryDetails: f.injuryDetails,
     channel: 'WhatsApp', status: 'FNOL logged', lastClientMessageOn: at, owner,
   });
@@ -785,6 +869,16 @@ async function openClaim(ports: ClaimPorts, conv: Conversation, state: Walkthrou
     });
   }
 
+  // The user (16 Nov 2026): a client with their own plumber is for the broker to talk to.
+  if (f.contractor === 'own') {
+    await ports.createAgentAction({
+      kind: 'Follow-up', department: DEPARTMENT, owner, regarding: { table: 'riivo_claim', id }, contactId: state.contactId, at, detail: ownPlumberDetail(reference),
+    });
+  }
+
+  // The user (9 Nov 2026): a claim opened for the guided form gets the form's link and nothing else, so no
+  // acknowledgement here. If the link can't be made, followon.ts sends it before the questions go on WhatsApp.
+  if (state.guided) return { id, reference, owner, text: '' };
   const text = FNOL_TEMPLATE.render({ firstName: state.firstName, reference });
   await ports.send(conv.phone, { kind: 'template', name: FNOL_TEMPLATE.name, version: FNOL_TEMPLATE.version, text });
   await ports.createAgentAction({

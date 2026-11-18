@@ -37,7 +37,7 @@ export function clientIp(req: Request): string | null {
  */
 export const LINK_PREVIEW = /facebookexternalhit|facebot|whatsapp|telegrambot|slackbot|twitterbot|linkedinbot|discordbot|skypeuripreview|googlebot|bingbot|applebot|\bbot\b|crawler|spider|preview/i;
 
-const sameKey = (a: string, b: string) => {
+export const sameKey = (a: string, b: string) => {
     const x = Buffer.from(a), y = Buffer.from(b);
     return x.length === y.length && crypto.timingSafeEqual(x, y);
 };

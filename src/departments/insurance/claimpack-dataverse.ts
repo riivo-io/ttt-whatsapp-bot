@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack-dataverse.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack's ports (claimpack.ts ClaimPackPorts) against Dataverse, in the style of
 // signing-dataverse.ts: the host passes its Dataverse call (`Dv`) and the claim folder, so this file runs unchanged in
@@ -14,7 +14,7 @@
 //   names the claim in riivo_sourcemessageid as "riivo_claim:<id>", as every claim row does (dataverse.ts). Its due
 //   date is the SPEC-04 rule for a claim pack (src/core/urgency.ts REVIEW_RULES): Urgent, within 2 working hours.
 // - Risk flags are riivo_claimflag rows (TTTFG-4885 step 7; TTTFG-5263 raises them), open while riivo_outcome is blank.
-import { CLAIM_PACK, PACK_FOLLOW_UP, type ClaimFlag, type ClaimPackPorts, type PackClaim, type PackFileRow, type PackItemRow, type ScoreClaim } from './claimpack';
+import { CLAIM_PACK, PACK_FOLLOW_UP, type ClaimFlag, type ClaimPackPorts, type InsurerRoute, type PackClaim, type PackContext, type PackFileRow, type PackItemRow, type ScoreClaim } from './claimpack';
 import { dataverseClaimPorts, twoWorkingHours, type Dv } from './dataverse';
 import { dataverseFillPorts, type ClaimFormFiles } from './fill-dataverse';
 import { CLAIM_STATUSES, dataverseFollowOnPorts } from './followon-dataverse';
@@ -30,6 +30,8 @@ const DEPARTMENT_INSURANCE = 463630002;
 const URGENT = 463630000;
 const CHANNEL = { email: 463630000, whatsapp: 463630001 } as const;
 const CLAIM_CHANNELS = ['email', 'whatsapp'] as const;
+/** riivo_provider.riivo_claimschannel (TTTFG-5204: Shared data model/TTTFG-5204/add_submission_schema.py). */
+export const INSURER_CHANNELS: Record<number, 'Portal' | 'Email'> = { 463630000: 'Portal', 463630001: 'Email' };
 const FORMATTED = '@OData.Community.Display.V1.FormattedValue';
 export const SUPERSEDED_NOTE = 'Superseded: the client signed again, so a new claim pack replaced this one.';
 export const REMADE_NOTE = 'Superseded: the claim pack was made again for the same signature, so the new one replaced this one.';
@@ -62,6 +64,12 @@ interface DocumentRow {
   riivo_claimitem: string;
   riivo_receivedon: string | null;
   createdon: string;
+}
+
+/** How the provider takes claims. */
+export async function readInsurerRoute(dv: Dv, providerId: string): Promise<InsurerRoute> {
+  const p = await dv<{ riivo_claimschannel: number | null; riivo_claimsemail: string | null }>('GET', `riivo_providers(${guid(providerId)})?$select=riivo_claimschannel,riivo_claimsemail`);
+  return { channel: p.riivo_claimschannel == null ? null : INSURER_CHANNELS[p.riivo_claimschannel] ?? null, claimsEmail: p.riivo_claimsemail?.trim() || null };
 }
 
 export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPackPorts {
@@ -106,8 +114,8 @@ export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPack
     async packClaim(base): Promise<PackClaim> {
       const claimId = guid(base.id);
       const [r, docs, signed, fromFill] = await Promise.all([
-        dv<{ riivo_blankfields: string | null; riivo_channel: number | null; riivo_submittedbelow100reason: string | null }>('GET',
-          `riivo_claims(${claimId})?$select=riivo_blankfields,riivo_channel,riivo_submittedbelow100reason`),
+        dv<{ riivo_blankfields: string | null; riivo_channel: number | null; riivo_submittedbelow100reason: string | null; _riivo_provider_value: string | null }>('GET',
+          `riivo_claims(${claimId})?$select=riivo_blankfields,riivo_channel,riivo_submittedbelow100reason,_riivo_provider_value`),
         dv<{ value: DocumentRow[] }>('GET',
           'riivo_clientdocuments?$select=riivo_clientdocumentid,riivo_originalfilename,riivo_sharepointlink,riivo_claimitem,riivo_receivedon,createdon'
           + `&$filter=_riivo_claim_value eq ${claimId} and riivo_claimitem ne null and statecode eq 0&$orderby=createdon asc`),
@@ -121,8 +129,13 @@ export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPack
         })(),
       ]);
       const s = signed.value[0];
+      // A read that fails costs the item its email, never the pack: the approval reads it again and says so (submit.ts).
+      const insurerRoute: InsurerRoute = r._riivo_provider_value
+        ? await readInsurerRoute(dv, r._riivo_provider_value).catch(() => ({ channel: null, claimsEmail: null }))
+        : { channel: null, claimsEmail: null };
       return {
         ...base,
+        insurerRoute,
         contactName: fromFill.claim.contactName ?? 'Client',
         insurer: fromFill.claim.insurer,
         claimType: fromFill.claim.claimType,
@@ -182,6 +195,25 @@ export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPack
       return r.value.map((a) => ({ id: a.riivo_agentactionid }));
     },
 
+    // The user (13 Nov 2026): only an item the broker hasn't acted on: Queued and Approved are on their way to the insurer.
+    async unsentPackItem(claimId) {
+      const unsent = [STATUS.Open, STATUS['Sent back']].map((s) => `riivo_status eq ${s}`).join(' or ');
+      const r = await dv<{ value: { riivo_agentactionid: string; riivo_heldbackaction: string | null }[] }>('GET',
+        'riivo_agentactions?$select=riivo_agentactionid,riivo_heldbackaction&$orderby=createdon asc,riivo_agentactionid asc&$top=1'
+        + `&$filter=riivo_sourcemessageid eq 'riivo_claim:${guid(claimId)}' and riivo_kind eq ${KIND_REVIEW} and riivo_reviewreason eq ${REASON_CLAIM_PACK} and (${unsent})`);
+      const row = r.value[0];
+      if (!row?.riivo_heldbackaction) return null;
+      try {
+        const context = JSON.parse(row.riivo_heldbackaction) as PackContext;
+        return context?.kind === 'claim-pack' ? { id: row.riivo_agentactionid, context } : null;
+      } catch {
+        return null;
+      }
+    },
+    updatePackItem: async (itemId, row) => void (await dv('PATCH', `riivo_agentactions(${guid(itemId)})`, {
+      riivo_name: row.title.slice(0, 300), riivo_heldbackaction: JSON.stringify(row.context),
+    })),
+
     supersedePackItem: async (itemId, reasonBelow100, why) => void (await dv('PATCH', `riivo_agentactions(${guid(itemId)})`, {
       riivo_status: STATUS.Done, riivo_donenote: supersededNote(reasonBelow100, why),
     })),
@@ -195,7 +227,9 @@ export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPack
         riivo_department: DEPARTMENT_INSURANCE,
         riivo_reviewreason: REASON_CLAIM_PACK,
         riivo_heldbackaction: JSON.stringify(row.context),
-        // My Day lists the pack like an email's files (src/core/attachments.ts); the evidence links are in the context.
+        // TTTFG-5204 AC 8: the email My Day shows on the item (TTTFG-5060).
+        ...(row.context.insurerEmail ? { riivo_recipient: row.context.insurerEmail.to, riivo_subject: row.context.insurerEmail.subject.slice(0, 400), riivo_drafttext: row.context.insurerEmail.text } : {}),
+        // My Day lists the summary like an email's files (src/core/attachments.ts); the signed form and evidence links are in the context.
         riivo_attachments: JSON.stringify([{ name: row.pack.fileName.slice(0, 200), contentType: 'application/pdf', size: row.pack.size }]),
         riivo_duedate: twoWorkingHours(row.at),
         riivo_urgency: URGENT,
@@ -207,8 +241,9 @@ export function dataverseClaimPackPorts(o: ClaimPackDataverseOptions): ClaimPack
       return { id: created.riivo_agentactionid };
     },
 
-    setPackComplete: async (claimId, at) => void (await dv('PATCH', `riivo_claims(${guid(claimId)})`, {
+    setPackComplete: async (claimId, at, insurerEmail) => void (await dv('PATCH', `riivo_claims(${guid(claimId)})`, {
       riivo_claimstatus: OPT + CLAIM_STATUSES.indexOf('Pack complete'), riivo_packcompleteon: at, riivo_submittedbelow100reason: null,
+      ...(insurerEmail ? { riivo_insurercontactemail: insurerEmail } : {}),
     })),
 
     createAgentAction: (row) => claimPorts.createAgentAction(row),

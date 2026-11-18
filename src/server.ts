@@ -9,6 +9,8 @@ import loeSignedRoute from './routes/loeSigned.route';
 import outboundNotifyRoute from './routes/outboundNotify.route';
 import adminRoute from './routes/admin.route';
 import signingRoute from './routes/signing.route';
+import { claimFormRouter } from './routes/claimForm.route';
+import { claimFormDeps } from './services/claimsDemo.service';
 import claimSignedRoute from './routes/claimSigned.route';
 console.log('[boot] server.ts: all imports resolved');
 
@@ -28,6 +30,8 @@ app.use('/webhook/outbound-notify', outboundNotifyRoute);
 // TTTFG-5196: the signing page (its own body limits) and its claims callback (raw body, HMAC).
 app.use('/sign', signingRoute);
 app.use('/webhook/claim-signed', claimSignedRoute);
+// TTTFG-5562: the guided claim form (its own body limits).
+app.use('/claim-form', claimFormRouter(claimFormDeps));
 
 app.use(express.json());
 

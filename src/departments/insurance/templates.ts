@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -12,7 +12,7 @@
 // approved text replaces each one with a new version before go-live. The deadline note never says the claim is at
 // risk, late or may be rejected: it states the insurer's period and the date, nothing more.
 
-const longDate = (isoDate: string) =>
+export const longDate = (isoDate: string) =>
   new Date(`${isoDate}T12:00:00+02:00`).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' });
 
 export interface DeadlineVars {
@@ -55,6 +55,23 @@ export const DISCLOSURE_TEMPLATE = {
   approved: false,
   render: () =>
     "*Please give the insurer all the facts that matter, honestly and in full.* If you're not sure whether something matters, tell me anyway.",
+} as const;
+
+/**
+ * TTTFG-5562: what opens the guided form, quick to get through: the duty of disclosure that Tina doesn't send on
+ * WhatsApp when she sends the form. Fixed text for the same reason as the rest of this file. Saved under the duty of
+ * disclosure's name, so a client who moves to chat later isn't told it again.
+ * form-draft-2 (the user, 9 Nov 2026): the duty of disclosure and how to stop and come back, nothing else, and Begin.
+ */
+export const FORM_TERMS = {
+  name: DISCLOSURE_TEMPLATE.name,
+  version: 'form-draft-2',
+  title: 'Before you start',
+  lines: [
+    "Please give the insurer all the facts that matter, honestly and in full. If you're not sure whether something matters, tell us anyway.",
+    "If you don't know something, just leave it blank. You can stop and come back with the same link.",
+  ],
+  agree: 'Begin',
 } as const;
 
 export type ClaimTemplate = typeof DEADLINE_UPCOMING_TEMPLATE | typeof DEADLINE_PASSED_TEMPLATE | typeof DISCLOSURE_TEMPLATE;
@@ -129,6 +146,140 @@ export const REMINDER_EMAIL_TEMPLATE = {
   },
 } as const;
 
+export interface FnolEmailVars {
+  firstName: string;
+  /** The claim reference, CLM-…. */
+  reference: string;
+  link?: string;
+  /** The last day the link works, as a calendar date in South Africa, YYYY-MM-DD. */
+  expiresOn?: string;
+}
+
+/**
+ * TTTFG-5188 AC 5: the acknowledgement for a claim that came in by email. Sent with no approval, so it is fixed text filled
+ * with CRM data: Claude writes none of it.
+ * draft-3 (the user, 6 Nov 2026): no broker's name, as on WhatsApp since TTT's 28 Oct feedback (FNOL_TEMPLATE draft-3).
+ * draft-4 (the user, 9 Nov 2026): with the form's link, as close to WhatsApp's form message as an email can be: we've opened
+ * a claim, complete the form so we can submit it. No signing link to come: the client signs at the end of the form.
+ * draft-5 (the user, 9 Nov 2026): no AI line and no reference in the body, with or without the link. The reference stays in
+ * the subject.
+ */
+export const FNOL_EMAIL_TEMPLATE = {
+  name: 'Claim - FNOL logged (email)',
+  version: 'draft-5',
+  approved: false,
+  subject: (v: Pick<FnolEmailVars, 'reference'>) => `Your claim is logged (${v.reference})`,
+  render: (v: FnolEmailVars) => [
+    `Hi ${v.firstName}, we've opened a claim for you.`
+      + (v.link ? ' Please complete the form below so that we can submit your claim.'
+        : " We'll email you separately with anything else we need, such as questions for your insurer's claim form and any photos or documents. You can reply to our emails with your answers and attach what you have."),
+    ...(v.link ? [v.link] : []),
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
+/**
+ * TTTFG-5188 (the user, 3 Nov 2026): an email claim gets the guided form rather than a list of questions, as on WhatsApp
+ * (TTTFG-5562). Fixed wording filled with CRM values and the link, so it goes without approval, as the signing link does.
+ * The wording waits for TTT's approval with the acknowledgement's. draft-2 (6 Nov 2026): the link's last day written out.
+ * draft-3 (the user, 9 Nov 2026): as WhatsApp's form message; the client signs at the end of the form, so no signing link.
+ */
+export interface FormLinkEmailVars { firstName: string; reference: string; link: string; /** South African date, YYYY-MM-DD. */ expiresOn: string }
+
+export const FORM_LINK_EMAIL_TEMPLATE = {
+  name: 'Claim - form link (email)',
+  version: 'draft-3',
+  approved: false,
+  subject: (v: Pick<FormLinkEmailVars, 'reference'>) => `Your claim form (${v.reference})`,
+  render: (v: FormLinkEmailVars) => [
+    `Hi ${v.firstName}, please complete the form below so that we can submit your claim.`,
+    v.link,
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
+export interface FormReminderVars {
+  firstName: string;
+  /** The claim as Tina names it: "motor accident claim (CLM-000486)". */
+  claim: string;
+  /** A fresh link to the claim's form. The answers already given are kept, so the client carries on where they stopped. */
+  link: string;
+}
+
+/**
+ * The user (13 Nov 2026): on WhatsApp, the morning reminder for a claim whose form went out and hasn't been submitted
+ * (reminder.ts) is REMINDER_TEMPLATE, the template Meta has already approved, with this as its {{3}}: "… we still need
+ * you to finish your claim form here: <link>." No second template to approve.
+ */
+export const formStillNeeded = (link: string) => `you to finish your claim form here: ${link}`;
+
+/** The same reminder for a claim that came in by email, from the claim owner's mailbox (no Meta template on email). */
+export const FORM_REMINDER_EMAIL_TEMPLATE = {
+  name: 'Claim - form not finished (reminder email)',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<FormReminderVars, 'claim'>) => `Your ${v.claim}: the form isn't finished yet`,
+  render: (v: FormReminderVars) => [
+    `Good morning ${v.firstName},`,
+    `The form for your ${v.claim} isn't finished yet. Please complete it below so that we can submit your claim. What you've already filled in is kept.`,
+    v.link,
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
+/**
+ * The user (9 Nov 2026): what the client hears once they submit the guided form, the same words on WhatsApp
+ * (followon.ts formClosingText) and by email (FORM_DONE_EMAIL_TEMPLATE). The sign line only when the signature from the
+ * form couldn't be used and a signing link went instead.
+ */
+export const FORM_THANKS = 'Thank you!';
+export const FORM_CLOSING = 'A consultant from TTT will be in touch with you shortly. We will keep you updated on the status of your claim.';
+
+export interface FormDoneEmailVars {
+  reference: string;
+  /** A signing link went, as the signature from the form couldn't be used. */
+  linkSent: boolean;
+  /**
+   * The user (16 Nov 2026): what the client still has to send, as the lines of "Things we still need from you" (followon.ts
+   * stillNeedLines). Nothing on the form holds up signing, so the thank-you says what is still to come. Never a quote or an
+   * invoice: TTT gets those.
+   */
+  stillNeed?: readonly string[];
+}
+
+/** The user (9 Nov 2026): the email claim's last email, once the form is submitted and signed: WhatsApp's thank-you. */
+export const FORM_DONE_EMAIL_TEMPLATE = {
+  name: 'Claim - form submitted (email)',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<FormDoneEmailVars, 'reference'>) => `Your claim is submitted (${v.reference})`,
+  render: (v: FormDoneEmailVars) => [
+    [FORM_THANKS, v.linkSent ? 'Please check and sign the form using the link we emailed you.' : '', FORM_CLOSING].filter(Boolean).join(' '),
+    ...(v.stillNeed?.length ? [
+      `Things we still need from you:\n${v.stillNeed.map((l) => `- ${l}`).join('\n')}`,
+      `Please reply to this email with ${itOrThem(v.stillNeed)} when you have ${itOrThem(v.stillNeed)}, or send ${itOrThem(v.stillNeed)} to Tina on WhatsApp. We will remind you each morning until ${itOrThem(v.stillNeed) === 'it' ? 'it is' : 'they are'} in.`,
+    ] : []),
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
+/**
+ * TTTFG-5188 AC 8: the one reply to a claim email from an address on no contact. It asks for no ID number and no policy number
+ * (decided 9 October 2026: anyone who knows a client's ID number could otherwise claim in their name) and holds no client
+ * details. A person approves it, as for any draft reply.
+ */
+export const UNKNOWN_SENDER_EMAIL_TEMPLATE = {
+  name: 'Claim - unknown sender (email)',
+  version: 'draft-1',
+  approved: false,
+  render: (v: { signUpLink: string }) => [
+    "Thank you for your email. We can't find this email address on our system.",
+    "If you're already a TTT client, please write to us from the address we have on file, and we'll help you from there.",
+    `If you're new, you can sign up here: ${v.signUpLink}`,
+    'Kind regards,\nTTT',
+  ].join('\n\n'),
+} as const;
+
 export interface SignFormVars {
   firstName: string;
   insurer: string;
@@ -158,3 +309,150 @@ export const SIGN_FORM_TEMPLATE = {
   params: (v: SignFormVars) => [v.firstName, v.insurer, v.reference, v.link, longDate(v.expiresOn)],
   emailSubject: (v: SignFormVars) => `Your claim form is ready to sign (${v.reference})`,
 } as const;
+
+export interface ClaimToInsurerVars {
+  clientName: string;
+  policyNumber: string | null;
+  /** The claim reference, CLM-…. */
+  reference: string;
+  claimType: string;
+  insurer: string;
+  /** riivo_incidentdate, a date and time, or null when the claim holds none. */
+  incidentDate: string | null;
+}
+
+/**
+ * TTTFG-5204 AC 8 and 9: the email that takes a claim pack to an insurer that takes claims by email, with the pack attached.
+ * Fixed text with CRM values only, and the broker approves the item that holds it, so Claude writes none of it and the
+ * recipient is code's (the insurer's riivo_claimsemail). It states no cover position.
+ */
+export const CLAIM_TO_INSURER_TEMPLATE = {
+  name: 'Claim to insurer',
+  version: 'draft-2',
+  approved: false,
+  subject: (v: Pick<ClaimToInsurerVars, 'clientName' | 'policyNumber' | 'reference'>) =>
+    (v.policyNumber ? `New claim: ${v.clientName} – policy ${v.policyNumber}` : `New claim: ${v.clientName} (${v.reference})`),
+  render: (v: ClaimToInsurerVars) => [
+    `Please find attached a new claim for ${v.clientName}: the signed claim form, a summary of the claim and the client's supporting documents, each as a separate file.`,
+    [
+      `Policy number: ${v.policyNumber ?? 'not on file'}`,
+      `Claim type: ${v.claimType}`,
+      ...(v.incidentDate ? [`Date of incident: ${new Date(v.incidentDate).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' })}`] : []),
+      `Our reference: ${v.reference}`,
+    ].join('\n'),
+    `Please reply with your claim number, quoting our reference ${v.reference}.`,
+  ].join('\n\n'),
+} as const;
+
+export interface InsurerChaseVars {
+  clientName: string;
+  /** The insurer's claim number. A claim without one isn't chased (chase.ts). */
+  insurerClaimNumber: string;
+  /** The client's policy number. A claim without one isn't chased (chase.ts). */
+  policyNumber: string;
+  /** The claim reference, CLM-…. */
+  reference: string;
+  /** riivo_submittedon, a date and time, or null when the claim holds none. */
+  submittedOn: string | null;
+}
+
+/**
+ * TTTFG-5269 AC 3: the chase that goes to an insurer silent on a submitted claim for 2 working days. Unattended, so the
+ * wording is fixed and TTT approves it once; CRM values only, so Claude writes none of it. It goes from the claim owner's
+ * mailbox, whose frame adds the signature, so the insurer's reply reaches the broker. Neutral: it asks where the claim
+ * stands and never says the insurer is late or in breach.
+ */
+export const INSURER_CHASE_TEMPLATE = {
+  name: 'Insurer claim chase',
+  version: 'draft-1',
+  approved: false,
+  subject: (v: Pick<InsurerChaseVars, 'insurerClaimNumber' | 'clientName'>) => `Claim ${v.insurerClaimNumber} – ${v.clientName} – follow-up`,
+  render: (v: InsurerChaseVars) => [
+    'Good day,',
+    `We are following up on the claim below${v.submittedOn ? `, submitted on ${new Date(v.submittedOn).toLocaleDateString('en-GB', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' })}` : ''}. `
+      + 'We have not yet had an update from you. Please let us know where the claim stands, and whether you need anything further from us or the client.',
+    [
+      `Client: ${v.clientName}`,
+      `Policy number: ${v.policyNumber}`,
+      `Your claim number: ${v.insurerClaimNumber}`,
+      `Our reference: ${v.reference}`,
+    ].join('\n'),
+    'Thank you.',
+  ].join('\n\n'),
+} as const;
+
+export interface SubmittedVars { insurer: string; number: string; reference: string }
+
+/**
+ * TTTFG-5204 AC 7: what the client hears when their claim moves to Submitted to insurer. CRM values only, with no approval
+ * per message, so TTT approves the wording once. On WhatsApp it is always the approved template: `meta` and `templateVersion`
+ * are its key in the WhatsApp flow's template list (WhatsApp - Automated - Send Templated Message), and Meta must have it.
+ */
+export const SUBMITTED_TEMPLATE = {
+  name: 'Claim - submitted to insurer',
+  version: 'draft-1',
+  approved: false,
+  meta: 'claim_submitted',
+  templateVersion: 1,
+  /** For Meta: {{1}} the insurer, {{2}} the insurer's claim number. */
+  whatsappBody: 'Submitted to {{1}}, claim no. {{2}}.',
+  params: (v: SubmittedVars) => [v.insurer, v.number],
+  render: (v: SubmittedVars) => `Submitted to ${v.insurer}, claim no. ${v.number}.`,
+  emailSubject: (v: SubmittedVars) => `Your claim is with ${v.insurer} (${v.reference})`,
+} as const;
+
+export interface StatusUpdateVars { insurer: string; reference: string }
+
+/**
+ * TTTFG-5208 AC 1, 3: what the client hears when a claim moves to a status that tells them something. CRM values only, so no
+ * model text and no per-message approval; it never implies an outcome. `approved` is TTT's Insurance and Advice department
+ * (AC 4) and `metaApproved` is Meta's: statusupdate.ts sends nothing until they say so, and the claim's owner tells the
+ * client by hand. On WhatsApp, `meta` and `templateVersion` are the key in the WhatsApp flow's template list.
+ *
+ * No first name (a blank one fails at Meta), no insurer claim number (a claim can get here with none) and no broker's name
+ * (TTT, 28 Oct 2026). The list of what the insurer asked for needs TTTFG-5216: nothing holds it on the claim yet.
+ */
+export interface StatusTemplate {
+  name: string;
+  version: string;
+  approved: boolean;
+  metaApproved: boolean;
+  meta: string;
+  templateVersion: number;
+  whatsappBody: string;
+  params(v: StatusUpdateVars): string[];
+  render(v: StatusUpdateVars): string;
+  emailSubject(v: StatusUpdateVars): string;
+}
+
+// riivo's best guess, approved by riivo on 6 Nov 2026 so the story can be tested; TTT's Insurance and Advice department
+// still has to confirm it (AC 4), and their wording goes in as a new version. `metaApproved` stays false here: Meta approves
+// per WhatsApp account, so each environment says so with CLAIMS_STATUS_META_APPROVED (statusupdate-dataverse.ts).
+// Meta refuses a body that starts or ends with a variable, or is mostly variables, so both carry fixed text around them.
+export const UNDER_ASSESSMENT_TEMPLATE: StatusTemplate = {
+  name: 'Claim - under assessment',
+  version: 'riivo-1',
+  approved: true,
+  metaApproved: false,
+  meta: 'claim_under_assessment',
+  templateVersion: 1,
+  /** For Meta: {{1}} our reference, {{2}} the insurer. */
+  whatsappBody: 'An update on your claim {{1}}: {{2}} is now assessing it. You don\'t need to do anything for now. We will be in touch when there is news.',
+  params: (v) => [v.reference, v.insurer],
+  render: (v) => `An update on your claim ${v.reference}: ${v.insurer} is now assessing it. You don't need to do anything for now. We will be in touch when there is news.`,
+  emailSubject: (v) => `Your claim ${v.reference} is being assessed`,
+};
+
+export const ADDITIONAL_INFO_TEMPLATE: StatusTemplate = {
+  name: 'Claim - additional info requested',
+  version: 'riivo-1',
+  approved: true,
+  metaApproved: false,
+  meta: 'claim_additional_info',
+  templateVersion: 1,
+  /** For Meta: {{1}} our reference, {{2}} the insurer. */
+  whatsappBody: 'An update on your claim {{1}}: {{2}} has asked for more information before they can carry on. We will be in touch to tell you what is needed.',
+  params: (v) => [v.reference, v.insurer],
+  render: (v) => `An update on your claim ${v.reference}: ${v.insurer} has asked for more information before they can carry on. We will be in touch to tell you what is needed.`,
+  emailSubject: (v) => `More information needed on your claim ${v.reference}`,
+};

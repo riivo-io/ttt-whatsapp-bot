@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/resume-dataverse.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5184: resume.ts's ports against Dataverse. The 5168 claim ports and the 5176 follow-on ports as they are, plus
 // openClaimsForClient: the one reading of "open" (OPEN_CLAIM_STATUSES) that TTTFG-5188 reuses for email. Like the other
@@ -6,9 +6,9 @@
 // email agent.
 import { dataverseClaimPorts } from './dataverse';
 import { CLAIM_STATUSES, CLAIM_TYPE_VALUES, dataverseFollowOnPorts, type FollowOnDataverseOptions } from './followon-dataverse';
-import { BROKER_STEPS, REMINDER_SETTING_VARIABLES, type ReminderPorts, type ReminderSettings } from './reminder';
+import { BROKER_STEPS, FORM_STAGES, SIGNED_STAGES, REMINDED_STATUSES, REMINDER_SETTING_VARIABLES, type ReminderPorts, type ReminderSettings } from './reminder';
 import { CANCEL_REQUEST, CANCEL_WITHDRAWN, NOT_THEIRS, OPEN_CLAIM_STATUSES, THEIRS, type OpenClaim, type OpenClaimsPort, type ResumePorts } from './resume';
-import { REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
+import { FORM_REMINDER_EMAIL_TEMPLATE, REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 const OPT = 463630000;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -19,8 +19,11 @@ interface OpenClaimRow {
   riivo_claimtype: number | null;
   riivo_claimstatus: number;
   riivo_incidentdate: string | null;
+  createdon: string;
   riivo_lastclientmessageon: string | null;
   riivo_channel?: number | null;
+  _riivo_policy_value?: string | null;
+  riivo_description?: string | null;
 }
 
 /** riivo_claim.riivo_channel. */
@@ -34,18 +37,21 @@ export function openClaimsPort(dv: FollowOnDataverseOptions['dv']): OpenClaimsPo
     async openClaimsForClient(contactId): Promise<OpenClaim[]> {
       if (!GUID.test(contactId)) throw new Error(`Not a Dataverse id: ${contactId}`);
       const r = await dv<{ value: OpenClaimRow[] }>('GET',
-        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,riivo_lastclientmessageon,riivo_channel'
+        'riivo_claims?$select=riivo_claimid,riivo_name,riivo_claimtype,riivo_claimstatus,riivo_incidentdate,createdon,riivo_lastclientmessageon,riivo_channel,_riivo_policy_value,riivo_description'
         + `&$filter=_riivo_contact_value eq ${contactId} and statecode eq 0 and ${OPEN_STATUS_FILTER}&$orderby=riivo_incidentdate asc`);
       const disputed = await disputedClaims(dv, r.value.map((c) => c.riivo_claimid));
       return r.value.map((c) => ({
         id: c.riivo_claimid,
         reference: c.riivo_name,
         claimType: c.riivo_claimtype == null ? 'Other' : CLAIM_TYPE_VALUES[c.riivo_claimtype] ?? 'Other',
-        // A claim with no incident date sorts by when it was reported; resume.ts only uses the date to name the claim.
-        incidentAt: c.riivo_incidentdate ?? new Date(0).toISOString(),
+        // A claim with no incident date yet (TTTFG-5562: its form isn't back) goes by when it was opened; resume.ts only uses the date to name the claim.
+        incidentAt: c.riivo_incidentdate ?? c.createdon,
         status: CLAIM_STATUSES[c.riivo_claimstatus - OPT],
         lastClientMessageOn: c.riivo_lastclientmessageon ?? undefined,
         ...(c.riivo_channel === CLAIM_CHANNEL_EMAIL ? { channel: 'Email' as const } : {}),
+        ...(c._riivo_policy_value ? { policyId: c._riivo_policy_value } : {}),
+        ...(c.riivo_description ? { description: c.riivo_description } : {}),
+        ...(c.riivo_incidentdate ? {} : { noIncidentDate: true as const }),
         ...(disputed.has(c.riivo_claimid) ? { disputed: true as const } : {}),
         ...(disputed.get(c.riivo_claimid) === 'cancel' ? { cancelling: true as const } : {}),
       }));
@@ -104,7 +110,7 @@ export function lastReminderPort(dv: FollowOnDataverseOptions['dv']): Pick<Remin
     return r.value[0]?.createdon ?? null;
   };
   return {
-    lastReminderOn: (claimId) => lastNamed(claimId, REMINDER_TEMPLATE.name, REMINDER_EMAIL_TEMPLATE.name),
+    lastReminderOn: (claimId) => lastNamed(claimId, REMINDER_TEMPLATE.name, REMINDER_EMAIL_TEMPLATE.name, FORM_REMINDER_EMAIL_TEMPLATE.name),
     lastBrokerStepOn: (claimId, step) => lastNamed(claimId, BROKER_STEPS[step].name),
   };
 }
@@ -133,6 +139,16 @@ export async function reminderSettingsFromDataverse(dv: FollowOnDataverseOptions
     if (days > 0) out[setting] = days;
   }
   return out;
+}
+
+/** TTTFG-5212 AC 2: the clients with an email claim at a reminded status, each once. */
+export async function emailClaimClients(dv: FollowOnDataverseOptions['dv']): Promise<string[]> {
+  // The user (13 Nov 2026): FORM_STAGES too, for a form that went out and was never submitted (reminder.ts remindForm).
+  // and SIGNED_STAGES, for a signed claim whose client still owes something required (remindSigned).
+  const statuses = [...new Set([...REMINDED_STATUSES, ...FORM_STAGES, ...SIGNED_STAGES])].map((s) => `riivo_claimstatus eq ${OPT + CLAIM_STATUSES.indexOf(s)}`).join(' or ');
+  const r = await dv<{ value: { _riivo_contact_value: string | null }[] }>('GET',
+    `riivo_claims?$select=_riivo_contact_value&$filter=statecode eq 0 and riivo_channel eq ${CLAIM_CHANNEL_EMAIL} and (${statuses})`);
+  return [...new Set(r.value.map((c) => c._riivo_contact_value).filter((id): id is string => !!id))];
 }
 
 /** Everything remindTurn() needs, on Dataverse. */

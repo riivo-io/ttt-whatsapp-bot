@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
     ABANDONED_AFTER_MS, claimFromClient, claimFromUnknownNumber, claimsContactNumber, claimsConversation, type ClaimsHostDeps, type StoredWalkthrough,
 } from '../../src/domain/claimsHost';
-import { question, SAFETY_TEXT, type AgentActionRow, type ClaimPorts, type ClaimRow, type Outbound } from '../../src/departments/insurance/claim';
+import { question, type AgentActionRow, type ClaimPorts, type ClaimRow, type Outbound } from '../../src/departments/insurance/claim';
 import { missingFor, type Policy } from '../../src/departments/insurance/walkthrough';
 
 const PHONE = '+27821234567';
@@ -110,8 +110,9 @@ test('TTTFG-5168 checks 4 to 8 through Tina: a whole claim from first message to
     const say = (t: string) => claimFromClient(w.deps, PHONE, JANE, t, NOW);
     await say('I need to claim, my car was hit');
     await say('yes');
-    // TTTFG-4830 (28 Oct 2026): what to do if anyone is hurt is a line, not a question, and comes first.
-    assert.deepEqual(w.texts().slice(-2), [SAFETY_TEXT, 'What kind of claim is it?']);
+    // TTTFG-5299 (9 Nov 2026): no safety line and no emergency number any more: straight to the claim question.
+    assert.equal(w.texts().at(-1), 'What kind of claim is it?');
+    assert.doesNotMatch(w.texts().join('\n'), /10111|hurt or in danger/);
     await say('car accident');
     assert.match(w.texts().at(-1)!, /Tap \*Ready\* to begin\.$/);
     await say('ready');
@@ -190,7 +191,7 @@ test('TTTFG-4830 (28 Oct 2026): the opening is read before the walkthrough start
     assert.equal(w.reads.length, 1);
     assert.equal(w.reads[0].sentBefore, 0);
     assert.match(w.reads[0].user, /Someone broke into my house last night/);
-    assert.deepEqual(w.texts(), ['Is this claim about your Discovery Insure Household policy (DI-HOME)?']);
+    assert.deepEqual(w.texts(), ['That sounds like a claim on your Discovery Insure Household policy (DI-HOME). Is that right?']);
     const s = w.store.get(PHONE)!.state;
     assert.deepEqual(s.policies.map((p) => p.id), ['p-home']);
     assert.deepEqual(s.allPolicies?.map((p) => p.id), ['p-car', 'p-home'], 'the motor policy is kept, in case the client says no');
@@ -209,12 +210,12 @@ test('TTTFG-4830 (28 Oct 2026): an opening that says nothing about the claim off
     assert.equal(s.opening, undefined);
 });
 
-test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser list after the insurer\'s assist line; unset or blank, it is left out', async () => {
+test('TTTFG-5299 (9 Nov 2026): the burst-geyser list gives no number to call, whatever CLAIMS_CONTACT_NUMBER says', async () => {
     const HOME: Policy = { id: 'p-home', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Household', policyNumber: 'OM-1', assistNumber: '0860 111 222' };
     const GEYSER = 'My geyser burst this morning and water came through the bedroom ceiling';
-    const geyserList = async (raw: string | undefined, assistNumber = HOME.assistNumber) => {
+    const geyserList = async (raw: string | undefined) => {
         const w = world({
-            policies: [{ ...HOME, assistNumber }], contactNumber: claimsContactNumber(raw),
+            policies: [HOME], contactNumber: claimsContactNumber(raw),
             answers: [{ kind: 'facts', claimType: 'Property loss or damage', description: GEYSER }, { kind: 'yes' }],
         });
         await claimFromClient(w.deps, PHONE, JANE, GEYSER, NOW);
@@ -223,15 +224,7 @@ test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser l
         assert.match(list, /Turn off the water/);
         return list;
     };
-    assert.match(await geyserList(' 021 555 0100 '),
-        /\n\nNeed a plumber urgently\? Call Old Mutual Insure's assist line on 0860 111 222\. You can also call TTT on 021 555 0100\.\n\n/);
-    assert.match(await geyserList('021 555 0100', ''), /\n\nYou can also call TTT on 021 555 0100\.\n\n/);
-    for (const raw of [undefined, '', '   ']) {
-        const list = await geyserList(raw);
-        assert.match(list, /Call Old Mutual Insure's assist line on 0860 111 222\./);
-        assert.doesNotMatch(list, /call TTT/i);
-    }
-    assert.doesNotMatch(await geyserList(undefined, ''), /plumber urgently|call TTT/i);
+    for (const raw of [' 021 555 0100 ', undefined, '']) assert.doesNotMatch(await geyserList(raw), /plumber urgently|call TTT|0860 111 222|\bcall\b/i);
 });
 
 test('TTTFG-4830: CLAIMS_CONTACT_NUMBER is trimmed; unset or blank is no number (TTT chooses which number, so there is no default)', () => {
@@ -242,4 +235,17 @@ test('TTTFG-4830: CLAIMS_CONTACT_NUMBER is trimmed; unset or blank is no number 
     assert.deepEqual(claimsConversation(PHONE, 'req-1', 'https://ttt.example/signup'), { phone: PHONE, requestId: 'req-1', signUpLink: 'https://ttt.example/signup' });
     assert.deepEqual(claimsConversation(PHONE, 'req-1', 'https://ttt.example/signup', '021 555 0100'),
         { phone: PHONE, requestId: 'req-1', signUpLink: 'https://ttt.example/signup', contactNumber: '021 555 0100' });
+});
+
+test('service routing: force starts a claim without the claim check; wordFilter false asks Claude about any message', async () => {
+    const w = world({ isClaim: false });
+    assert.deepEqual(await claimFromClient(w.deps, PHONE, JANE, 'when does my policy renew', NOW), { handled: false });
+    assert.equal(w.intentCalls(), 0, 'no claim words: no model call, as before');
+    assert.deepEqual(await claimFromClient(w.deps, PHONE, JANE, 'when does my policy renew', NOW, { wordFilter: false }), { handled: false });
+    assert.equal(w.intentCalls(), 1, 'word filter off: Claude decides');
+
+    const forced = await claimFromClient(w.deps, PHONE, JANE, 'I want to report an insurance claim.', NOW, { force: true });
+    assert.equal(forced.handled, true);
+    assert.equal(w.intentCalls(), 1, 'force: no claim check');
+    assert.deepEqual(w.requests, ['I want to report an insurance claim.']);
 });

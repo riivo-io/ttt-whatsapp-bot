@@ -238,7 +238,7 @@ test('a callback the caller does not take is retried by the sweep, which also ex
     await createSigningRequest(w.deps, await w.input({ callerRecordId: 'claim-2' }));
     w.deps.post = async () => ({ ok: true, status: 200, text: '' });
     w.at(new Date(NOW.getTime() + 8 * 86_400_000));
-    assert.deepEqual(await sweepSigning(w.deps), { expired: 1, delivered: 1, failed: 0 });
+    assert.deepEqual(await sweepSigning(w.deps), { expired: 1, delivered: 1, failed: 0, purged: 0 });
     assert.equal(w.store.rows.get(created.id)!.callback_status, 'done');
 });
 
@@ -254,6 +254,56 @@ test('two sweeps at once send a callback once: the first takes the lease', async
     assert.equal(sent, 1);
     assert.equal(a.delivered + b.delivered, 1);
     assert.equal(w.store.rows.get(created.id)!.callback_status, 'done');
+});
+
+test('the sweep deletes closed links\' PDFs 30 days after expiry, keeps the row and its audit, and keeps an undelivered signed copy', async () => {
+    const w = world();
+    const day = 86_400_000;
+    const filesOf = (id: string) => [...w.store.files.keys()].filter((p) => p.startsWith(`${id}/`));
+    // Signed and delivered.
+    const signed = await createSigningRequest(w.deps, await w.input());
+    const s = await signRequest(w.deps, w.tokenOf(signed.link), { signature: pngSignature(), ip: '1.2.3.4', userAgent: null });
+    assert.ok(s.ok && (await s.delivery));
+    // Superseded by a newer link, which is never opened and expires.
+    const old = await createSigningRequest(w.deps, await w.input({ callerRecordId: 'claim-2' }));
+    w.at(new Date(NOW.getTime() + 1000));
+    const newer = await createSigningRequest(w.deps, await w.input({ callerRecordId: 'claim-2' }));
+    // Signed, but the caller never took the callback.
+    w.deps.post = async () => ({ ok: false, status: 503, text: '' });
+    const stuck = await createSigningRequest(w.deps, await w.input({ callerRecordId: 'claim-3' }));
+    const t = await signRequest(w.deps, w.tokenOf(stuck.link), { signature: pngSignature(), ip: null, userAgent: null });
+    assert.ok(t.ok && !(await t.delivery));
+    assert.equal(filesOf(signed.id).length, 2, 'the unsigned and the signed copy');
+
+    // 30 days after expiry, less a minute: nothing goes yet.
+    w.at(new Date(NOW.getTime() + (LINK_DAYS + 30) * day - 60_000));
+    assert.equal((await sweepSigning(w.deps)).purged, 0);
+    assert.equal(filesOf(signed.id).length, 2);
+
+    w.at(new Date(NOW.getTime() + (LINK_DAYS + 30) * day + 2000));
+    assert.equal((await sweepSigning(w.deps)).purged, 3);
+    for (const id of [signed.id, old.id, newer.id]) {
+        assert.deepEqual(filesOf(id), [], `${id}'s PDFs are deleted`);
+        assert.ok(w.store.rows.get(id)!.files_purged_at);
+    }
+    assert.equal(w.store.rows.get(signed.id)!.audit!.ip, '1.2.3.4', 'the row and its audit stay');
+    assert.deepEqual(await openSigningRequest(w.deps, w.tokenOf(signed.link)), { ok: false, reason: 'used' });
+    assert.equal(filesOf(stuck.id).length, 2, 'the only copy of an undelivered signed form is kept');
+    assert.equal(w.store.rows.get(stuck.id)!.files_purged_at, null);
+    // Once delivered, it goes too; a later sweep finds nothing more.
+    w.store.rows.get(stuck.id)!.callback_status = 'done';
+    assert.equal((await sweepSigning(w.deps)).purged, 1);
+    assert.deepEqual(filesOf(stuck.id), []);
+    assert.equal((await sweepSigning(w.deps)).purged, 0);
+});
+
+test('a purge that fails (say the migration is not run) does not fail the sweep', async () => {
+    const w = world();
+    w.store.filesToPurge = async () => { throw new Error('column signing_requests.files_purged_at does not exist'); };
+    const created = await createSigningRequest(w.deps, await w.input());
+    w.at(new Date(NOW.getTime() + 8 * 86_400_000));
+    assert.deepEqual(await sweepSigning(w.deps), { expired: 1, delivered: 0, failed: 0, purged: 0 });
+    assert.equal(w.store.rows.get(created.id)!.status, 'expired');
 });
 
 test('the stamped date and signature land where the stamps say; a date that does not fit is made smaller', async () => {

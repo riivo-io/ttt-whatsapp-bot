@@ -6,13 +6,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
+    batchQuietMs, BUSY, claimsDemoBatchCheck, claimsDemoReminder, claimsDemoTurn, claimsFormDone, demoContactFor, demoPhones, describedAsTheft, FILE_KEPT, helloText, parseDemoNumbers,
     filesQuietMs, optionalQuietMs, reminderDays, VOICE_PROBLEM, voiceHint, type ClaimsDemoDeps, type DemoConversation, type VoiceHeard,
 } from '../../src/domain/claimsDemoHost';
 import { claimsContactNumber } from '../../src/domain/claimsHost';
 import { SPOKEN_HELP } from '../../src/departments/insurance/walkthrough';
 
-import { SAFETY_TEXT, type AgentActionRow, type ClaimRow } from '../../src/departments/insurance/claim';
+import type { AgentActionRow, ClaimRow } from '../../src/departments/insurance/claim';
 import type { ClaimAnswers, QuestionItem } from '../../src/departments/insurance/contracts';
 import type { ClientFile, FollowOnClaim, StoredClaimForm } from '../../src/departments/insurance/followon';
 import { isOpenClaim, type OpenClaim, type ResumePorts } from '../../src/departments/insurance/resume';
@@ -83,7 +83,7 @@ function world(o: { isClaim?: boolean; rows?: Row[]; reported?: Record<string, u
             return { id, reference };
         },
         openClaimsForClient: async (contactId): Promise<OpenClaim[]> => rows.filter((r) => r.contactId === contactId && isOpenClaim(r.status))
-            .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt, status: r.status, lastClientMessageOn: r.lastClientMessageOn })),
+            .map((r) => ({ id: r.id, reference: r.reference, claimType: r.claimType, incidentAt: r.facts.incidentAt ?? '2026-11-02T08:00:00Z', status: r.status, lastClientMessageOn: r.lastClientMessageOn })),
         loadClaim: async (id) => structuredClone(row(id)),
         activeClaimForm: async (provider, type) => (provider === form.provider && type === form.claimType ? form : null),
         genericClaimForm: async () => GENERIC,
@@ -163,10 +163,10 @@ test('the whole claim: walkthrough, the questions, the photo, then the form to s
     for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
     assert.equal(outcome, 'opened');
     assert.equal(w.rows.length, 1);
-    // TTTFG-4830: what to gather at the scene went out once, after what to do if anyone is hurt, before what happened.
+    // TTTFG-4830: what to gather at the scene went out once, before what happened. TTTFG-5299: no safety line before it.
     const onScene = w.sent.filter((t) => t.startsWith("While you're still at the scene, try to get these. They make your claim easier:\n\n1. The other car's *registration number*"));
     assert.equal(onScene.length, 1);
-    assert.ok(w.sent.indexOf(onScene[0]) > w.sent.indexOf(SAFETY_TEXT));
+    assert.doesNotMatch(w.sent.join('\n'), /10111|hurt or in danger/);
     assert.ok(w.sent.indexOf(onScene[0]) < w.sent.findIndex((t) => /in your own words what happened|On what date/.test(t)));
     const opened = w.since().join('\n');
     assert.match(opened, /CLM-000001/); // the acknowledgement
@@ -212,7 +212,7 @@ test('TTTFG-4830 (28 Oct 2026): the report is read before the walkthrough starts
     assert.equal(reads[0].sentBefore, 0);
     assert.match(reads[0].user, /Someone drove into the back of my car at the Claremont robot/);
     // A car accident: only the motor policy is offered; the household one is kept in case the client says no.
-    assert.deepEqual(w.since(), ['Is this claim about your Discovery Insure Motor policy (DI-9)?']);
+    assert.deepEqual(w.since(), ['That sounds like a claim on your Discovery Insure Motor policy (DI-9). Is that right?']);
     const walk = w.store.get(PHONE)!.walk!;
     assert.deepEqual(walk.policies.map((p) => p.id), ['pol-car']);
     assert.deepEqual(walk.allPolicies?.map((p) => p.id), ['pol-home', 'pol-car']);
@@ -220,7 +220,7 @@ test('TTTFG-4830 (28 Oct 2026): the report is read before the walkthrough starts
     assert.equal(walk.facts.description, 'Someone drove into the back of my car at the Claremont robot');
 });
 
-test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser list; unset or blank, the list gives no TTT number', async () => {
+test('TTTFG-5299 (9 Nov 2026): the burst-geyser list gives no TTT number, whatever CLAIMS_CONTACT_NUMBER says', async () => {
     const HOME: Policy = { id: 'pol-home', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Household', policyNumber: 'OM-1', assistNumber: '' };
     const GEYSER = 'My geyser burst this morning and water came through the bedroom ceiling';
     const geyserList = async (raw: string | undefined) => {
@@ -236,8 +236,7 @@ test('TTTFG-4830 (28 Oct 2026): CLAIMS_CONTACT_NUMBER goes on the burst-geyser l
         assert.match(list, /Turn off the water/);
         return list;
     };
-    assert.match(await geyserList(' 021 555 0100 '), /\n\nYou can also call TTT on 021 555 0100\.\n\n/);
-    for (const raw of [undefined, '', '  ']) assert.doesNotMatch(await geyserList(raw), /call TTT|plumber urgently/i);
+    for (const raw of [' 021 555 0100 ', undefined, '', '  ']) assert.doesNotMatch(await geyserList(raw), /call TTT|plumber urgently/i);
 });
 
 test('a photo sent during the walkthrough is kept and filed when the claim opens', async () => {
@@ -426,11 +425,12 @@ test('TTTFG-4830: the end of the questions lists what the client still has to se
     assert.deepEqual(w.signatureCalls, ['claim-1']);
     assert.match(w.actions.at(-1)!.detail, /is ready to register with the insurer.*Still to come from the client: the photos of the damage/);
 
-    // 08:00 the next day. The link went out, so the claim is at Form sent: no reminder (TTTFG-5212 AC 8, only Awaiting
-    // client docs and Additional info requested). At Awaiting client docs it goes, as the approved template although
-    // the client wrote less than 24 hours ago (AC 2).
+    // 08:00 the next day. The link went out with the photos still to come, so the claim waits at Awaiting client docs
+    // (TTTFG-5212) and the reminder goes, as the approved template although the client wrote less than 24 hours ago
+    // (AC 2). At Form sent it would not (AC 8, only Awaiting client docs and Additional info requested).
     const morning = new Date('2026-10-24T06:00:00Z');
-    assert.equal(w.rows[0].status, 'Form sent');
+    assert.equal(w.rows[0].status, 'Awaiting client docs');
+    w.rows[0].status = 'Form sent';
     assert.deepEqual(await claimsDemoReminder(w.deps, PHONE, CONTACT, morning, { template: true }), [{ reference: 'CLM-000001', skipped: 'status' }]);
     w.rows[0].status = 'Awaiting client docs';
     const outcomes = await claimsDemoReminder(w.deps, PHONE, CONTACT, morning, { template: true });
@@ -702,4 +702,173 @@ test('TTTFG-4830 (QC, 28 Oct): "Can we not continue with this claim?" at the sum
     assert.equal(w.rows.length, 0);
     assert.equal(w.store.get(PHONE)?.walk, null);
     assert.deepEqual(w.store.get(PHONE)?.held, []); // the photo doesn't go to their next claim
+});
+
+// ---- TTTFG-5562: the guided form ----------------------------------------------------------------------------------
+
+function guidedWorld() {
+    const w = world();
+    const ports = w.deps.ports;
+    w.deps.ports = (r, sent) => ({ ...ports(r, sent), guidedFormLink: async () => ({ url: 'https://tina.example/claim-form/abc', firstName: 'Adriaan' }) });
+    w.deps.guidedForm = true;
+    return w;
+}
+async function openClaim(w: ReturnType<typeof world>) {
+    let t = DAY1;
+    await say(w, 'Someone drove into the back of my car at the Claremont robot', t);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    return t;
+}
+
+test('TTTFG-5562 AC 1: with the setting on, the link goes straight after the policy and the kind of claim: the form asks the rest', async () => {
+    const w = guidedWorld();
+    await openClaim(w);
+    const followOn = w.store.get(PHONE)?.resume.followOn;
+    assert.equal(followOn?.phase, 'form');
+    // The user (9 Nov 2026): the form and nothing else after the walkthrough: no reference, no AI notice, no offer to chat.
+    assert.equal(w.sent.at(-1), 'Fill out the form below to submit your claim.');
+    const all = w.sent.join('\n');
+    assert.doesNotMatch(all, /Your claim reference is/);
+    assert.doesNotMatch(all, /TTT uses AI tools/);
+    assert.doesNotMatch(all, /"chat"/);
+    assert.doesNotMatch(all, /all the facts that matter/);
+    assert.doesNotMatch(all, /Tap \*Ready\*/);
+    assert.doesNotMatch(all, /Please tell me in your own words/);
+    // The user (13 Nov 2026, agent #348): no Done row for the link going out; the claim and the conversation already say so.
+    assert.ok(!w.actions.some((a) => /Guided claim form link sent/.test(a.detail)));
+});
+
+test('TTTFG-5562: without the setting, the claim asks on WhatsApp as before', async () => {
+    const w = world();
+    await openClaim(w);
+    assert.notEqual(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.doesNotMatch(w.sent.join('\n'), /tap below to fill in your claim form/);
+});
+
+test('12 Nov 2026: a client who asks to chat gets a new link, never the questions: claims are filled on the form only', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    assert.equal(await say(w, "I'd rather just chat", tick(t, 1)), 'follow-on');
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.deepEqual(w.since(), ["Claims are filled in on the form, so here's a new link to it. Fill out the form below to submit your claim."]);
+    assert.equal(await say(w, "the link doesn't open", tick(t, 2)), 'follow-on');
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.match(w.since().join('\n'), /here's a new link/);
+});
+
+test('12 Nov 2026 (Netasha, DEV): a client with a claim open who reports a new one gets the form after the policy, not every question first', async () => {
+    const w = guidedWorld();
+    let t = await openClaim(w);
+    w.since();
+    // "My car windscreen cracked", read as a different incident: "Is this a new claim?", then yes.
+    w.replies.push({ differentIncident: true });
+    await say(w, 'My car windscreen cracked', (t = tick(t, 60)));
+    w.replies.push({ kind: 'value', yesNo: true, valueBool: true });
+    assert.equal(await say(w, 'yes', (t = tick(t, 1))), 'new-claim');
+    assert.equal(w.store.get(PHONE)?.walk?.guided, true);
+    let outcome = '';
+    for (let i = 0; i < 8 && outcome !== 'opened'; i++) outcome = await say(w, 'reply', (t = tick(t, 1)));
+    assert.equal(outcome, 'opened');
+    const said = w.since().join('\n');
+    assert.match(said, /Fill out the form below to submit your claim\.$/);
+    assert.doesNotMatch(said, /Tap \*Ready\*/);
+    assert.doesNotMatch(said, /what time did it happen/i);
+    assert.doesNotMatch(said, /Here's what I have/);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+});
+
+test('TTTFG-5562: any other message while the form is open gets a reminder of the link', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    w.replies.push({ decision: 'follow-on' });
+    await say(w, 'ok thanks', tick(t, 1));
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.match(w.since().join('\n'), /Your claim form is in the link I sent you/);
+});
+
+test('TTTFG-5562 AC 6: when the client submits, the claim carries on as a chat-answered one; a stale call changes nothing', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    const claimId = w.rows[0].id;
+    assert.equal(await claimsFormDone(w.deps, PHONE, claimId, tick(t, 1)), 'carried-on');
+    assert.notEqual(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.ok(w.since().length > 0);
+});
+
+test('TTTFG-5562: a form submitted after the conversation moved on tells the broker, so it is never simply left', async () => {
+    const w = guidedWorld();
+    const t = await openClaim(w);
+    w.since();
+    w.store.get(PHONE)!.resume = { followOn: null, pending: null };
+    assert.equal(await claimsFormDone(w.deps, PHONE, w.rows[0].id, tick(t, 1)), 'stale');
+    assert.deepEqual(w.since(), []);
+    assert.ok(w.actions.some((a) => a.kind === 'Follow-up' && /submitted the claim form/.test(a.detail)));
+});
+
+// ---- TTTFG-5299: roadside help on the demo numbers ----
+const ROADSIDE = { roadside: true, fromDamage: false, someoneHurt: false };
+const withRoadside = (w: ReturnType<typeof world>, route: Record<string, unknown> = ROADSIDE) => {
+    const roadsideRequests: string[] = [];
+    w.deps.roadsideModel = async () => route;
+    w.deps.openRoadsideRequest = async (_c, _p, text) => (roadsideRequests.push(text), 'req-roadside');
+    return roadsideRequests;
+};
+
+test('TTTFG-5299: a demo client who has broken down gets the insurer\'s number, and no claim opens', async () => {
+    const w = world({ isClaim: false });
+    const roadside = withRoadside(w);
+    assert.equal(await say(w, "I've broken down on the N1", DAY1), 'roadside');
+    const [reply] = w.since();
+    assert.match(reply, /Discovery Insure's roadside assist line on \*0860 333 444\*/);
+    assert.match(reply, /Discovery Insure will confirm what your policy includes when you call\./);
+    assert.deepEqual(roadside, ["I've broken down on the N1"]);
+    assert.deepEqual(w.requests, [], 'no claim request');
+    assert.equal(w.rows.length, 0);
+    assert.deepEqual(w.actions.map((a) => [a.kind, a.open, a.regarding.id]), [['Created', true, 'req-roadside']]);
+    assert.equal(w.store.get(PHONE)!.roadside ?? null, null, 'nothing left to ask');
+});
+
+test('TTTFG-5299: after an accident, yes starts the claim walkthrough on the same policy; the roadside state is kept between', async () => {
+    const OM: Policy = { id: 'pol-om', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Motor', policyNumber: 'OM-1', assistNumber: '0860 600 600' };
+    const w = world({ policies: [POLICY, OM] });
+    withRoadside(w, { roadside: true, fromDamage: true, someoneHurt: false });
+    assert.equal(await say(w, 'A taxi hit me and I need a tow', DAY1), 'roadside');
+    assert.deepEqual(w.since(), ['Which policy is this car on?']);
+    assert.equal(w.store.get(PHONE)!.roadside?.requestId, 'req-roadside');
+    assert.equal(await say(w, '2', tick(DAY1, 1)), 'roadside');
+    const [number, offer] = w.since();
+    assert.match(number, /0860 600 600/);
+    assert.equal(offer, "Once you're safe, would you like me to start a claim for the damage?");
+    assert.equal(await say(w, 'Yes', tick(DAY1, 2)), 'started');
+    assert.deepEqual(w.requests, ['A taxi hit me and I need a tow']);
+    const kept = w.store.get(PHONE)!;
+    assert.equal(kept.roadside ?? null, null);
+    assert.equal(kept.walk?.policyId, 'pol-om');
+    assert.doesNotMatch(w.since().join('\n'), /Which policy|Is this claim about/);
+});
+
+test('TTTFG-5299: roadside off (no model): a breakdown is read as anything else, and no roadside request opens', async () => {
+    const w = world({ isClaim: false });
+    assert.equal(await say(w, "I've broken down on the N1", DAY1), 'hello');
+});
+
+test('TTTFG-5299 (code review): an answer to an open claim\'s question is never read as roadside', async () => {
+    const w = world({ isClaim: false });
+    let roadsideCalls = 0;
+    w.deps.roadsideModel = async () => (roadsideCalls++, ROADSIDE);
+    w.deps.openRoadsideRequest = async () => 'req-roadside';
+    await w.deps.save(PHONE, {
+        contactId: CONTACT, requestId: 'req-1', walk: null, held: [], lastSent: 'Where is the vehicle now?',
+        resume: { followOn: { claimId: 'claim-1', phase: 'items', asking: 'vehicleWhere', misses: 0 } as never, pending: null },
+    });
+    // The message goes on to be read against the claim (this world holds no claim row, so that part may throw here):
+    // the point is that roadside never saw it.
+    const out = await say(w, "It's stuck at the tow yard in Epping", DAY1).catch(() => 'read against the claim');
+    assert.notEqual(out, 'roadside');
+    assert.equal(roadsideCalls, 0);
 });

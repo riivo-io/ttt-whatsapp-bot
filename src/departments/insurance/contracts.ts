@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit f5fd929). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 16fd232). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -113,6 +113,11 @@ export const QuestionItemSchema = z.object({
    * worked out again when an amount or the items change; asked as usual when an amount is missing.
    */
   sumOf: z.string().min(1).optional(),
+  /**
+   * TTTFG-5562: asked on the guided form only. Tina doesn't ask it on WhatsApp, and it stays off the summary sheet unless
+   * the client answered it. The generic list's general questions: on chat the walkthrough covers what happened.
+   */
+  formOnly: z.boolean().optional(),
 });
 export type QuestionItem = z.infer<typeof QuestionItemSchema>;
 
@@ -168,6 +173,12 @@ export const FieldMapEntrySchema = z.object({
   source: FieldSourceSchema,
   format: z.enum(FORMATS).optional(),
   tickWhen: ScalarSchema.optional(),
+  /**
+   * A radio group or drop-down whose options aren't the answer's words: each answer word (Yes or No on a yes/no
+   * question, a choice) and the option of the box it selects. A box whose options are the words themselves needs none.
+   * An answer with no entry here leaves the box for the broker. pdfField targets only.
+   */
+  options: z.record(z.string().min(1), z.string().min(1)).optional(),
   charIndex: z.number().int().min(0).optional(),
   /**
    * More AcroForm text fields, in order, that the text continues into when it does not fit the target field: the
@@ -230,9 +241,12 @@ export interface AnswerRecord {
    * TTTFG-4830: where the value came from when it wasn't the reply to this question: `report`, what the client said
    * while reporting the claim (before the form's questions); `same-message`, a reply to another question that answered
    * this one too; `correction`, the client changed their earlier answer; `computed` (28 Oct 2026), worked out from
-   * other answers (`sumOf`). Absent: the client's reply to this question.
+   * other answers (`sumOf`); `form` (TTTFG-5562), the client's answer on the guided form; `email` (TTTFG-5188), what a
+   * client's email stated. Absent: the client's reply to this question.
    */
-  source?: 'report' | 'same-message' | 'correction' | 'computed';
+  source?: 'report' | 'same-message' | 'correction' | 'computed' | 'form' | 'email';
+  /** TTTFG-5188 AC 11: the email the answer came from (its internet message ID), when `source` is email. */
+  messageId?: string;
   /**
    * TTTFG-4830: the value doesn't look right (formats.ts: a phone number with too many digits, an email without "@",
    * an ID number that fails its check digit). Tina pointed it out and the client sent it again still that way, so it's
@@ -246,8 +260,10 @@ export type ClaimAnswers = Record<string, AnswerRecord>;
 /**
  * The seam TTTFG-5176 calls at the end of the conversation, once every item is in or passed over (TTTFG-5196 moved it
  * there from after the last form question). TTTFG-5192 fills and files the form, then calls the signing step
- * (TTTFG-5196). 'sent' moves the claim to Form sent; 'notAvailable' (no signing page yet) leaves the status alone, and
- * the closing line points at no link.
+ * (TTTFG-5196). 'sent' moves the claim to Form sent, unless the client still owes something (TTTFG-5212: it stays at
+ * Awaiting client docs, so the reminders go on); 'notAvailable' (no signing page yet) leaves the status to that same
+ * rule, and the closing line points at no link. 'signed' (the user, 9 Nov 2026): the client signed at the end of the
+ * guided form, so the filled form was signed with that signature and no link went; the signed callback sets the status.
  */
-export type SignatureResult = 'sent' | 'notAvailable';
+export type SignatureResult = 'sent' | 'notAvailable' | 'signed';
 export type RequestClaimSignature = (claimId: string) => Promise<SignatureResult>;
