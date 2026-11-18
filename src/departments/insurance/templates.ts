@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 533469b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit fb9b2c6). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -524,7 +524,8 @@ export interface StatusTemplate {
  * "Submitted to <insurer>, claim no. <number>" and TTTFG-5208's "<insurer> is now assessing it".
  * CRM values only, with no approval per message. On WhatsApp it is always the approved template: `meta` and `templateVersion`
  * are its key in the WhatsApp flow's template list (WhatsApp - Automated - Send Templated Message), and Meta must have it.
- * Meta refuses a body that ends with a variable, so the full stop after the number is the body's last word.
+ * Meta refuses a body that ends with a variable, so it ends with a closing line: the user added it when registering the template
+ * (18 Nov 2026), and the email says it too.
  */
 export const UNDER_REVIEW_NO_NUMBER_TEMPLATE: StatusTemplate = {
   name: 'Claim - under review (no number yet)',
@@ -550,9 +551,9 @@ export const UNDER_REVIEW_TEMPLATE: StatusTemplate = {
   meta: 'claim_under_review',
   templateVersion: 1,
   /** For Meta: {{1}} the insurer, {{2}} the insurer's claim number. */
-  whatsappBody: 'Your claim submitted to {{1}} is under review.\n\nYour claim number is: {{2}}.',
+  whatsappBody: 'Your claim submitted to {{1}} is under review.\n\nYour claim number is: {{2}}.\n\nWe will keep you updated on the status of your claim.',
   params: (v) => [v.insurer, v.number ?? ''],
-  render: (v) => `Your claim submitted to ${v.insurer} is under review.\n\nYour claim number is: ${v.number ?? ''}.`,
+  render: (v) => `Your claim submitted to ${v.insurer} is under review.\n\nYour claim number is: ${v.number ?? ''}.\n\nWe will keep you updated on the status of your claim.`,
   emailSubject: (v) => `Your claim ${v.reference} is under review`,
   withoutNumber: UNDER_REVIEW_NO_NUMBER_TEMPLATE,
 };
