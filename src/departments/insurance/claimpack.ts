@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 9b3e62c). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 5a5ddb7). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed (13 Nov 2026: whatever is still missing), the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -155,6 +155,12 @@ export interface PackContext {
   text: string;
   /** TTTFG-5204 AC 8: for an insurer that takes claims by email. The signed form, the summary and the evidence are its attachments. */
   insurerEmail?: InsurerEmail;
+  /**
+   * How the insurer's record said it takes claims when the pack was made. A pack with no `insurerEmail` goes through the
+   * portal; this is why, so My Day can tell the broker "no claims channel on the record" (a blank counts as a portal, see
+   * InsurerRoute) apart from "takes claims through its portal". Absent on items made before 18 Nov 2026.
+   */
+  route?: InsurerRoute;
 }
 
 export interface PackItemRow {
@@ -417,7 +423,7 @@ export function insurerEmailFor(claim: Pick<PackClaim, 'insurerRoute' | 'contact
 }
 
 export function packContext(
-  claim: Pick<PackClaim, 'id' | 'reference'>, c: Completeness, flags: ClaimFlag[], pack: BuiltPack, register?: PackContext['register'],
+  claim: Pick<PackClaim, 'id' | 'reference'> & Partial<Pick<PackClaim, 'insurerRoute'>>, c: Completeness, flags: ClaimFlag[], pack: BuiltPack, register?: PackContext['register'],
 ): PackContext {
   const missing = [...new Set(c.missing.map(itemName))];
   const text = [
@@ -436,6 +442,7 @@ export function packContext(
   return {
     kind: 'claim-pack', version: 1, claimId: claim.id, reference: claim.reference, score: c.score, missing, flags, ...(register ? { register } : {}),
     pack: { documentId: pack.documentId, fileName: pack.fileName, fileRef: pack.fileRef }, signedForm: pack.signedForm, evidence: pack.evidence, text,
+    ...(claim.insurerRoute ? { route: { channel: claim.insurerRoute.channel, claimsEmail: claim.insurerRoute.claimsEmail?.trim() || null } } : {}),
   };
 }
 
