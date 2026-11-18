@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 4caf865). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/claimpack.ts (commit 9b3e62c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5200: the claim pack. Once the client has signed (13 Nov 2026: whatever is still missing), the agent puts the claim
 // together for the broker: the signed form, a one-page summary and the evidence, with a completeness score.
@@ -31,7 +31,7 @@
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { DEPARTMENT, PACK_FOLLOW_UP, type AgentActionRow, type Owner } from './claim';
 import type { ClaimAnswers, ClaimForm, QuestionItem } from './contracts';
-import { formatText, type CrmValues } from './fill';
+import { formatText, formPicturesOf, type CrmValues } from './fill';
 import { CLAIM_TO_INSURER_TEMPLATE } from './templates';
 import { registerNotes, type ClaimStatus, type SignatureStatus } from './followon';
 import { applies, entryWord, evidenceIn, formItems, itemName, type ClaimFacts, type ReceivedEvidence } from './progress';
@@ -240,8 +240,9 @@ export interface PackEvidence {
   fileRef: string;
   receivedOn: string | null;
   /**
-   * Inside the pack PDF. Always false since 9 Nov 2026: every file goes as its own, and the Review item links it. Older
-   * items have it true for the evidence PDFs merged into their pack, which submit.ts doesn't attach a second time.
+   * Already in a file that goes, so submit.ts doesn't attach it a second time. Since 9 Nov 2026 every file goes as its own,
+   * and the Review item links it; older items have it true for the evidence PDFs merged into their pack. The user (18 Nov
+   * 2026): true for a drawing the client made that is in the signed form's sketch box (fill.ts formPicturesOf).
    */
   inPack: boolean;
 }
@@ -342,12 +343,14 @@ export const packFileName = (reference: string) => `Claim pack summary - ${clean
  */
 export async function buildPack(ports: ClaimPackPorts, claim: PackClaim): Promise<BuiltPack> {
   if (!claim.signedForm?.fileRef) throw new Error('there is no signed claim form on the claim');
-  await ports.readFile(claim.signedForm.fileRef);
+  // The user (18 Nov 2026): a drawing the fill put in the form's box (fill.ts formPicturesOf) is on the signed form, so it
+  // isn't sent again as its own file. One that came later, or that couldn't go on the form, is.
+  const onForm = new Set((await formPicturesOf(await ports.readFile(claim.signedForm.fileRef))).map((p) => p.fileRef));
   // As the checklist is: an entry of a repeating group is filed as `<key>.<n>`.
   const byItem = new Map(formItems(claim.form, claim.answers, claim.facts, claim.sapsRequired).map((q) => [q.key, q]));
   const evidence: PackEvidence[] = claim.documents.map((d) => {
     const item = byItem.get(d.itemKey);
-    return { name: item ? itemName(item) : d.itemKey, fileName: d.fileName, fileRef: d.fileRef, receivedOn: d.receivedOn, inPack: false };
+    return { name: item ? itemName(item) : d.itemKey, fileName: d.fileName, fileRef: d.fileRef, receivedOn: d.receivedOn, inPack: !!d.fileRef && onForm.has(d.fileRef) };
   });
   const bytes = await packSummary(claim, evidence);
   const fileName = packFileName(claim.reference);

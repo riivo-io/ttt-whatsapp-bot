@@ -250,6 +250,12 @@ export function claimFolders(ch: DemoChannels): { files: ClaimFileStore; forms: 
     };
     const folder = (to: { contactId: string; contactName: string; claimReference: string }) =>
         [contactFolderName(to.contactName, to.contactId), 'Claims', to.claimReference].map(encodeURIComponent).join('/');
+    /** A file in a claim folder by its link: the pack's evidence, and (the user, 18 Nov 2026) the drawing for the form's sketch box. */
+    const read = async (fileRef: string): Promise<Uint8Array> => {
+        const res = await ch.graph('GET', `/shares/${shareId(fileRef)}/driveItem/content`);
+        if (!res.ok) throw new Error(`SharePoint download: HTTP ${res.status}`);
+        return new Uint8Array(await res.arrayBuffer());
+    };
 
     return {
         files: {
@@ -267,6 +273,7 @@ export function claimFolders(ch: DemoChannels): { files: ClaimFileStore; forms: 
             },
         },
         forms: {
+            read,
             async save(to, fileName, bytes, replaces) {
                 const drive = await driveId();
                 let path = `/drives/${drive}/root:/${folder(to)}/${encodeURIComponent(cleanName(fileName))}:/content?@microsoft.graph.conflictBehavior=replace`;
@@ -354,14 +361,8 @@ export function demoClaimSigningStep(ch: DemoChannels, signing: DemoSigning, pho
  * folder and its Claim pack Review item in the claim owner's My Day. The pack reads the evidence back by its link.
  */
 export function demoClaimPack(ch: DemoChannels): (claimId: string) => Promise<PackOutcome> {
-    const files: ClaimPackFiles = {
-        save: claimFolders(ch).forms.save,
-        async read(fileRef) {
-            const res = await ch.graph('GET', `/shares/${shareId(fileRef)}/driveItem/content`);
-            if (!res.ok) throw new Error(`SharePoint download: HTTP ${res.status}`);
-            return new Uint8Array(await res.arrayBuffer());
-        },
-    };
+    const { save, read } = claimFolders(ch).forms;
+    const files: ClaimPackFiles = { save, read: read! };
     const ports = dataverseClaimPackPorts({ dv: ch.dv, files });
     return async (claimId) => {
         const out = await updateClaimPack(ports, claimId, new Date().toISOString());

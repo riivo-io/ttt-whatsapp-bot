@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill-dataverse.ts (commit 4caf865). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/fill-dataverse.ts (commit 9b3e62c). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5192: the fill's ports (signature-fill.ts ClaimFillPorts) against Dataverse, in the style of TTTFG-5176's
 // followon-dataverse.ts: the host passes its Dataverse call (`Dv`), where the filled form goes (the client's SharePoint
@@ -32,6 +32,8 @@ const guid = (id: string) => {
 /** Where the filled form goes. `replaces` is the fileRef of the claim's earlier unsigned form: overwrite that file. */
 export interface ClaimFormFiles {
   save(to: { contactId: string; contactName: string; claimReference: string }, fileName: string, bytes: Uint8Array, replaces?: string): Promise<{ fileRef: string }>;
+  /** The user (18 Nov 2026): a file in the claim folder by its link, for a drawing on the form. Absent: no drawings on forms. */
+  read?(fileRef: string): Promise<Uint8Array>;
 }
 
 export interface FillDataverseOptions {
@@ -163,6 +165,17 @@ export function dataverseFillPorts(o: FillDataverseOptions): ClaimFillPorts {
     },
 
     blankForm: (formUrl) => o.blankForm(formUrl),
+
+    ...(o.files.read ? {
+      async picture(claim: ClaimForFill, key: string) {
+        const r = await dv<{ value: { riivo_sharepointlink: string | null; riivo_originalfilename: string | null }[] }>('GET',
+          'riivo_clientdocuments?$select=riivo_sharepointlink,riivo_originalfilename&$top=1&$orderby=createdon desc'
+          + `&$filter=_riivo_claim_value eq ${guid(claim.id)} and riivo_claimitem eq '${key.replace(/'/g, "''")}' and statecode eq 0`);
+        const d = r.value[0];
+        if (!d?.riivo_sharepointlink) return null;
+        return { key, fileRef: d.riivo_sharepointlink, fileName: d.riivo_originalfilename ?? 'drawing', bytes: await o.files.read!(d.riivo_sharepointlink) };
+      },
+    } : {}),
 
     saveToClaimFolder: (claim, fileName, bytes, replaces) =>
       o.files.save({ contactId: claim.contactId, contactName: claim.contactName ?? 'Client', claimReference: claim.reference ?? claim.id }, fileName, bytes, replaces),
