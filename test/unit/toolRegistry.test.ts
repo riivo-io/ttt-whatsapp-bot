@@ -71,8 +71,6 @@ function fakeDynamics(overrides: FakeOverrides = {}): DynamicsPort {
         logInvoiceSentToContact: async () => ({ success: true }),
         // Staff read + lead-onboarding / LoE methods (slice 6).
         searchCaseByName: async () => [],
-        searchContactByIdNumber: async () => null,
-        linkPhoneToContact: async () => true,
         checkLoeAlreadyReceived: async () => ({ alreadyReceived: false }),
         uploadLoeFileToCrm: async () => ({ success: true }),
         writeLoeFieldsToLead: async () => ({ success: true, flagSet: true }),
@@ -294,11 +292,9 @@ test('deriveOfferedTools: leads get the client document/escalation Tools (slice 
     assert.deepStrictEqual(deriveOfferedTools(undefined, ['view_outstanding_invoices']), []);
 });
 
-test('deriveOfferedTools: unknown callers get only verify_identity (slice 6)', () => {
-    // The 'unknown' role added in slice 6 — verify_identity is the sole entry
-    // offered to a caller whose phone isn't in the system, regardless of keys.
-    assert.deepStrictEqual([...deriveOfferedTools('unknown', [])], ['verify_identity']);
-    assert.deepStrictEqual([...deriveOfferedTools('unknown', ['view_open_cases'])], ['verify_identity']);
+test('deriveOfferedTools: unknown callers are offered no Tool (TTTFG-5340)', () => {
+    assert.deepStrictEqual([...deriveOfferedTools('unknown', [])], []);
+    assert.deepStrictEqual([...deriveOfferedTools('unknown', ['view_open_cases'])], []);
 });
 
 test('deriveOfferedTools: the LoE trio gates on upload_letter_of_engagement (slice 6)', () => {
@@ -1629,7 +1625,7 @@ test('refer_friend: a failed CRM write returns the referral error', async () => 
 });
 
 // ===========================================================================
-// Slice 6 — staff read (get_case_by_name), LoE flow, and unknown verify_identity
+// Slice 6 — staff read (get_case_by_name) and LoE flow
 // ===========================================================================
 
 // ---- get_case_by_name -----------------------------------------------------
@@ -1652,48 +1648,14 @@ test('get_case_by_name: denied for staff lacking view_open_cases', async () => {
     assert.equal(await runTool('get_case_by_name', { case_name: 'x' }, ctx), DENIED);
 });
 
-// ---- verify_identity (unknown caller, no contactId) -----------------------
+// ---- TTTFG-5340: the ID-number lookup is gone ------------------------------
 
-function unknownCtx(overrides: FakeOverrides = {}, ctxOverrides: Partial<ToolContext> = {}): ToolContext {
-    return buildCtx({
-        entityType: 'unknown',
-        contactId: null,
-        phoneNumber: '+27820009999',
-        ...ctxOverrides,
-        deps: { dynamics: fakeDynamics(overrides) },
-    });
-}
-
-test('verify_identity: found — links the phone and returns the welcome payload', async () => {
-    let linked: { id: string; phone: string } | null = null;
-    const ctx = unknownCtx({
-        searchContactByIdNumber: async () => ({ contactid: 'c-7', fullname: 'Thandi Client' }),
-        linkPhoneToContact: async (id, phone) => { linked = { id, phone }; return true; },
-    });
-    const payload = JSON.parse(await runTool('verify_identity', { id_number: '8001015009087' }, ctx));
-    assert.equal(payload.status, 'found');
-    assert.equal(payload.contactid, 'c-7');
-    assert.ok(payload.message.includes('Welcome back, Thandi Client'));
-    assert.deepStrictEqual(linked, { id: 'c-7', phone: '+27820009999' });
-});
-
-test('verify_identity: not found returns the consultant-will-be-in-touch payload', async () => {
-    const ctx = unknownCtx({ searchContactByIdNumber: async () => null });
-    const payload = JSON.parse(await runTool('verify_identity', { id_number: '0000000000000' }, ctx));
-    assert.equal(payload.status, 'not_found');
-    assert.ok(payload.message.includes('No account found with that ID number'));
-});
-
-test('verify_identity: runs for an unknown caller via runTool (no contactId, role-gated)', async () => {
-    // The whole point of slice 6: an unidentified caller (no contactId) still
-    // dispatches through runTool because the 'unknown' role allows it.
-    const ctx = unknownCtx({ searchContactByIdNumber: async () => null });
-    assert.equal(ctx.contactId, null);
-    const payload = JSON.parse(await runTool('verify_identity', { id_number: '1' }, ctx));
-    assert.equal(payload.status, 'not_found');
-    // And it's not offered to known roles.
-    const clientCtx = buildCtx({ entityType: 'client' });
-    assert.equal(await runTool('verify_identity', { id_number: '1' }, clientCtx), DENIED);
+test('verify_identity no longer exists: nobody can run it, and no Tool links a phone to a contact', async () => {
+    assert.equal(REGISTRY['verify_identity'], undefined);
+    await assert.rejects(runTool('verify_identity', { id_number: '8001015009087' }, buildCtx({ entityType: 'unknown' })));
+    const port = fakeDynamics() as unknown as Record<string, unknown>;
+    assert.equal(port.searchContactByIdNumber, undefined);
+    assert.equal(port.linkPhoneToContact, undefined);
 });
 
 // ---- LoE flow: upload_letter_of_engagement --------------------------------

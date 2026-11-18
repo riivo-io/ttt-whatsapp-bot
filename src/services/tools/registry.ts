@@ -20,7 +20,7 @@
 
 // Which entity types may be offered a Tool. Matches claude.service's entityType
 // space ('client' | 'lead' | 'user'); a caller whose phone isn't in the system
-// maps to 'unknown' (slice 6), the only role offered `verify_identity`.
+// maps to 'unknown', which no Tool offers (TTTFG-5340: Tina serves only numbers on the CRM).
 export type EntityType = 'client' | 'lead' | 'user' | 'unknown';
 
 /**
@@ -99,8 +99,6 @@ export interface DynamicsPort {
     logInvoiceSentToContact(contactId: string, invoiceNumber: string, triggeredBy: string): Promise<{ success: boolean; annotationId?: string; error?: string }>;
     // Staff read + lead-onboarding / LoE methods (slice 6).
     searchCaseByName(caseName: string): Promise<any[]>;
-    searchContactByIdNumber(idNumber: string): Promise<any | null>;
-    linkPhoneToContact(contactId: string, phoneNumber: string): Promise<boolean>;
     checkLoeAlreadyReceived(leadId: string): Promise<{ alreadyReceived: boolean; leadName?: string }>;
     uploadLoeFileToCrm(leadId: string, fileName: string, fileBuffer: Buffer, triggeredBy: string): Promise<{ success: boolean; error?: string }>;
     writeLoeFieldsToLead(
@@ -367,7 +365,7 @@ export function makeClientResolvers(deps: { dynamics: DynamicsPort }, ownerFilte
 }
 
 // The registry table is populated by the audience-grouped modules (clientTools,
-// staffTools, leadTools) calling `register`. Slice 1 wires only clientTools.
+// staffTools) calling `register`.
 export const REGISTRY: Record<string, ToolEntry> = {};
 
 export function register(entries: ToolEntry[]): void {

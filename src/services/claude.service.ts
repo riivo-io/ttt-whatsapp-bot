@@ -194,7 +194,7 @@ You provide accurate, helpful advice about South African tax matters and have ac
 // registry — the single source of truth (ADR 0003, final slice). Each registry
 // entry co-locates its name + description + input_schema, so there is no longer a
 // hand-maintained parallel array to keep in sync. Insertion order is the registry
-// build order (clientTools, then staffTools, then leadTools); the per-turn offered
+// build order (clientTools, then staffTools); the per-turn offered
 // list is filtered out of this by deriveOfferedTools, and the cache breakpoint
 // lands on whichever tool is last in the filtered set — both order-stable.
 const TOOLS: Anthropic.Tool[] = Object.values(REGISTRY).map(entry => ({
@@ -529,7 +529,12 @@ What NOT to do:
 
                 roleContext = `\n\n**User Role: TTT STAFF**\nThis is an internal TTT staff member. Treat them as a colleague. Staff ask on behalf of THEIR clients — if they say "my clients" or "my cases", they mean clients/cases they own as the consultant. Freely use the available tools for any reasonable staff request; do not second-guess whether they "should" have access — the available tools list has already been filtered to match their permissions.\n\nYour permitted capabilities for this user:\n${capabilityBullets || '(none)'}\n\nOnly decline if the user explicitly asks for a capability that is clearly NOT in the list above (e.g. they ask you to send an SMS when that's not a listed capability). In that case, politely tell them they don't have access to that specific feature and suggest contacting their administrator. Otherwise, just use the tools available to you.${taskInstructions}${isFirstMessage ? `\n\nIn your introduction, greet them as a colleague and list the capabilities above as bullet points. Do NOT mention any capability not in the list.` : ''}`;
             } else {
-                roleContext = `\n\n**User Role: UNKNOWN**\nThis person's phone number was not found in our system. Greet them warmly and ask them to provide their 13-digit South African ID number so you can look them up using verify_identity. If they can't be found by ID number, let them know a consultant will be in touch, or they can sign up at ${SIGNUP_URL}`;
+                // TTTFG-5340: an unknown number never reaches here (whatsappProcessor replies and returns first). If one ever did,
+                // Tina still serves only numbers on the CRM: no answer, no client data, no ID number.
+                roleContext = `
+
+**User Role: UNKNOWN**
+This person's phone number was not found in our system. Do not answer their question, share any client information or ask for an ID number. Say only that you can't find this number, that an existing TTT client should email us from the address we have on file, and that someone new can sign up at ${SIGNUP_URL}`;
             }
 
             // Bad-debt state guidance (PRD-bad-debt-collection.md §7). Injected
@@ -651,8 +656,7 @@ Rules for this state:
             // Tool registry (strangler migration): EVERY Tool is now a registry
             // entry — read-only client Tools (slices 1–2), staff lookup Tools
             // (slice 3), client document/action Tools (slice 4), staff write Tools
-            // (slice 5), and the staff read + LoE flow + unknown-caller
-            // verify_identity (slice 6). The offered list is therefore produced
+            // (slice 5), and the staff read + LoE flow (slice 6). The offered list is therefore produced
             // SOLELY by deriveOfferedTools per role; no separate inline arrays
             // remain. Filtering TOOLS by the set preserves the original
             // declaration order (TOOLS still supplies the Anthropic schemas until
@@ -678,8 +682,7 @@ Rules for this state:
                 // IRP5 — restrict it here, preserving the legacy state-gated offering.
                 if (!isStateBLead) offeredNames.delete('upload_irp5');
             } else {
-                // Unknown caller (phone not in the system) — only verify_identity,
-                // derived from the 'unknown' role.
+                // Unknown caller (phone not in the system): the 'unknown' role offers no Tool (TTTFG-5340).
                 deriveOfferedTools('unknown', permittedToolKeys).forEach(n => offeredNames.add(n));
             }
             let availableTools: typeof TOOLS | undefined = TOOLS.filter(t => offeredNames.has(t.name));
@@ -734,8 +737,7 @@ Rules for this state:
                 phoneNumber: phoneNumber ?? null,
                 sessionId: sessionId ?? null,
                 // A caller whose phone isn't in the system has no entityType — map
-                // it to the 'unknown' role so the registry gate/offer derivation
-                // covers verify_identity (slice 6) like every other role.
+                // it to the 'unknown' role, which the registry gate denies every Tool.
                 entityType: entityType ?? 'unknown',
                 userFullName: userFullName ?? null,
                 ownerFilter,
@@ -849,8 +851,7 @@ Rules for this state:
 
                     // Single dispatch site: every Tool is a registry entry, so
                     // runTool both gates (role + requiredPerm, via entryAllowed) and
-                    // runs the handler for every role — including the unknown-caller
-                    // verify_identity, which runs without a contactId. There is no
+                    // runs the handler for every role. There is no
                     // legacy if/else chain, no separate inline permission re-check,
                     // and no offered-list shadow: an unknown tool name is now a hard
                     // error inside runTool (ADR 0003, final slice).

@@ -27,8 +27,9 @@
       "task": "Remove verify_identity, linkPhoneToContact, searchContactByIdNumber and the ask-for-ID prompt, and update their tests",
       "owner": "agent",
       "reason": "code and tests in this repo (AC 2, 3)",
-      "done": false,
-      "area": "build"
+      "done": true,
+      "area": "build",
+      "verified_by": "agent"
     },
     {
       "task": "Replace the cold sign-up template with one fixed reply carrying the tax sign-up link, silent on repeats within 24 hours",

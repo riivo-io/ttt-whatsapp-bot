@@ -1572,32 +1572,6 @@ export class DynamicsService {
         }
     }
 
-    async searchContactByIdNumber(idNumber: string): Promise<any | null> {
-        return this.searchEntity(
-            'contacts',
-            `ttt_idnumber eq '${idNumber}' and statecode eq 0`,
-            ['contactid', 'fullname', 'mobilephone', 'emailaddress1']
-        );
-    }
-
-    async linkPhoneToContact(contactId: string, phoneNumber: string): Promise<boolean> {
-        try {
-            await this.crmPatch('contacts', `${this.baseUrl}/api/data/v9.2/contacts(${contactId})`, { 'mobilephone': phoneNumber }, phoneNumber);
-            console.log(`[Dynamics CRM] Linked phone ${phoneNumber} to contact ${contactId}`);
-            await supabaseService.logCrmWrite({
-                crmEntity: 'contacts',
-                crmRecordId: contactId,
-                action: 'update',
-                payload: { mobilephone: phoneNumber },
-                triggeredBy: phoneNumber,
-            });
-            return true;
-        } catch (error: any) {
-            console.error('[Dynamics CRM] Failed to link phone:', error?.response?.data?.error?.message || error.message);
-            return false;
-        }
-    }
-
     async logMessage(
         entity: any | null,
         messageContent: string,
