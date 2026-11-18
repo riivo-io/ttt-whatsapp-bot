@@ -3,7 +3,8 @@
  * in, and tapping wherever it can be tapped: options, sliders, dates and times to pick. A box only where the client has to
  * give a name or a number, and a recording only for their own words. A blank is an answer: it says they don't know. A step
  * doesn't scroll: the page measures the phone's screen and shows the questions that fit, and the rest are the next step. Only
- * the summary and a count of people's cards may scroll. It never waits: a step moves on at the tap, and the answers save behind
+ * the summary, a count of people's cards, and the list of photos and documents (it grows as photos go up, so it is never cut
+ * into pages) may scroll. It never waits: a step moves on at the tap, and the answers save behind
  * it, in order, trying again until they're in. The
  * token is read from the address and everything else comes from /claim-form/<token>/state, so the page's source holds
  * nothing about a client. The design follows the guided form in the claims demo, in TTT's blue with TTT's logo.
@@ -13,6 +14,7 @@
  */
 import type { LinkRefusal } from './links';
 import { TTT_BLUE, TTT_LOGO } from './logo';
+import { PHOTO_JS, UPLOAD_MAX_BYTES } from './photo';
 
 /** Scripts and styles from the page itself, the Geist font from Google, data only from itself, never framed. */
 export const CLAIM_FORM_CSP = [
@@ -172,6 +174,17 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .thumb img { width:100%; height:100%; object-fit:cover; display:block; border:0; border-radius:0; }
 .thumb .cover { position:absolute; inset:0; display:grid; place-items:center; background:rgba(11,15,20,.42); }
 .thumb.fail .cover { background:rgba(180,72,60,.85); color:#fff; font-size:11px; font-weight:500; }
+.tw { position:relative; display:inline-block; }
+.tx { position:absolute; top:-7px; right:-7px; z-index:1; width:24px; height:24px; border-radius:50%; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); font-size:14px; line-height:1; cursor:pointer; padding:0; box-shadow:0 1px 4px rgba(11,15,20,.18); }
+/* The sheet that takes photos: one tap for the camera, and a way to take another straight after. */
+.add-body { display:grid; gap:12px; }
+.add-body .help { margin:0; }
+.add-body .thumbs { padding-top:4px; }
+.add-state { margin:0; font-size:13.5px; color:var(--muted); display:flex; align-items:center; min-height:20px; }
+.add-state.bad { color:var(--rec); }
+.add-btns { display:grid; gap:10px; }
+.add-btns button { min-height:50px; border-radius:12px; font-weight:500; font-size:15px; cursor:pointer; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); }
+.add-btns button.go { border-color:var(--accent); background:var(--accent); color:#fff; }
 .spin { width:22px; height:22px; border-radius:50%; border:2.5px solid rgba(255,255,255,.4); border-top-color:#fff; animation:spin .7s linear infinite; }
 .spin.dark { border-color:var(--line-strong); border-top-color:var(--accent); width:14px; height:14px; border-width:2px; display:inline-block; vertical-align:-2px; margin-right:6px; }
 .foot .spin { width:15px; height:15px; border-width:2px; display:inline-block; vertical-align:-2px; margin-right:8px; }
@@ -241,6 +254,8 @@ const SCRIPT = String.raw`
   var base = location.pathname.replace(/\/$/, '');
   var $ = function (id) { return document.getElementById(id); };
   var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var UPLOAD_MAX = ${UPLOAD_MAX_BYTES};
+  ${PHOTO_JS}
   var ICON_OK = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
   var ICON_CAM = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
   var ICON_MIC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
@@ -731,21 +746,30 @@ const SCRIPT = String.raw`
         return '<div class="q" style="padding:10px 0"><label class="ql" for="f-' + q(d.key) + '">' + esc(d.label) + '</label><input class="inp" type="' + type + '" autocomplete="off" id="f-' + q(d.key) + '" data-bind="' + q(d.key) + '" value="' + esc(v) + '">' + err(d.key) + '</div>';
       }).join('') + '</div>';
   }
+  /** Being got ready (a photo is made small and upright first) or on its way. */
+  function busyUp(u) { return u.state === 'prep' || u.state === 'up'; }
   function thumbHtml(u) {
-    var inner = u.url ? '<img src="' + u.url + '" alt="">' : esc((u.name.split('.').pop() || 'file').toUpperCase());
-    if (u.state === 'up') return '<div class="thumb" role="status" aria-label="Uploading">' + inner + '<div class="cover"><div class="spin"></div></div></div>';
-    if (u.state === 'fail') return '<button type="button" class="thumb fail" data-retry="' + u.id + '" aria-label="Try that upload again">' + inner + '<div class="cover">Retry</div></button>';
+    var inner = u.url ? '<img src="' + u.url + '" alt="">' : esc((u.name.split('.').pop() || 'file').toUpperCase().slice(0, 5));
+    if (busyUp(u)) return '<div class="thumb" role="status" aria-label="Uploading">' + inner + '<div class="cover"><div class="spin"></div></div></div>';
+    if (u.state === 'fail') {
+      // A file that was too big, or that Tina won't take, can't be tried again: it can only be taken off.
+      var again = !u.final && !!u.body;
+      return '<div class="tw"><button type="button" class="thumb fail" ' + (again ? 'data-retry="' + u.id + '" aria-label="Try that upload again"' : 'data-drop="' + u.id + '" aria-label="Remove that file"') + '>' + inner + '<div class="cover">' + (again ? 'Retry' : 'Remove') + '</div></button>'
+        + (again ? '<button type="button" class="tx" data-drop="' + u.id + '" aria-label="Remove that file">×</button>' : '') + '</div>';
+    }
     return '<div class="thumb">' + inner + '</div>';
   }
   function upHtml(e) {
-    var key = e.key, count = key ? e.count : extra, id = 'up-' + (key || 'other'), accept = e.kind === 'video' ? 'video/*' : 'image/*,application/pdf';
-    var mine = uploads.filter(function (u) { return u.key === key; }), going = mine.filter(function (u) { return u.state === 'up'; }).length;
+    var key = e.key, count = key ? e.count : extra, id = 'up-' + (key || 'other');
+    var mine = uploads.filter(function (u) { return u.key === key; }), going = mine.filter(busyUp).length, failed = mine.filter(function (u) { return u.state === 'fail'; }).length;
     var need = e.required && !count && !going;
     // The user (16 Nov 2026): no "Required" pill, and no badge for a quote (TTT gets those). A file still to come is only said
     // to be needed: it never holds up signing, and the client is reminded.
-    var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : count ? count + ' added' : need ? 'We need this for your claim. No problem if you don\'t have it now: you can add it later.' : 'Not added yet';
+    var note = going ? '<span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') : failed ? 'A file did not upload. Tap it to try again.' : count ? count + ' added' : need ? 'We need this for your claim. No problem if you don\'t have it now: you can add it later.' : 'Not added yet';
+    // The button opens the sheet that takes photos (addSheet). The file inputs are not in the step: a step is drawn again whenever
+    // an upload finishes, and a photo that came back from the camera to an input that had been drawn away was lost.
     return '<div class="up' + (need ? ' need' : '') + '" data-q="' + q(id) + '"><div class="ic' + (count ? ' ok' : '') + '">' + (count ? ICON_OK : ICON_CAM) + '</div><div><b>' + esc(e.prompt) + '</b>' + (e.help ? '<span class="eg">' + esc(e.help) + '</span>' : '') + '<small id="st-' + q(id) + '">' + note + '</small></div>'
-      + '<div class="up-acts">' + (e.draw ? '<button type="button" class="addb draw" data-draw="' + q(key) + '">Draw</button>' : '') + '<label class="addb" for="' + q(id) + '">' + (e.draw ? 'Photo' : 'Add') + '</label></div><input class="sr" type="file" id="' + q(id) + '" data-up="' + q(key) + '" accept="' + accept + '" multiple>'
+      + '<div class="up-acts">' + (e.draw ? '<button type="button" class="addb draw" data-draw="' + q(key) + '">Draw</button>' : '') + '<button type="button" class="addb" data-add="' + q(key) + '">' + (e.draw ? 'Photo' : 'Add') + '</button></div>'
       + (mine.length ? '<div class="thumbs">' + mine.map(thumbHtml).join('') + '</div>' : '') + '</div>';
   }
   function shown(f, v) {
@@ -763,7 +787,7 @@ const SCRIPT = String.raw`
   }
   /** The required photos and documents still to add (one being uploaded counts). */
   function missingUploads() {
-    return V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && (u.state === 'up' || u.state === 'ok'); }); });
+    return V.evidence.filter(function (e) { return shows(e) && e.required && !e.count && !uploads.some(function (u) { return u.key === e.key && (busyUp(u) || u.state === 'ok'); }); });
   }
   var ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
   /** items: { text, jump } where jump is 'f:<question key>' or 'e:<photo or document key>': a tap goes to it. */
@@ -805,8 +829,10 @@ const SCRIPT = String.raw`
       });
       html += '<div class="q"><div class="head"><div class="ql">' + esc(s.title) + '</div><button type="button" class="link" data-go="' + i + '">Change</button></div><div class="card">' + rows + '</div></div>';
     });
-    var count = V.evidence.reduce(function (n, e) { return n + (shows(e) ? e.count : 0); }, 0) + extra + uploads.filter(function (u) { return u.state === 'up'; }).length;
-    html += '<div class="q"><div class="head"><div class="ql">Photos and documents</div><button type="button" class="link" data-go="photos">Change</button></div><div class="card"><div class="kv fixed"><span>Added</span><b>' + count + '</b></div></div></div>';
+    var count = V.evidence.reduce(function (n, e) { return n + (shows(e) ? e.count : 0); }, 0) + extra + uploads.filter(busyUp).length;
+    var lostFiles = uploads.filter(function (u) { return u.state === 'fail'; }).length;
+    html += '<div class="q"><div class="head"><div class="ql">Photos and documents</div><button type="button" class="link" data-go="photos">Change</button></div><div class="card"><div class="kv fixed"><span>Added</span><b>' + count + '</b></div>'
+      + (lostFiles ? '<div class="kv fixed"><span>Not uploaded yet</span><b>' + lostFiles + '</b></div>' : '') + '</div></div>';
     return html + err('submit');
   }
 
@@ -815,14 +841,23 @@ const SCRIPT = String.raw`
   function signHtml() {
     return '<p class="help">Draw your signature in the box with your finger. By signing, you confirm that your answers are true and complete, as far as you know, and that this signature goes on your claim form for ' + esc(V.insurer) + '.</p>'
       + '<div class="sign-pad"><canvas id="signPad" aria-label="Signature pad"></canvas><div class="line"></div></div>'
-      + '<div class="sign-acts"><button type="button" class="link" id="signClear">Clear</button></div>' + err('sign');
+      // Whatever goes wrong on this step says so here (the 'submit' message is the review step's, and this step has no other
+      // place to show it): a tap that changes nothing on screen reads as a button that doesn't work.
+      + '<div class="sign-acts"><button type="button" class="link" id="signClear">Clear</button></div>' + err('sign') + err('submit');
   }
+  /**
+   * The drawing as it was when the pen last lifted. Any redraw of this step (a message after a failed Submit, the phone's
+   * address bar moving) starts the pad again, and the client's signature must survive it: they signed once, and Confirm
+   * is one tap away from trying again.
+   */
+  var inkKept = null;
   function startPad() {
     var pad = $('signPad'), ctx = pad.getContext('2d'), drawing = false, last = null, r = window.devicePixelRatio || 1;
     pad.width = pad.clientWidth * r; pad.height = pad.clientHeight * r;
+    inked = false;
+    if (inkKept) { ctx.drawImage(inkKept, 0, 0, pad.width, pad.height); inked = true; }
     ctx.setTransform(r, 0, 0, r, 0, 0);
     ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#13213f';
-    inked = false;
     var at = function (e) { var b = pad.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
     pad.addEventListener('pointerdown', function (e) { drawing = true; last = at(e); pad.setPointerCapture(e.pointerId); e.preventDefault(); });
     pad.addEventListener('pointermove', function (e) {
@@ -831,8 +866,13 @@ const SCRIPT = String.raw`
       ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
       last = p; inked = true; e.preventDefault();
     });
-    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) { pad.addEventListener(t, function () { drawing = false; }); });
-    $('signClear').addEventListener('click', function () { ctx.clearRect(0, 0, pad.width, pad.height); inked = false; });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) {
+      pad.addEventListener(t, function () {
+        if (drawing && inked) { inkKept = document.createElement('canvas'); inkKept.width = pad.width; inkKept.height = pad.height; inkKept.getContext('2d').drawImage(pad, 0, 0); }
+        drawing = false;
+      });
+    });
+    $('signClear').addEventListener('click', function () { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, pad.width, pad.height); ctx.restore(); inked = false; inkKept = null; });
   }
   /** The signature as a PNG cut to the ink, as the signing page makes it, so it fills the box on the form. */
   function signature() {
@@ -854,6 +894,8 @@ const SCRIPT = String.raw`
     var body = $('body');
     var steps = route(), i = stepIndex(steps), step = steps[i], anchor = here && here.anchor;
     here = { id: step.id, i: step.i, anchor: anchor };
+    // A signature belongs to the answers it was drawn under: back to a question and on again, the client signs again.
+    if (step.id !== 'sign') inkKept = null;
     $('sec').textContent = step.id === 'details' ? 'Are these details still right?' : step.id === 'photos' ? 'Add your photos and documents' : step.id === 'review' ? 'Check your claim' : step.id === 'sign' ? 'Sign your claim' : V.screens[step.i].title;
     $('back').hidden = i === 0;
     // The height to fit is the page without the phone's keyboard open.
@@ -862,7 +904,17 @@ const SCRIPT = String.raw`
     var again = drawnAt && sameStep(drawnAt, here) && drawnAt.anchor === here.anchor, top = again ? body.scrollTop : 0;
     var part = 0;
     page = []; morePages = false;
-    if (step.id === 'screen' || step.id === 'photos') {
+    if (step.id === 'photos') {
+      // The user (18 Nov 2026): the drawing of the accident only showed once something on this step changed. The rows' heights
+      // change as photos go up (a row says "We need this..." and then shows thumbnails), so a step that shows only what fits
+      // moved a row onto a second page, and brought it back a second or two later. Photos and documents are a list that grows:
+      // all of it is here from the start, and it scrolls. A jump from the summary scrolls to its row.
+      var rows = visibleBlocks(step);
+      body.innerHTML = stepHtml(step, rows);
+      page = rows; morePages = false;
+      var row = anchor && !again ? body.querySelector('[data-q="up-' + (anchor === '__other' ? 'other' : String(anchor).replace(/"/g, '')) + '"]') : null;
+      if (row) top = row.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop - 8;
+    } else if (step.id === 'screen') {
       var all = visibleBlocks(step), from = 0;
       all.forEach(function (b, x) { if (b.key === anchor) from = x; });
       var rest = all.slice(from), n = fit(step, rest);
@@ -917,7 +969,7 @@ const SCRIPT = String.raw`
   }
   // ---- saving behind the page: in order, one at a time, trying again until it's in ---------------------------------------
   var queue = [], sending = false, failures = 0, refused = 0, lost = false, problems = {}, waiters = [], submitting = false;
-  function idle() { return !queue.length && !sending && !hearing && !uploads.some(function (u) { return u.state === 'up'; }); }
+  function idle() { return !queue.length && !sending && !hearing && !uploads.some(busyUp); }
   function whenIdle(fn) { if (idle()) return fn(); waiters.push(fn); }
   function checkIdle() { if (!idle()) return; var w = waiters; waiters = []; w.forEach(function (f) { f(); }); }
   /** What this save says, on what the page holds, so the page is right before the server has answered. */
@@ -999,7 +1051,7 @@ const SCRIPT = String.raw`
     if (r.open && !r.open.every(holdsKey)) api('/state').then(function (s) { adopt(s); queue.forEach(overlay); if (!typing() && !sheetOpen()) render(); }).catch(function () {});
     if (redraw && !typing() && !sheetOpen()) render();
   }
-  function sheetOpen() { return !!(rec || hearing || wheel || picking || listSheet || drawing || !$('terms').hidden); }
+  function sheetOpen() { return !!(rec || hearing || wheel || picking || listSheet || drawing !== null || adding !== null || !$('terms').hidden); }
   function labelFor(key) {
     var d = V.details.filter(function (x) { return x.key === key; })[0];
     if (d) return d.label + ':';
@@ -1011,6 +1063,7 @@ const SCRIPT = String.raw`
     if (finished) return;
     var el = $('notice'), html = '', keys = Object.keys(problems).filter(function (k) { return !onPage(k); });
     if (lost) html = '<span>Some answers could not be saved. Please go back and check them, or ask Tina for help.</span>';
+    else if (camLost) html = '<span>Your phone closed this page while the camera was open, so that photo did not come through. Please take it again.</span><button type="button" data-camok>OK</button>';
     else if (failures >= 2) html = '<span>No connection. Your answers are safe here and save when you\'re back online.</span>';
     else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]]) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
     el.innerHTML = html;
@@ -1031,12 +1084,12 @@ const SCRIPT = String.raw`
     here = { id: t.id, i: t.i, anchor: null };
     errors = {};
     // Going back lands on the last page of that step.
-    if (by < 0 && (t.id === 'screen' || t.id === 'photos')) here.anchor = pageStarts(t).pop() || null;
+    if (by < 0 && t.id === 'screen') here.anchor = pageStarts(t).pop() || null;
     render();
   }
   function back() {
     if (finished || busy || rec || hearing) return;
-    if ((here.id === 'screen' || here.id === 'photos') && here.anchor) {
+    if (here.id === 'screen' && here.anchor) {
       var earlier = pageStarts(here, here.anchor);
       if (earlier.length) { here.anchor = earlier.pop(); errors = {}; return render(); }
     }
@@ -1108,19 +1161,32 @@ const SCRIPT = String.raw`
   function submit(sig) {
     if (V.sign && !sig) { errors = { sign: 'Please sign in the box first.' }; return render(); }
     busy = true; submitting = true; $('next').disabled = true;
-    $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(function (u) { return u.state === 'up'; }) ? 'Uploading your photos…' : 'Submitting…');
+    $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(busyUp) ? 'Uploading your photos…' : 'Submitting…');
+    // Submitting can take a while (an email claim's form is filled and signed before the server answers), so the button
+    // says it is still working rather than looking stuck.
+    var slow = setTimeout(function () { if (submitting) $('next').innerHTML = '<span class="spin"></span>Still working. Please keep this page open…'; }, 15000);
     whenIdle(function () {
+      // A photo that never got in is not left behind quietly: the client sees it, and tries it again or takes it off.
+      if (uploads.some(function (u) { return u.state === 'fail'; })) {
+        clearTimeout(slow);
+        busy = false; submitting = false;
+        errors = { photos: 'A photo or file did not upload. Tap it to try again, or tap × to take it off, then carry on.' };
+        here = { id: 'photos', anchor: null };
+        return render();
+      }
       // A problem on a question that no longer shows (the second person's phone, after the count went back to one) has
-      // nothing to fix: the server dropped that answer. Kept, it would send the client to that step on every Submit.
+      // nothing to fix: the server dropped that answer. Kept, it would send the client to that step on every Submit. Nor has
+      // one on a key that is no question and no detail of ours: there is nowhere to send the client.
       Object.keys(problems).forEach(function (k) {
-        var f = FIELD[k];
-        if (f && (f.hidden || !shows(f))) { delete problems[k]; delete errors[k]; }
+        var f = FIELD[k], onDetails = V.details.some(function (d) { return d.key === k; });
+        if ((f && (f.hidden || !shows(f))) || (!f && !onDetails)) { delete problems[k]; delete errors[k]; }
       });
       drawNotice();
       var open = Object.keys(problems);
-      if (open.length) { busy = false; submitting = false; goFix(open[0]); return; }
+      if (open.length) { clearTimeout(slow); busy = false; submitting = false; goFix(open[0]); return; }
       $('next').innerHTML = '<span class="spin"></span>Submitting…';
       post('/submit', sig ? { signature: sig } : {}).then(function (r) {
+        clearTimeout(slow);
         busy = false; submitting = false;
         // Nothing more to wait for: the same page the link now shows.
         finished = true;
@@ -1129,10 +1195,12 @@ const SCRIPT = String.raw`
         $('prog').style.width = '100%';
         $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Claim submitted</h1><p class="help">Thank you, we have your claim. ' + (V.sign ? 'Your claim form is signed and with your broker. A consultant from TTT will be in touch with you shortly.' : V.emailed ? 'We will email you with anything still needed and your form to sign.' : 'Tina will message you on WhatsApp with anything still needed and your form to sign.') + '</p></div>';
       }).catch(function (e) {
+        clearTimeout(slow);
         busy = false; submitting = false;
         if (e.message === 'gone') return;
         errors = sig ? { sign: (e.body && e.body.message) || 'No connection. Please try again.' } : { submit: (e.body && e.body.message) || 'No connection. Please try again.' };
-        if (sig && e.status === 400) inked = false;
+        // The server refused the signature itself: that drawing is not used again. Any other failure keeps it, and Confirm tries again.
+        if (sig && e.status === 400) { inked = false; inkKept = null; }
         render();
       });
     });
@@ -1218,53 +1286,227 @@ const SCRIPT = String.raw`
   }
 
   // ---- photos ------------------------------------------------------------------------------------------------------
-  var uploads = [], upSeq = 0, upActive = 0;
-  /** A picture to show at once, where the browser can show it. */
-  function previewOf(f) { return f.type && f.type.indexOf('image/') === 0 && f.type !== 'image/heic' && f.type !== 'image/heif' ? URL.createObjectURL(f) : null; }
-  function addUpload(key, file) {
-    uploads.push({ id: ++upSeq, key: key, file: file, name: file.name || 'file', url: previewOf(file), state: 'up', started: false });
-    pumpUploads();
+  // The user (18 Nov 2026): a photo taken for the form sometimes didn't go up. What the page does now, and why:
+  //  - The file inputs are not in the step (see upHtml): a step is drawn again whenever an upload finishes, and a photo that came
+  //    back from the camera to an input that had been drawn away was dropped without a word.
+  //  - A phone's photo is 4 to 10 MB, the wrong way up in the file (the phone turns it when it shows it), and its file may be
+  //    taken away again before the upload starts. So each photo is made into a small upright JPEG in the browser (the camera's
+  //    EXIF goes with it: the "photo date before incident" flag reads the capture date from the bytes Tina receives) and held in
+  //    memory. A PDF or a video is read into memory straight away.
+  //  - Each upload has an id, a time limit and three tries. A try that failed for a passing reason is repeated; one that can't
+  //    be helped (too big, not a photo) says so. Nothing is dropped: Submit waits for what's on its way, and stops at what
+  //    failed, so the client can try it again or take it off.
+  var uploads = [], upSeq = 0, upActive = 0, pendingKey = null, adding = null, camLost = false;
+  var MAX_TRIES = 3, SMALL_ENOUGH = 3000000;
+  var CAM_KEY = base + '#camera';
+  function isImage(f) { return /^image\//.test(f.type || '') || /\.(jpe?g|png|heic|heif|webp|gif|bmp)$/i.test(f.name || ''); }
+  function readBytes(blob) {
+    if (blob.arrayBuffer) return blob.arrayBuffer();
+    return new Promise(function (ok, no) { var r = new FileReader(); r.onload = function () { ok(r.result); }; r.onerror = function () { no(r.error || new Error('read')); }; r.readAsArrayBuffer(blob); });
+  }
+  /** The picture as the browser draws it: through an image, which every phone browser turns upright for its EXIF. */
+  function decode(file) {
+    return new Promise(function (ok, no) {
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () { ok({ w: img.naturalWidth, h: img.naturalHeight, src: img, done: function () { URL.revokeObjectURL(url); } }); };
+      img.onerror = function () { URL.revokeObjectURL(url); no(new Error('decode')); };
+      img.src = url;
+    });
+  }
+  /** The picture on a canvas whose long edge is at most "edge", turned upright by hand when the browser left it as stored. */
+  function paintTo(img, edge, turn, byHand) {
+    var sw = img.w, sh = img.h, upright = byHand && turn >= 5 ? [sh, sw] : [sw, sh], s = phScale(upright[0], upright[1], edge), k = s[0] / upright[0];
+    var c = document.createElement('canvas'), g;
+    c.width = s[0]; c.height = s[1];
+    g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    g.imageSmoothingQuality = 'high';
+    g.scale(k, k);
+    if (byHand && turn > 1) g.transform.apply(g, phMatrix(turn, sw, sh));
+    g.drawImage(img.src, 0, 0);
+    return c;
+  }
+  function toJpeg(canvas, quality) {
+    return new Promise(function (ok, no) {
+      canvas.toBlob(function (b) { canvas.width = canvas.height = 0; if (b) ok(b); else no(new Error('encode')); }, 'image/jpeg', quality);
+    });
+  }
+  /** A photo as a small upright JPEG with its own EXIF, and a thumbnail. Rejects when the browser can't read it. */
+  function shrink(file) {
+    return readBytes(file).then(function (buf) {
+      var src = new Uint8Array(buf), at = phExifRange(src), seg = at ? src.subarray(at[0], at[1]) : null, turn = seg ? phOrientation(seg) : 1, stored = phJpegSize(src);
+      return decode(file).then(function (img) {
+        // A browser that turned it upright reports a phone-held-upright photo (6 and 8) with its height as its width. One that
+        // reports it as stored left the turning to us.
+        var byHand = turn >= 5 && !!stored && img.w === stored[0] && img.h === stored[1];
+        var ladder = [[2400, 0.86], [2000, 0.8], [1600, 0.72], [1200, 0.65]], tried = 0;
+        var attempt = function () {
+          return toJpeg(paintTo(img, ladder[tried][0], turn, byHand), ladder[tried][1]).then(function (blob) {
+            if (blob.size > SMALL_ENOUGH && tried < ladder.length - 1) { tried++; return attempt(); }
+            return readBytes(blob);
+          });
+        };
+        return attempt().then(function (jpeg) {
+          var bytes = new Uint8Array(jpeg), out = seg ? phWithExif(bytes, phOrientationOne(seg)) : bytes;
+          return toJpeg(paintTo(img, 160, turn, byHand), 0.7).catch(function () { return null; }).then(function (thumb) {
+            img.done();
+            return { blob: new Blob([out], { type: 'image/jpeg' }), type: 'image/jpeg', thumb: thumb };
+          });
+        }, function (e) { img.done(); throw e; });
+      });
+    });
+  }
+  /** A file as it is (a PDF, a video), held in memory so a phone that takes the original away can't spoil a later try. */
+  function copyOf(file) {
+    if (file.size > UPLOAD_MAX) { var big = new Error('big'); big.big = true; return Promise.reject(big); }
+    return readBytes(file).then(function (buf) {
+      var type = file.type || (/\.pdf$/i.test(file.name || '') ? 'application/pdf' : '');
+      return { blob: new Blob([buf], { type: type }), type: type, thumb: null };
+    });
+  }
+  /** raw: keep it exactly (the finger drawing is a PNG already, and a few kB). */
+  function addFile(key, file, raw) {
+    var u = { id: ++upSeq, uid: phId(), key: key, name: file.name || 'file', url: null, state: 'prep', started: false, tries: 0, after: 0, body: null, type: '', final: false };
+    uploads.push(u);
+    delete errors.photos;
+    (raw || !isImage(file) ? copyOf(file) : shrink(file).catch(function () { return copyOf(file); })).then(function (p) {
+      u.body = p.blob; u.type = p.type;
+      u.url = p.thumb ? URL.createObjectURL(p.thumb) : p.type.indexOf('image/') === 0 && p.blob.size < SMALL_ENOUGH ? URL.createObjectURL(p.blob) : null;
+      u.state = 'up';
+      pumpUploads(); refresh();
+    }).catch(function (e) {
+      u.state = 'fail'; u.final = true;
+      errors.photos = e && e.big ? 'That file is too big (' + Math.round(UPLOAD_MAX / 1048576) + ' MB is the most). Please try a smaller one.' : 'That file could not be read. Please try it again.';
+      refresh(); checkIdle();
+    });
+    refresh();
+  }
+  /** Shows what the uploads are doing: in the sheet if it's open, else on the step. */
+  function refresh() {
+    if (adding !== null) drawAdd();
+    else if (here && here.id === 'photos' && !sheetOpen()) render();
   }
   function pumpUploads() {
     while (upActive < 2) {
-      var u = uploads.filter(function (x) { return x.state === 'up' && !x.started; })[0];
+      var now = Date.now(), u = uploads.filter(function (x) { return x.state === 'up' && !x.started && x.after <= now; })[0];
       if (!u) break;
       u.started = true; upActive++;
       sendUpload(u);
     }
+    // A try that is waiting out its pause is looked at again when the pause is over.
+    var waits = uploads.filter(function (x) { return x.state === 'up' && !x.started && x.after > Date.now(); }).map(function (x) { return x.after - Date.now(); });
+    if (waits.length) setTimeout(pumpUploads, Math.min.apply(null, waits) + 25);
   }
   function sendUpload(u) {
-    var finish = function (message) {
-      upActive--;
-      if (message === null) {
+    u.tries++;
+    var ctl = window.AbortController ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, phTimeout(u.body.size));
+    var settle = function (status, message) {
+      clearTimeout(timer);
+      upActive--; u.started = false;
+      if (status === 200) {
         u.state = 'ok';
         if (u.key) V.evidence.forEach(function (e) { if (e.key === u.key) e.count++; }); else extra++;
-      } else { u.state = 'fail'; errors.photos = message; }
-      if (here && here.id === 'photos' && !sheetOpen()) render();
-      pumpUploads();
-      checkIdle();
+      } else if (phRetryable(status) && u.tries < MAX_TRIES) {
+        // Still on its way: again in 2 s, then 8 s. The same id, so a try that did get through isn't added twice.
+        u.after = Date.now() + 2000 * u.tries * u.tries;
+      } else {
+        u.state = 'fail'; u.final = !phRetryable(status);
+        errors.photos = message || (status === 0 ? 'No connection. Tap the photo to try again.' : 'That file could not be added right now. Tap it to try again.');
+      }
+      refresh(); pumpUploads(); checkIdle();
     };
-    fetch(base + '/file' + (u.key ? '?item=' + encodeURIComponent(u.key) : ''), { method: 'POST', headers: { 'Content-Type': u.file.type || 'application/octet-stream' }, body: u.file })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (r) { finish(r.ok ? null : r.j.message || 'That file couldn\'t be added. Tap it to try again.'); })
-      .catch(function () { finish('No connection. Tap the photo to try again.'); });
+    fetch(base + '/file' + (u.key ? '?item=' + encodeURIComponent(u.key) : ''), { method: 'POST', headers: { 'Content-Type': u.type || 'application/octet-stream', 'X-Upload-Id': u.uid }, body: u.body, signal: ctl ? ctl.signal : undefined })
+      .then(function (r) {
+        // The link has ended: the page the link shows now says why.
+        if (r.status === 410 || r.status === 404) { location.reload(); return null; }
+        return r.json().catch(function () { return {}; }).then(function (j) { settle(r.ok ? 200 : r.status, r.ok ? null : j.message); });
+      })
+      .catch(function () { settle(0, null); });
   }
-  function upload(input) {
-    var key = input.dataset.up, files = [].slice.call(input.files || []);
-    if (!files.length) return;
-    delete errors.photos;
-    files.forEach(function (f) { addUpload(key, f); });
+  /** A tap on a thumbnail that failed: try again, or take it off. */
+  function thumbTap(e) {
+    var rt = e.target.closest('[data-retry]'), dr = e.target.closest('[data-drop]');
+    if (rt) {
+      uploads.forEach(function (u) { if (String(u.id) === rt.dataset.retry && u.body) { u.state = 'up'; u.started = false; u.tries = 0; u.after = 0; } });
+      delete errors.photos;
+      pumpUploads(); refresh();
+      return true;
+    }
+    if (dr) {
+      uploads = uploads.filter(function (u) { if (String(u.id) !== dr.dataset.drop) return true; if (u.url) URL.revokeObjectURL(u.url); return false; });
+      if (!uploads.some(function (u) { return u.state === 'fail'; })) delete errors.photos;
+      refresh(); checkIdle();
+      return true;
+    }
+    return false;
+  }
+  // The connection is back: what failed for want of it goes again.
+  window.addEventListener('online', function () {
+    var any = false;
+    uploads.forEach(function (u) { if (u.state === 'fail' && !u.final && u.body) { u.state = 'up'; u.started = false; u.tries = 0; u.after = 0; any = true; } });
+    if (any) { delete errors.photos; pumpUploads(); refresh(); }
+  });
+
+  // ---- the sheet that takes photos: the camera, and another straight after -----------------------------------------------
+  function evidenceOf(key) {
+    if (!key) return { key: '', prompt: 'Anything else that may help', help: V.otherHelp, kind: 'photo' };
+    return V.evidence.filter(function (e) { return e.key === key; })[0] || { key: key, prompt: 'Photos and documents', kind: 'photo' };
+  }
+  function openAdd(key) { adding = key; $('addSheet').hidden = false; drawAdd(); }
+  function closeAdd() { adding = null; $('addSheet').hidden = true; render(); }
+  function drawAdd() {
+    var e = evidenceOf(adding), video = e.kind === 'video', mine = uploads.filter(function (u) { return u.key === adding; });
+    var going = mine.filter(busyUp).length, bad = mine.filter(function (u) { return u.state === 'fail'; }).length, count = adding ? e.count : extra;
+    $('addTitle').textContent = video ? 'Add a video' : e.kind === 'document' ? 'Add a document' : 'Add photos';
+    var state = going ? '<p class="add-state"><span class="spin dark"></span>Uploading ' + going + (going === 1 ? ' file…' : ' files…') + '</p>'
+      : bad ? '<p class="add-state bad">A file did not upload. Tap it to try again, or tap × to take it off.</p>'
+      : count ? '<p class="add-state">' + count + ' added. Take another, or tap Done.</p>' : '';
+    $('addBody').innerHTML = '<p class="help">' + esc(e.prompt) + '</p>' + (e.help ? '<p class="help">' + esc(e.help) + '</p>' : '')
+      + (mine.length ? '<div class="thumbs">' + mine.map(thumbHtml).join('') + '</div>' : '') + state
+      + '<div class="add-btns"><button type="button" class="go" data-pick="' + (video ? 'video' : 'camera') + '">' + (video ? (count ? 'Record another video' : 'Record a video') : count ? 'Take another photo' : 'Take a photo') + '</button>'
+      + '<button type="button" data-pick="files">Choose from your phone</button>' + (mine.length || count ? '<button type="button" data-add-close>Done</button>' : '') + '</div>';
+  }
+  function camMark(on) { try { if (on) sessionStorage.setItem(CAM_KEY, String(Date.now())); else sessionStorage.removeItem(CAM_KEY); } catch (x) { /* no storage: only the notice below is lost */ } }
+  function pick(kind) {
+    var input = kind === 'camera' ? $('inCam') : kind === 'video' ? $('inVid') : $('inFile');
+    if (kind === 'files') input.accept = evidenceOf(adding).kind === 'video' ? 'video/*' : 'image/*,application/pdf';
+    pendingKey = adding;
+    // Some phones close the page to make room for the camera. The mark is how the page knows, when it opens again.
+    camMark(true);
+    input.click();
+  }
+  function took(input) {
+    var files = [].slice.call(input.files || []), key = pendingKey;
     input.value = '';
-    render();
+    camMark(false);
+    if (!files.length || key === null) return;
+    camLost = false; drawNotice();
+    files.forEach(function (f) { addFile(key, f); });
   }
+  ['inCam', 'inFile', 'inVid'].forEach(function (id) {
+    $(id).addEventListener('change', function () { took(this); });
+    $(id).addEventListener('cancel', function () { camMark(false); });
+  });
+  // Back on the page and no photo came: the client cancelled. (If the phone had closed the page, this code wouldn't be running.)
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') setTimeout(function () { camMark(false); }, 4000); });
+  $('addSheet').addEventListener('click', function (e) {
+    if (e.target.closest('[data-add-close]')) return closeAdd();
+    if (thumbTap(e)) return;
+    var p = e.target.closest('[data-pick]');
+    if (p) pick(p.dataset.pick);
+  });
 
   // ---- a drawing of the accident: with a finger, like signing ------------------------------------------------------------
-  var drawing = null, strokes = [], stroke = null;
+  var drawing = null, strokes = [], stroke = null, drawTries = 0;
+  // Strokes are kept in the box's own (CSS) pixels, so the box can take a new size (the phone turned, the bar moved) and the
+  // drawing is drawn again at it, not lost.
+  function ink(g) { g.lineWidth = 3; g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = '#0B0F14'; }
   function paint() {
-    var cv = $('drawCanvas'), g = cv.getContext('2d');
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);
-    g.lineWidth = 3 * (window.devicePixelRatio || 1); g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = '#0B0F14';
+    var cv = $('drawCanvas'), g = cv.getContext('2d'), dpr = window.devicePixelRatio || 1;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width / dpr, cv.height / dpr);
+    ink(g);
     strokes.forEach(function (s) {
       g.beginPath(); g.moveTo(s[0][0], s[0][1]);
       if (s.length === 1) g.lineTo(s[0][0] + 0.1, s[0][1]);
@@ -1280,14 +1522,24 @@ const SCRIPT = String.raw`
     $('drawTitle').textContent = 'Draw the accident';
     $('drawHint').textContent = 'Use your finger. Show where the cars hit each other, with arrows for the way each car was going.';
     $('drawSheet').hidden = false;
+    drawTries = 0;
+    sizeDraw();
+  }
+  /** The box takes the size the sheet gives it. On a phone the sheet may not have its size the moment it opens: wait for it. */
+  function sizeDraw() {
+    if (drawing === null) return;
     var cv = $('drawCanvas'), dpr = window.devicePixelRatio || 1, box = cv.getBoundingClientRect();
+    if (box.width < 40 || box.height < 40) { if (++drawTries < 90) requestAnimationFrame(sizeDraw); return; }
     cv.width = Math.round(box.width * dpr); cv.height = Math.round(box.height * dpr);
     paint();
   }
-  function closeDraw() { drawing = null; $('drawSheet').hidden = true; render(); }
+  // The window says it changed before the box has: the box is watched itself, and the window event is the fallback.
+  window.addEventListener('resize', function () { if (drawing !== null) sizeDraw(); });
+  if (window.ResizeObserver) new ResizeObserver(function () { if (drawing !== null) sizeDraw(); }).observe($('drawCanvas'));
+  function closeDraw() { drawing = null; stroke = null; $('drawSheet').hidden = true; render(); }
   function drawPoint(e) {
-    var cv = $('drawCanvas'), box = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-    return [(e.clientX - box.left) * dpr, (e.clientY - box.top) * dpr];
+    var box = $('drawCanvas').getBoundingClientRect();
+    return [e.clientX - box.left, e.clientY - box.top];
   }
   $('drawCanvas').addEventListener('pointerdown', function (e) {
     e.preventDefault();
@@ -1300,6 +1552,7 @@ const SCRIPT = String.raw`
     e.preventDefault();
     var to = drawPoint(e), from = stroke[stroke.length - 1], g = this.getContext('2d');
     stroke.push(to);
+    ink(g);
     g.beginPath(); g.moveTo(from[0], from[1]); g.lineTo(to[0], to[1]); g.stroke();
   });
   var endStroke = function () { stroke = null; };
@@ -1314,8 +1567,8 @@ const SCRIPT = String.raw`
     if (t.id === 'drawSave') {
       var key = drawing;
       $('drawCanvas').toBlob(function (blob) {
-        if (!blob) return;
-        addUpload(key, blob);
+        if (!blob) { $('drawHint').textContent = 'The drawing could not be saved. Please try again.'; $('drawHint').hidden = false; return; }
+        addFile(key, blob, true);
         closeDraw();
       }, 'image/png');
     }
@@ -1403,13 +1656,9 @@ const SCRIPT = String.raw`
     if (pk) return openSheet(pk.dataset.pick);
     var dw = e.target.closest('[data-draw]');
     if (dw) return openDraw(dw.dataset.draw);
-    var rt = e.target.closest('[data-retry]');
-    if (rt) {
-      uploads.forEach(function (u) { if (String(u.id) === rt.dataset.retry) { u.state = 'up'; u.started = false; } });
-      delete errors.photos;
-      pumpUploads();
-      return render();
-    }
+    var ad = e.target.closest('[data-add]');
+    if (ad) return openAdd(ad.dataset.add);
+    if (thumbTap(e)) return;
     var j = e.target.closest('[data-jump]');
     if (j) return jumpTo(j.dataset.jump);
     var g = e.target.closest('[data-go]');
@@ -1455,11 +1704,6 @@ const SCRIPT = String.raw`
       lastTenth[d.range] = tenth;
     }
   });
-  $('body').addEventListener('change', function (e) {
-    var d = e.target.dataset;
-    if (!d) return;
-    if (d.up !== undefined) return upload(e.target);
-  });
   $('sheet').addEventListener('click', function (e) {
     if (e.target.closest('[data-sheet-close]')) return closeSheet();
     var cell = e.target.closest('[data-cell]');
@@ -1497,7 +1741,11 @@ const SCRIPT = String.raw`
     V.terms = null;
     enqueue({ termsAccepted: true });
   });
-  $('notice').addEventListener('click', function (e) { var b = e.target.closest('[data-fix]'); if (b) goFix(b.dataset.fix); });
+  $('notice').addEventListener('click', function (e) {
+    if (e.target.closest('[data-camok]')) { camLost = false; return drawNotice(); }
+    var b = e.target.closest('[data-fix]');
+    if (b) goFix(b.dataset.fix);
+  });
   $('next').addEventListener('click', next);
   $('back').addEventListener('click', back);
   // Turning the phone changes what fits. The keyboard opening doesn't: typing never moves a question to another step.
@@ -1512,6 +1760,12 @@ const SCRIPT = String.raw`
   });
 
   // ---- open --------------------------------------------------------------------------------------------------------
+  // Was the camera open when this page was last closed? (Some phones close a page to make room for the camera.)
+  (function () {
+    var at = 0;
+    try { at = Number(sessionStorage.getItem(CAM_KEY)) || 0; sessionStorage.removeItem(CAM_KEY); } catch (x) { /* no storage */ }
+    camLost = !!at && Date.now() - at < 15 * 60 * 1000;
+  })();
   api('/state').then(function (s) {
     V = s;
     adopt(s);
@@ -1520,6 +1774,8 @@ const SCRIPT = String.raw`
     else {
       here = s.startAt >= s.screens.length ? { id: 'photos' } : { id: 'screen', i: s.startAt, anchor: anchorFor(s.startAt, function (f) { return A[f.key] === undefined && !NK[f.key]; }) };
       if (!route().some(function (x) { return sameStep(x, here); })) here = { id: 'photos' };
+      // Back to where the camera was opened, not to the first question still blank.
+      if (camLost) here = { id: 'photos' };
     }
     $('foot').hidden = false;
     render();
@@ -1600,6 +1856,17 @@ export function claimFormPage(): string {
       <div class="list" id="comboList"></div>
     </div>
   </div>
+  <div class="sheet" id="addSheet" hidden>
+    <div class="scrim" data-add-close></div>
+    <div class="panel auto" role="dialog" aria-labelledby="addTitle">
+      <div class="panel-head"><span id="addTitle"></span><button type="button" data-add-close aria-label="Close">✕</button></div>
+      <div class="add-body" id="addBody"></div>
+    </div>
+  </div>
+  <!-- The inputs the camera and the file picker answer to. They stay here, out of the steps, which are drawn again. -->
+  <input class="sr" type="file" id="inCam" accept="image/*" capture="environment" tabindex="-1" aria-hidden="true">
+  <input class="sr" type="file" id="inVid" accept="video/*" capture="environment" tabindex="-1" aria-hidden="true">
+  <input class="sr" type="file" id="inFile" accept="image/*,application/pdf" multiple tabindex="-1" aria-hidden="true">
   <div class="sheet" id="drawSheet" hidden>
     <div class="panel full drawing" role="dialog" aria-labelledby="drawTitle">
       <div class="panel-head"><span id="drawTitle"></span><button type="button" id="drawClose" aria-label="Close">✕</button></div>

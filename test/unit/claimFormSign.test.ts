@@ -107,6 +107,25 @@ test('a required photo still missing: not signed, nothing kept; ready: the signa
     } finally { await s.close(); }
 });
 
+test('a Submit held for open questions is in the log with their keys (never an answer or the signature), for a WhatsApp and an email claim', async (t) => {
+    const warned: string[] = [];
+    t.mock.method(console, 'warn', (...a: unknown[]) => { warned.push(a.join(' ')); });
+    const d: GuidedLinkDeps & { store: ReturnType<typeof memoryLinkStore> } = { store: memoryLinkStore(), publicUrl: 'https://tina.example' };
+    const whatsApp = await createGuidedLink(d, INPUT);
+    const email = await createGuidedLink(d, { claimId: 'claim-2', phone: '', contactId: 'contact-1', callbackUrl: 'https://agent.example/claim-form-done' });
+    const s = await server(d, [], true, { emailSigning: { hasFormSignature: async () => false, signWithForm: async () => ({ ok: true }) } });
+    const sig = pngSignature();
+    try {
+        await submit(s.base, whatsApp.url, { signature: sig });
+        await submit(s.base, email.url, { signature: sig });
+        const held = warned.filter((w) => w.includes('submit held'));
+        assert.equal(held.length, 2);
+        assert.ok(held[0].includes(`link ${whatsApp.id}`) && held[0].includes('driversLicence') && !held[0].includes('email claim'));
+        assert.ok(held[1].includes(`link ${email.id}`) && held[1].includes('driversLicence') && held[1].includes('(email claim)'));
+        assert.ok(held.every((w) => !w.includes(sig.slice(30, 60))));
+    } finally { await s.close(); }
+});
+
 test('the signing step signs the filled form with the form\'s signature: the drawing is taken off the link, the callback goes, the request is used', async () => {
     const links: GuidedLinkDeps & { store: ReturnType<typeof memoryLinkStore> } = { store: memoryLinkStore(), publicUrl: 'https://tina.example' };
     const posted: string[] = [];

@@ -140,7 +140,49 @@ export function cachedDv(dv: Dv, stats?: CrmStats, now: () => number = Date.now)
 export const clearSharedCrmCache = () => shared.clear();
 
 /** One Microsoft Graph call (v1.0 path or absolute URL), authenticated by the caller. */
-export type Graph = (method: 'GET' | 'PUT', path: string, body?: Uint8Array, contentType?: string) => Promise<Response>;
+export type Graph = (method: 'GET' | 'PUT' | 'POST', path: string, body?: Uint8Array, contentType?: string) => Promise<Response>;
+
+/** Microsoft Graph's simple upload (one PUT) is documented for files up to 4 MB; anything bigger goes in an upload session. */
+export const SIMPLE_UPLOAD_MAX = 3.5 * 1024 * 1024;
+/** A multiple of 320 KiB, as Graph requires, and under 4 MB so each piece is a request any proxy takes. */
+const UPLOAD_CHUNK = 10 * 320 * 1024;
+
+/**
+ * A big file into SharePoint: an upload session on `itemPath` (`/drives/<id>/root:/<folder>/<name>`), then the file in pieces.
+ * The session's address is already authorised: the pieces go to it without our token. A piece that fails for a passing reason
+ * (a 5xx, a 429, no answer) is sent again from where it was; any other refusal stops the upload. Returns the file's web link.
+ */
+export async function uploadInChunks(graph: Graph, itemPath: string, bytes: Uint8Array, send: typeof fetch = fetch, pause: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): Promise<string> {
+    const made = await graph('POST', `${itemPath}:/createUploadSession`, new TextEncoder().encode(JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'rename' } })), 'application/json');
+    if (!made.ok) throw new Error(`SharePoint upload session: HTTP ${made.status} ${(await made.text()).slice(0, 200)}`);
+    const { uploadUrl } = (await made.json()) as { uploadUrl?: string };
+    if (!uploadUrl) throw new Error('SharePoint upload session: no upload address');
+    for (let start = 0; start < bytes.length; start += UPLOAD_CHUNK) {
+        const end = Math.min(start + UPLOAD_CHUNK, bytes.length);
+        let sent: Response | undefined;
+        for (let attempt = 1; attempt <= 4; attempt++) {
+            try {
+                sent = await send(uploadUrl, { method: 'PUT', headers: { 'Content-Range': `bytes ${start}-${end - 1}/${bytes.length}` }, body: bytes.subarray(start, end) });
+            } catch (e) {
+                if (attempt === 4) throw new Error(`SharePoint upload: ${(e as Error).message}`);
+                await pause(500 * attempt);
+                continue;
+            }
+            if (sent.ok || (sent.status < 500 && sent.status !== 429)) break;
+            if (attempt === 4) break;
+            await pause(500 * attempt);
+        }
+        if (!sent?.ok) throw new Error(`SharePoint upload: HTTP ${sent?.status} ${(await sent?.text().catch(() => '') ?? '').slice(0, 200)}`);
+        // The last piece answers with the file; the ones before it with what's still to come.
+        if (end === bytes.length) {
+            const link = ((await sent.json()) as { webUrl?: string }).webUrl;
+            if (!link) throw new Error('SharePoint upload: the finished file has no link');
+            return link;
+        }
+        await sent.text().catch(() => '');
+    }
+    throw new Error('SharePoint upload: there was nothing to send');
+}
 
 export interface DemoChannels {
     dv: Dv;
@@ -213,8 +255,11 @@ export function claimFolders(ch: DemoChannels): { files: ClaimFileStore; forms: 
         files: {
             async put(file, to) {
                 const bytes = await ch.mediaBytes(file.id);
-                const link = await put(`/drives/${await driveId()}/root:/${folder(to)}/${encodeURIComponent(cleanName(file.fileName))}:/content?@microsoft.graph.conflictBehavior=rename`,
-                    new Uint8Array(bytes), file.mimeType);
+                const item = `/drives/${await driveId()}/root:/${folder(to)}/${encodeURIComponent(cleanName(file.fileName))}`;
+                // A video or a long PDF is over what one call takes; a photo from the claim form is sent small and goes in one.
+                const link = bytes.length > SIMPLE_UPLOAD_MAX
+                    ? await uploadInChunks(ch.graph, item, new Uint8Array(bytes))
+                    : await put(`${item}:/content?@microsoft.graph.conflictBehavior=rename`, new Uint8Array(bytes), file.mimeType);
                 ch.note?.(`SharePoint: ${file.fileName} filed in ${to.claimReference}`);
                 // TTTFG-5263: the photo's capture date from the bytes as they arrived, for the Photo date before incident
                 // flag. A WhatsApp picture has none (WhatsApp drops it); a photo sent as a document keeps it.
