@@ -18,6 +18,7 @@ import express, { Router, type Request, type Response } from 'express';
 import type { ClientFile } from '../departments/insurance/followon';
 import type { GuidedSave, GuidedSaved, GuidedView } from '../departments/insurance/guided';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../claimform/page';
+import { sniffFile, UPLOAD_ID, UPLOAD_MAX_BYTES } from '../claimform/photo';
 import { createGuidedLink, finishGuidedLink, isBlankFormUrl, openGuidedLink, saveFormSignature, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
 import { signaturePng } from '../signing/signing';
 import { clientIp, LINK_PREVIEW, sameKey } from './signing.route';
@@ -65,8 +66,8 @@ export interface ClaimFormDeps extends GuidedLinkDeps {
 const signsHere = (d: ClaimFormDeps, link: GuidedLinkRow) => !!d.signOnForm && (!link.callback_url || !!d.emailSigning);
 
 const VOICE_MAX = 16 * 1024 * 1024;
-/** WhatsApp's own limit for an image is 5 MB and a document 100 MB; a phone's camera stays well under this. */
-const FILE_MAX = 25 * 1024 * 1024;
+/** WhatsApp's own limit for an image is 5 MB and a document 100 MB; the page sends photos small, so a PDF or a video is what reaches this. */
+const FILE_MAX = UPLOAD_MAX_BYTES;
 const FILE_TYPES: Record<string, { ext: string; media: ClientFile['media'] }> = {
     'image/jpeg': { ext: 'jpg', media: 'photo' }, 'image/png': { ext: 'png', media: 'photo' }, 'image/webp': { ext: 'webp', media: 'photo' },
     'image/heic': { ext: 'heic', media: 'photo' }, 'image/heif': { ext: 'heif', media: 'photo' }, 'application/pdf': { ext: 'pdf', media: 'document' },
@@ -92,6 +93,29 @@ function inTurn<T>(id: string, work: () => Promise<T>): Promise<T> {
     const tail = run.catch(() => undefined).finally(() => { if (queues.get(id) === tail) queues.delete(id); });
     queues.set(id, tail);
     return run;
+}
+
+/**
+ * A try of an upload that already got through (the page gave up waiting for the answer and tried again, or the answer was
+ * lost on the way) is answered with the first try's result, not filed a second time. Kept for an hour, in this process.
+ */
+const UPLOAD_MEMORY_MS = 60 * 60 * 1000;
+const uploaded = new Map<string, { at: number; done: Promise<{ count: number }> }>();
+function once(key: string | null, work: () => Promise<{ count: number }>): Promise<{ count: number }> {
+    if (!key) return work();
+    const now = Date.now();
+    // Oldest first, so what's left is what's recent.
+    for (const [k, v] of uploaded) {
+        if (now - v.at > UPLOAD_MEMORY_MS || uploaded.size > 2000) uploaded.delete(k);
+        else break;
+    }
+    const seen = uploaded.get(key);
+    if (seen) return seen.done;
+    const done = work();
+    uploaded.set(key, { at: now, done });
+    // A try that failed is forgotten, so the next try runs again.
+    done.catch(() => { if (uploaded.get(key)?.done === done) uploaded.delete(key); });
+    return done;
 }
 
 /** What may be saved: the page's own shape, nothing else reaches the claims package. */
@@ -243,14 +267,20 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         try {
             const link = res.locals.link as GuidedLinkRow;
             const bytes = req.body as Buffer;
-            const mimeType = String(req.header('content-type') ?? '').split(';')[0].trim().toLowerCase();
+            const said = String(req.header('content-type') ?? '').split(';')[0].trim().toLowerCase();
+            // What the bytes are wins over what the phone said: some send no type at all, or "application/octet-stream".
+            const seen = Buffer.isBuffer(bytes) ? sniffFile(bytes) : null;
+            const mimeType = seen ? seen.mime : said;
             const type = FILE_TYPES[mimeType];
             if (!type) return void res.status(415).json({ ok: false, message: 'Please send a photo, a PDF or a video.' });
             if (!Buffer.isBuffer(bytes) || !bytes.length) return void res.status(400).json({ ok: false, message: 'That file was empty. Please try again.' });
             const item = typeof req.query.item === 'string' ? req.query.item.slice(0, 120) : undefined;
             // A name of our own: the client's file name is theirs, and may say anything.
             const fileName = `${item ?? 'claim-file'}-${Date.now()}.${type.ext}`;
-            const r = await d.session(link).file({ fileName, mimeType, media: type.media }, bytes, item);
+            const id = req.header('x-upload-id') ?? '';
+            // A link's files go in one at a time, as its answers do (each one scores the claim and may raise a flag), and a try
+            // the page repeats after a dropped answer is not filed twice.
+            const r = await once(UPLOAD_ID.test(id) ? `${link.id}:${id}` : null, () => inTurn(`file:${link.id}`, () => d.session(link).file({ fileName, mimeType, media: type.media }, bytes, item)));
             res.json({ ok: true, count: r.count });
         } catch (e) { failed('file', res, e); }
     });
@@ -265,7 +295,11 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
             if (signsHere(d, link) && !signaturePng(signature)) return void res.status(400).json({ ok: false, message: 'Please sign in the box.' });
             const session = d.session(link);
             const r = await inTurn(link.id, () => session.finish());
-            if (r.open.length) return void res.json({ ok: false, open: r.open });
+            if (r.open.length) {
+                // Question keys only, never an answer. When a client says Submit did nothing, this says what the form still wanted.
+                console.warn(`[ClaimForm] submit held for link ${link.id}${link.callback_url ? ' (email claim)' : ''}: still open: ${r.open.slice(0, 25).join(', ')}`);
+                return void res.json({ ok: false, open: r.open });
+            }
             if (signsHere(d, link)) {
                 // Kept on the link until Tina has filled the form. If it can't be kept, the client gets a signing link as before.
                 await saveFormSignature(d, link.id, { signature, ip: clientIp(req), userAgent: req.header('user-agent') ?? null })
@@ -279,7 +313,7 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
 
     // A body over its limit, or that isn't JSON, gets a sentence, not a stack trace.
     router.use((err: { type?: string; status?: number }, _req: Request, res: Response, next: (e?: unknown) => void) => {
-        if (err?.type === 'entity.too.large') return void res.status(413).json({ ok: false, message: 'That file is too big. Please try a smaller one.' });
+        if (err?.type === 'entity.too.large') return void res.status(413).json({ ok: false, message: `That file is too big (${UPLOAD_MAX_BYTES / 1024 / 1024} MB is the most). Please try a smaller one.` });
         if (err?.status === 400) return void res.status(400).json({ ok: false, message: 'Please try that again.' });
         next(err);
     });

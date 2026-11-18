@@ -8,6 +8,10 @@
  * phone on the same Wi-Fi only with this. The certificate is made on the spot and signed by nobody, so the phone warns
  * once: tap through (Safari: Show Details, then visit this website).
  *
+ * --email: the links are an email claim's (a callback to the email agent, and the email agent can use the signature), as the
+ * email agent makes them. --carry fail: the email agent refuses when Submit tells it (what Tina's Submit then says);
+ * --carry slow: it takes 20 seconds to answer (--carry-ms to change that).
+ *
  * It prints one link per form. A voice recording comes back as a sample sentence; Submit prints what Tina would do next.
  * GET /__claim/<form name> shows what the form has saved so far, for the checks in the test walkthrough.
  */
@@ -31,6 +35,9 @@ const arg = (name: string, fallback: string) => {
 const PORT = Number(arg('port', '3456'));
 const DIR = arg('configs', '../ttt-preseason-agent/config/claimforms');
 const HTTPS = process.argv.includes('--https');
+const EMAIL = process.argv.includes('--email');
+const CARRY = arg('carry', '');
+const CARRY_MS = Number(arg('carry-ms', '20000'));
 const SCHEME = HTTPS ? 'https' : 'http';
 const LAN = Object.values(networkInterfaces()).flat().filter((a) => a?.family === 'IPv4' && !a.internal).map((a) => a!.address);
 
@@ -111,6 +118,8 @@ function session(link: GuidedLinkRow): ClaimFormSession {
         hear: async () => ({ text: 'I was driving to a job and a white Polo drove into the back of the bakkie.' }),
         finish: () => finishGuided(p, link.claim_id, new Date()),
         carryOn: async () => {
+            if (CARRY === 'fail') throw new Error("the form's caller answered 500");
+            if (CARRY === 'slow') await new Promise((r) => setTimeout(r, CARRY_MS));
             done.push(link.claim_id);
             const signed = await formSignatureFor(D, link.claim_id);
             console.log(signed
@@ -127,7 +136,8 @@ async function main() {
     const app = express();
     // The user (9 Nov 2026): signing on the form, as when the signing page is set up. --no-sign shows the old Submit.
     const signOnForm = !process.argv.includes('--no-sign');
-    app.use('/claim-form', claimFormRouter(() => ({ ...d, session, whatsApp: '27000000000', signOnForm })));
+    const emailSigning = { hasFormSignature: async () => true, signWithForm: async () => ({ ok: true as const }) };
+    app.use('/claim-form', claimFormRouter(() => ({ ...d, session, whatsApp: '27000000000', signOnForm, ...(EMAIL ? { emailSigning } : {}) })));
     app.get('/__claim/:name', async (req, res) => res.json({
         claim: claims.get(req.params.name), submitted: done.includes(req.params.name), signedOnForm: !!(await formSignatureFor(d, req.params.name)),
     }));
@@ -139,7 +149,7 @@ async function main() {
     const listening = async () => {
         for (const [i, row] of rows.entries()) {
             claims.set(row.name, claimFor(row, i));
-            links[row.name] = (await createGuidedLink(d, { claimId: row.name, phone: '27000000000', contactId: 'preview' })).url;
+            links[row.name] = (await createGuidedLink(d, { claimId: row.name, phone: EMAIL ? '' : '27000000000', contactId: 'preview', ...(EMAIL ? { callbackUrl: 'https://agent.example/claim-form-done' } : {}) })).url;
         }
         console.log(JSON.stringify(links, null, 1));
         console.log(`Preview on ${SCHEME}://localhost:${PORT}, ${rows.length} forms. Nothing here touches the CRM or WhatsApp.`);

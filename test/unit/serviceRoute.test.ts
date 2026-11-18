@@ -8,6 +8,7 @@ import { describeLines, serviceLinesFrom, type PhoneContact, type ServiceLines }
 import {
     decideServiceRoute, hasInsuranceWords, hasTaxWords, REPORT_CLAIM_TEXT, ROUTE_IDS, type RouteInput, type SideAnswer,
 } from '../../src/domain/serviceRoute';
+import { CLAIM_LINK_TEXT } from '../../src/domain/claimLink';
 
 // ---------------------------------------------------------------------------------------------------------------
 // serviceLinesFrom
@@ -328,4 +329,64 @@ test('switch: off unless SERVICE_ROUTING_ENABLED=true; SERVICE_ROUTING_NUMBERS l
     assert.equal(serviceRoutingOn('+27831112222', env), true);
     assert.equal(serviceRoutingOn('27839999999', env), false);
     assert.equal(serviceRoutingOn('27821234567', { ...env, SERVICE_ROUTING_NUMBERS: ' , ' }), true, 'an empty list is everyone');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The claim link (src/domain/claimLink.ts): the same as tapping Report a claim, whatever else the client has.
+// ---------------------------------------------------------------------------------------------------------------
+
+const CLAIM_VERDICT = { kind: 'insurance', claim: true, setSide: 'insurance', why: 'claim link' };
+
+test('route: the claim link is a claim for an insurance client, a client with both, and a client TTT can\'t classify, with no model', () => {
+    for (const lines of [INS, BOTH, UNKNOWN]) {
+        assert.deepEqual(route({ lines, text: CLAIM_LINK_TEXT }), CLAIM_VERDICT);
+    }
+});
+
+test('route: the claim link is a claim for a client with both, whichever side the session was on', () => {
+    for (const side of [null, 'tax', 'insurance'] as const) {
+        assert.deepEqual(route({ lines: BOTH, side, text: CLAIM_LINK_TEXT }), CLAIM_VERDICT, String(side));
+    }
+});
+
+test('route: the claim link on a shared number (tax contact resolved, insurance contact beside it) is for the insurance contact', () => {
+    const shared = serviceLinesFrom('tax-person', [c('tax-person', [0]), c('insured-person', [3], 1)]);
+    assert.equal(shared.insuranceContactId, 'insured-person');
+    assert.deepEqual(route({ lines: shared, text: CLAIM_LINK_TEXT }), CLAIM_VERDICT);
+});
+
+test('route: the claim link is never a guess: not asked "insurance or tax?", and the model is not called', () => {
+    for (const lines of [INS, BOTH, UNKNOWN, TAX]) {
+        const k = kind({ lines, text: CLAIM_LINK_TEXT });
+        assert.notEqual(k, 'needs-model');
+        assert.notEqual(k, 'ask');
+    }
+    // Even a model that would say tax or unsure is never consulted: the verdict is the same without it.
+    for (const model of ['tax', 'unsure'] as const) assert.deepEqual(route({ lines: BOTH, text: CLAIM_LINK_TEXT }, model), CLAIM_VERDICT);
+});
+
+test('route: the claim link from a tax-only client has no policy to claim on: the hand-over offer, never a walkthrough', () => {
+    assert.deepEqual(route({ lines: TAX, text: CLAIM_LINK_TEXT }), { kind: 'offer', text: CLAIM_LINK_TEXT, why: 'claim link (tax client)' });
+    // Declined the offer earlier in the session: they asked outright now, so they are offered again.
+    assert.equal(kind({ lines: TAX, side: 'tax', text: CLAIM_LINK_TEXT }), 'offer');
+    // Already said yes this session: it joins that hand-over.
+    assert.deepEqual(route({ lines: TAX, side: 'insurance', text: CLAIM_LINK_TEXT }), { kind: 'insurance', why: 'tax client, after accepting the offer' });
+});
+
+test('route: the claim link keeps the order of the rules: taps, answers to a waiting question, a walkthrough in progress', () => {
+    assert.equal(kind({ lines: BOTH, walkthrough: true, text: CLAIM_LINK_TEXT }), 'walkthrough');
+    assert.deepEqual(route({ lines: BOTH, pending: PENDING_ASK, tapId: ROUTE_IDS.TAX, text: '🧾 Tax' }),
+        { kind: 'tax', text: PENDING_ASK.text, setSide: 'tax', why: 'tapped Tax' });
+    // A waiting Insurance/Tax question, and the client sends the link instead of answering: it is a claim, and the question is dropped.
+    assert.deepEqual(route({ lines: BOTH, pending: PENDING_ASK, text: CLAIM_LINK_TEXT }), CLAIM_VERDICT);
+});
+
+test('route: a file is never the claim link, and a claim message with more in it takes the ordinary route', () => {
+    assert.equal(kind({ lines: BOTH, document: true, text: CLAIM_LINK_TEXT }), 'tax');
+    assert.equal(kind({ lines: BOTH, text: 'Hi Tina, I want to open an insurance claim for my stolen car' }), 'needs-model');
+});
+
+test('route: typed answers read a phone\'s curly apostrophe as a straight one', () => {
+    assert.equal(route({ lines: BOTH, pending: PENDING_ASK, text: 'It\u2019s insurance' }).kind, 'insurance');
+    assert.equal(route({ lines: TAX, pending: PENDING_OFFER, text: 'No, it\u2019s about tax' }).kind, 'tax');
 });
