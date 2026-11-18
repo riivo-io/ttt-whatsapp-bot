@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit a1504ad). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/reminder.ts (commit fb9b2c6). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5212: every morning, a client whose claim still needs something is sent the list again, so the claim doesn't
 // stall on the client's side. The host calls remindTurn() once per client, at 08:00 South African time. What's needed
@@ -57,7 +57,7 @@ import {
 import { chased } from './progress';
 import { claimWords, isOpenClaim, NO_RESUME_STATE, type OpenClaim, type ResumePorts, type ResumeState } from './resume';
 import type { ClaimAnswers } from './contracts';
-import { FORM_REMINDER_EMAIL_TEMPLATE, formStillNeeded, missingOnForm, REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
+import { FORM_REMINDER_EMAIL_TEMPLATE, formStillNeeded, MISSING_REMINDER_TEMPLATE, missingOnForm, REMINDER_EMAIL_TEMPLATE, REMINDER_TEMPLATE } from './templates';
 
 export interface ReminderSettings extends ClaimSettings {
   /** The first reminder goes on this calendar day after the client's last message (a test by hand: 0, today). */
@@ -68,6 +68,11 @@ export interface ReminderSettings extends ClaimSettings {
   stopAfterDays?: number;
   /** The host can send REMINDER_TEMPLATE as an approved WhatsApp template. Without it no WhatsApp reminder goes. */
   template?: boolean;
+  /**
+   * The user (18 Nov 2026): the host can also send MISSING_REMINDER_TEMPLATE, the approved template for a claim the client has
+   * submitted and still owes something on. Without it that reminder goes as REMINDER_TEMPLATE, as before.
+   */
+  missingTemplate?: boolean;
   /** The email agent's run: only the client's email claims are looked at. WhatsApp claims and their broker steps are Tina's. */
   emailOnly?: boolean;
 }
@@ -294,28 +299,29 @@ export async function remindTurn(
     if (email) {
       const contact = await ports.email!.contact(contactId);
       if (!contact) { outcomes.push({ reference: o.reference, skipped: 'no-email-address', ...broker }); continue; }
-      const vars = { firstName: contact.firstName, claim: label, lines, questionsLeft: missing.some((i) => !chased(i)) };
+      const missingLink = await missingFormLink(ports, claim);
+      const vars = { firstName: contact.firstName, claim: label, lines, questionsLeft: missing.some((i) => !chased(i)), ...(missingLink ? { missingLink } : {}) };
       const message = { subject: REMINDER_EMAIL_TEMPLATE.subject(vars), text: REMINDER_EMAIL_TEMPLATE.render(vars) };
       await ports.email!.send(contactId, message, { id: claim.id, owner: claim.owner });
       await ports.createAgentAction({
         ...row, detail: `Reminder email sent for claim ${claim.reference}: ${lines.join('; ')}.`,
-        template: { name: REMINDER_EMAIL_TEMPLATE.name, version: REMINDER_EMAIL_TEMPLATE.version, text: `${message.subject}\n\n${message.text}` },
+        // The link is the client's key to the form, so the record keeps the words without it.
+        template: { name: REMINDER_EMAIL_TEMPLATE.name, version: REMINDER_EMAIL_TEMPLATE.version, text: `${message.subject}\n\n${REMINDER_EMAIL_TEMPLATE.render({ ...vars, ...(missingLink ? { missingLink: '(the link)' } : {}) })}` },
       });
       outcomes.push({ reference: o.reference, sent: 'email', lines, ...broker });
       continue;
     }
 
     firstName ??= (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there';
-    const vars = { firstName, claim: label, list: await signedList(ports, claim, missing) };
-    const text = REMINDER_TEMPLATE.render(vars);
-    await ports.send(conv.phone, { kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text, params: REMINDER_TEMPLATE.params(vars) });
+    const msg = await whatsAppReminder(ports, claim, label, firstName, missing, settings);
+    await ports.send(conv.phone, { kind: 'template', name: msg.name, version: msg.version, text: msg.text, params: msg.params, ...(msg.buttonUrl ? { buttonUrl: msg.buttonUrl } : {}) });
     await ports.createAgentAction({
       ...row, detail: `Morning reminder sent on WhatsApp for claim ${claim.reference}: ${lines.join('; ')}.`,
-      template: { name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text },
+      template: { name: msg.name, version: msg.version, text: msg.recorded },
     });
     outcomes.push({ reference: o.reference, sent: 'template', lines, ...broker });
     reminded.push({ ctx, missing });
-    lastSent = text;
+    lastSent = msg.text;
   }
 
   // One claim reminded on WhatsApp, and all its questions asked: the conversation goes back on its list.
@@ -405,19 +411,51 @@ async function remindForm(
 }
 
 /**
- * The template's list of what's still needed. The user (18 Nov 2026): on a submitted claim, with the link to the
- * missing-items form after it (guided.ts topUp), in the same {{3}}, so the approved template carries it. A link that can't
- * be made: the list alone, as before.
+ * The user (18 Nov 2026): the link to the missing-items form (guided.ts topUp) for a reminder on a claim the client has submitted.
+ * Undefined for a claim not yet submitted (its form isn't the missing-items form), a host with no form page, or a link that
+ * can't be made: the reminder then goes without it, as before.
+ */
+async function missingFormLink(ports: ReminderPorts, claim: FollowOnClaim): Promise<string | undefined> {
+  if (!ports.guidedFormLink || !formSubmitted(claim)) return undefined;
+  try {
+    return (await ports.guidedFormLink(claim.id)).url;
+  } catch (e) {
+    console.error(`The missing-items link for claim ${claim.reference} couldn't be made for the reminder: ${e}`);
+    return undefined;
+  }
+}
+
+/**
+ * The template's list of what's still needed, for REMINDER_TEMPLATE. The user (18 Nov 2026): on a submitted claim, with the link
+ * to the missing-items form after it, in the same {{3}}, so the approved template carries it. A link that can't be made: the
+ * list alone, as before.
  */
 async function signedList(ports: ReminderPorts, claim: FollowOnClaim, missing: ReturnType<typeof resumeMissing>): Promise<string> {
   const names = list(stillNeedNames(missing, claim.answers));
-  if (!ports.guidedFormLink || !formSubmitted(claim)) return names;
-  try {
-    return missingOnForm(names, (await ports.guidedFormLink(claim.id)).url);
-  } catch (e) {
-    console.error(`The missing-items link for claim ${claim.reference} couldn't be made for the reminder: ${e}`);
-    return names;
+  const link = await missingFormLink(ports, claim);
+  return link ? missingOnForm(names, link) : names;
+}
+
+/**
+ * The WhatsApp template for one claim's morning reminder, with its variables, the text the client sees and the text the record
+ * keeps. The user (18 Nov 2026): a claim the client has submitted gets MISSING_REMINDER_TEMPLATE ("Update on your claim: Things we
+ * still need from you: the items as bullets, tap Add missing items below, you don't need to sign again", with the link as its button) when the host has it (`settings.missingTemplate`) and the
+ * link can be made; every other reminder goes as REMINDER_TEMPLATE, as before. The record never keeps the form's link.
+ */
+async function whatsAppReminder(
+  ports: ReminderPorts, claim: FollowOnClaim, label: string, firstName: string, missing: ReturnType<typeof resumeMissing>, settings: ReminderSettings,
+): Promise<{ name: string; version: string; text: string; params: string[]; buttonUrl?: string; recorded: string }> {
+  const link = settings.missingTemplate ? await missingFormLink(ports, claim) : undefined;
+  if (link) {
+    const t = MISSING_REMINDER_TEMPLATE;
+    const vars = { claim: label, items: stillNeedLines(missing, claim.answers) };
+    // The link is the template's button, so it is in neither the text nor the record (it is the client's key to the form).
+    return { name: t.name, version: t.version, text: t.render(vars), params: t.params(vars), buttonUrl: link, recorded: t.render(vars) };
   }
+  const t = REMINDER_TEMPLATE;
+  const vars = { firstName, claim: label, list: await signedList(ports, claim, missing) };
+  const text = t.render(vars);
+  return { name: t.name, version: t.version, text, params: t.params(vars), recorded: text };
 }
 
 /**
@@ -471,24 +509,25 @@ async function remindSigned(
   if (email) {
     const contact = await ports.email!.contact(contactId);
     if (!contact) return skip('no-email-address');
-    const vars = { firstName: contact.firstName, claim: label, lines, questionsLeft: false };
+    const missingLink = await missingFormLink(ports, claim);
+    const vars = { firstName: contact.firstName, claim: label, lines, questionsLeft: false, ...(missingLink ? { missingLink } : {}) };
     const message = { subject: REMINDER_EMAIL_TEMPLATE.subject(vars), text: REMINDER_EMAIL_TEMPLATE.render(vars) };
     await ports.email!.send(contactId, message, { id: claim.id, owner: claim.owner });
     await ports.createAgentAction({
       ...row, detail: `Reminder email sent for claim ${claim.reference}: ${lines.join('; ')}.`,
-      template: { name: REMINDER_EMAIL_TEMPLATE.name, version: REMINDER_EMAIL_TEMPLATE.version, text: `${message.subject}\n\n${message.text}` },
+      // The link is the client's key to the form, so the record keeps the words without it.
+      template: { name: REMINDER_EMAIL_TEMPLATE.name, version: REMINDER_EMAIL_TEMPLATE.version, text: `${message.subject}\n\n${REMINDER_EMAIL_TEMPLATE.render({ ...vars, ...(missingLink ? { missingLink: '(the link)' } : {}) })}` },
     });
     return { outcome: { reference: o.reference, sent: 'email', lines, ...broker }};
   }
   const firstName = (await ports.contactByWhatsApp(conv.phone))?.firstName ?? 'there';
-  const vars = { firstName, claim: label, list: await signedList(ports, claim, missing) };
-  const text = REMINDER_TEMPLATE.render(vars);
-  await ports.send(conv.phone, { kind: 'template', name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text, params: REMINDER_TEMPLATE.params(vars) });
+  const msg = await whatsAppReminder(ports, claim, label, firstName, missing, settings);
+  await ports.send(conv.phone, { kind: 'template', name: msg.name, version: msg.version, text: msg.text, params: msg.params, ...(msg.buttonUrl ? { buttonUrl: msg.buttonUrl } : {}) });
   await ports.createAgentAction({
     ...row, detail: `Morning reminder sent on WhatsApp for claim ${claim.reference}: ${lines.join('; ')}.`,
-    template: { name: REMINDER_TEMPLATE.name, version: REMINDER_TEMPLATE.version, text },
+    template: { name: msg.name, version: msg.version, text: msg.recorded },
   });
-  return { outcome: { reference: o.reference, sent: 'template', lines, ...broker }, sent: text, reminded: { ctx, missing } };
+  return { outcome: { reference: o.reference, sent: 'template', lines, ...broker }, sent: msg.text, reminded: { ctx, missing } };
 }
 
 export interface EmailReminderPorts extends ReminderPorts {

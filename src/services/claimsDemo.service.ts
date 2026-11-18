@@ -19,6 +19,10 @@
  *                                  REMINDER_TEMPLATE.whatsappBody, 3 variables). Unset: no reminder goes (the claim
  *                                  owner's Follow-ups still do)
  *   CLAIMS_REMINDER_TEMPLATE_LANG  its language code (default en)
+ *   CLAIMS_MISSING_TEMPLATE        the user (18 Nov 2026): the approved WhatsApp template the reminder for a claim the client has
+ *                                  submitted goes as (body: MISSING_REMINDER_TEMPLATE.whatsappBody, 3 variables). Unset: that
+ *                                  reminder goes as CLAIMS_REMINDER_TEMPLATE, as before. Needs CLAIMS_REMINDER_TEMPLATE set too
+ *   CLAIMS_MISSING_TEMPLATE_LANG   its language code (default: CLAIMS_REMINDER_TEMPLATE_LANG)
  *   CLAIMS_BROKER_ALERT_DAYS       TTTFG-5212: only when the demo CRM's riivo_ClaimReminderBrokerAlertDay can't be read
  *                                  (TTT sets the day there): the day the claim owner gets a Follow-up that the missing
  *                                  items haven't come (default 5)
@@ -57,6 +61,7 @@ import type { UnderstandModel } from '../departments/insurance/understand';
 import type { WalkthroughState } from '../departments/insurance/walkthrough';
 import Anthropic from '@anthropic-ai/sdk';
 import { claimsContactNumber, roadsideSwitch } from '../domain/claimsHost';
+import { templateSettings, urlButtonSuffix, whatsAppTemplateFor } from '../domain/claimsTemplates';
 import { interactiveFor, LINK_LOGGED, linkInteractive, loggedText, messageMaxChars, outbox, tappedText, withChoiceLines, withLinkLine, type OutPart } from '../domain/claimsOutbox';
 import {
     blankForm, cachedDv, dataverseCall, demoClaimFormSession, demoClaimSigned, demoPorts, newCrmStats, newDemoLog, openDemoRequest, openRoadsideDemoRequest, withdrawOpenClaims, writeDemoLog,
@@ -166,15 +171,21 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Prom
             if (!r.delivered) console.warn(`[ClaimsDemo] Document ${fileName} to ${to} not delivered: ${r.error ?? (r.dryRun ? 'dry run' : 'unknown')}`);
             log.outbound.push({ text: `${caption}\n📎 ${fileName}${r.delivered ? '' : "\n(WhatsApp didn't deliver this document.)"}`, at });
         },
-        ...(process.env.CLAIMS_REMINDER_TEMPLATE ? {
-            sendTemplate: async (to: string, params: string[]) => {
+        ...(process.env.CLAIMS_REMINDER_TEMPLATE || process.env.CLAIMS_MISSING_TEMPLATE ? {
+            sendTemplate: async (to: string, params: string[], message?: string, buttonUrl?: string) => {
+                // The missing-items reminder has a template for each number of bullets: its body variables are the claim, then one a bullet.
+                const template = whatsAppTemplateFor(message, process.env, params.length - 1);
+                if (!template) throw new Error(`No WhatsApp template set up for "${message ?? 'the reminder'}"`);
+                // The user (18 Nov 2026): the form's link is the template's "Add missing items" button; the token is the button's variable.
+                const token = buttonUrl ? urlButtonSuffix(buttonUrl) : undefined;
+                if (buttonUrl && !token) throw new Error(`The claim form link doesn't fit the button of WhatsApp template ${template.name} (it is registered as <SIGNING_PUBLIC_URL>/claim-form/{{1}})`);
                 await box.flush();
                 const at = new Date().toISOString();
                 const r = await metaWhatsAppService.sendTemplate(to, {
-                    name: process.env.CLAIMS_REMINDER_TEMPLATE!, languageCode: process.env.CLAIMS_REMINDER_TEMPLATE_LANG || 'en', bodyVariables: params,
+                    name: template.name, languageCode: template.language, bodyVariables: params, ...(token ? { buttonUrlParams: [{ index: 0, text: token }] } : {}),
                 });
-                if (!r.delivered) throw new Error(`WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE} to ${to} refused: ${r.error ?? 'unknown'}`);
-                log.outbound.push({ text: `WhatsApp template ${process.env.CLAIMS_REMINDER_TEMPLATE}: ${params.join(' | ')}`, at });
+                if (!r.delivered) throw new Error(`WhatsApp template ${template.name} to ${to} refused: ${r.error ?? 'unknown'}`);
+                log.outbound.push({ text: `WhatsApp template ${template.name}: ${params.join(' | ')}${token ? ' [button: Add missing items]' : ''}`, at });
             },
         } : {}),
         mediaBytes: async (mediaId) => (await metaWhatsAppService.downloadMedia(mediaId)).buffer,
@@ -455,7 +466,7 @@ export async function handleClaimsDemoReminder(phone: string, o: { test?: boolea
     try {
         // A test by hand goes out even if the client wrote today (still once per claim per day).
         const r = await claimsDemoReminder(deps(phone, contactId, ch, log), phone, contactId, new Date(), {
-            template: !!process.env.CLAIMS_REMINDER_TEMPLATE, ...(o.test ? { fromDay: 0 } : {}),
+            ...templateSettings(), ...(o.test ? { fromDay: 0 } : {}),
             ...(await reminderDaysFromCrm(ch.dv)),
         });
         const said = r === 'walkthrough' ? 'reporting a claim, no reminder' : r.map((o) => `${o.reference} ${'sent' in o ? `sent (${o.sent})` : o.skipped}`

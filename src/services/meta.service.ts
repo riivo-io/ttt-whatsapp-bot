@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { urlButtonComponent } from './metaTemplateButtons';
 import FormData from 'form-data';
 import dotenv from 'dotenv';
 import { getActivePhoneNumberId } from '../utils/messageContext';
@@ -139,6 +140,8 @@ export class MetaWhatsAppService {
             bodyVariables?: string[];
             bodyNamedVariables?: Record<string, string>;
             buttonPayloads?: { index: number; payload: string }[];
+            /** A URL button's variable (the end of its link), by the button's index: see metaTemplateButtons.ts. */
+            buttonUrlParams?: { index: number; text: string }[];
             flowButton?: { index: number; flowActionData?: Record<string, any> };
         }
     ): Promise<{ delivered: boolean; messageId?: string; error?: string }> {
@@ -185,6 +188,7 @@ export class MetaWhatsAppService {
                 });
             }
         }
+        for (const btn of params.buttonUrlParams ?? []) components.push(urlButtonComponent(btn.index, btn.text));
         if (params.flowButton) {
             const flowToken = `flow-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
             components.push({

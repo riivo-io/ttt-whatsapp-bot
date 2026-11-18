@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit a1504ad). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit fb9b2c6). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -55,7 +55,7 @@ import {
   SAPS_CASE_KEY, SAPS_ITEMS, SAPS_STATION_KEY,
   type ClaimFacts, type ReceivedEvidence,
 } from './progress';
-import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, FORM_CLOSING, FORM_THANKS, itOrThem, longDate, type ClaimTemplate } from './templates';
+import { DEADLINE_PASSED_TEMPLATE, DEADLINE_UPCOMING_TEMPLATE, DISCLOSURE_TEMPLATE, FORM_CLOSING, FORM_THANKS, itOrThem, longDate, MISSING_ITEMS_LABEL, type ClaimTemplate } from './templates';
 import { factColumns, factsMissing, OPENED_FOR_FORM_KEY, ownPlumberChosen, plumberAsked, plumberDetail, withFacts, type FactColumns } from './formfacts';
 import { isGeyser, VOICE_OR_TEXT, type ClaimType, type Facts } from './walkthrough';
 
@@ -2169,8 +2169,9 @@ function stillNeed(
 export function stillMissingText(items: readonly QuestionItem[], lead: string = ALL_FOR_NOW, form?: { signed: boolean }): string {
   const lines = stillNeedLines(items);
   const them = itOrThem(lines);
+  // The user (18 Nov 2026): with the link, the form is the way to add it: never "or send it here".
   const how = form
-    ? `Tap *${MISSING_LINK_LABEL}* to add ${them} to your claim, or send ${them} here.${form.signed ? " You don't need to sign again." : ''}`
+    ? `Tap *${MISSING_LINK_LABEL}* to add ${them} to your claim.${form.signed ? " You don't need to sign again." : ''}`
     : `Please send ${them} here when you have ${them}.`;
   return [[lead, `*${STILL_NEED_HEADING}*`].filter(Boolean).join(' '), lines.map((l) => `- ${l}`).join('\n'), how].join('\n\n');
 }
@@ -2179,7 +2180,7 @@ export function stillMissingText(items: readonly QuestionItem[], lead: string = 
  * The user (18 Nov 2026): the button under the list, to the missing-items form (guided.ts topUp). WhatsApp's limit for a
  * button's words is 20 characters.
  */
-export const MISSING_LINK_LABEL = 'Add missing items';
+export const MISSING_LINK_LABEL = MISSING_ITEMS_LABEL;
 
 // ----------------------------------------------------------------------------------------------------- the turn
 
