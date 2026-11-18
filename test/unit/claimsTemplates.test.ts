@@ -58,3 +58,11 @@ test('the form link goes in the template\'s URL button as its token, whatever th
 test('Meta\'s send call takes the button as a url component with the token as its text', () => {
     assert.deepEqual(urlButtonComponent(0, 'abc123'), { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: 'abc123' }] });
 });
+
+test('a real PROD link: the site and /claim-form/ are the button\'s fixed part, the one-off code at the end is what each send gives', () => {
+    const env = { SIGNING_PUBLIC_URL: 'https://ttt-prod-bot-fpbwezdygqbdh8a7.southafricanorth-01.azurewebsites.net' } as NodeJS.ProcessEnv;
+    const link = 'https://ttt-prod-bot-fpbwezdygqbdh8a7.southafricanorth-01.azurewebsites.net/claim-form/U6Znqpy7HBzMcbXgQ_DrYfHDqCfw84-bZ1vcQsDSmkA';
+    assert.equal(urlButtonSuffix(link, env), 'U6Znqpy7HBzMcbXgQ_DrYfHDqCfw84-bZ1vcQsDSmkA');
+    // After a move to another site (the custom domain) the button's fixed part no longer matches: refused, never sent to the wrong place.
+    assert.equal(urlButtonSuffix(link, { SIGNING_PUBLIC_URL: 'https://claims.ttt-tax.co.za' } as NodeJS.ProcessEnv), undefined);
+});
