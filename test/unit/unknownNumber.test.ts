@@ -22,23 +22,32 @@ const T0 = new Date('2026-11-18T08:00:00Z');
 const hoursLater = (h: number) => new Date(T0.getTime() + h * 3_600_000);
 
 /** A fake world that behaves like the reply table: one statement decides who may answer. */
-function world(o: { leadFails?: boolean; actionFails?: boolean; sendFails?: boolean; sendThrows?: boolean } = {}) {
+function world(o: { leadFails?: boolean; actionFails?: boolean; sendFails?: boolean; sendThrows?: boolean; known?: boolean; lookupFails?: boolean } = {}) {
     const replies = new Map<string, { repliedAt: number; leadId: string | null; actionId: string | null }>();
     const sent: { to: string; text: string }[] = [];
     const leads: { phone: string; id: string }[] = [];
     const actions: { phone: string; leadId: string; at: string; source?: string }[] = [];
     const log: string[] = [];
+    let confirms = 0;
     const contacts = [{ id: 'c-jane', name: 'Jane Smith', mobile: '27821110000', idNumber: JANE_ID }];
     const ports: UnknownNumberPorts = {
         async claim(phone, now) {
             const row = replies.get(phone);
-            if (!row) { replies.set(phone, { repliedAt: now.getTime(), leadId: null, actionId: null }); return { claimed: true, leadId: null }; }
-            if (row.repliedAt < now.getTime() - REPLY_WINDOW_MS) { row.repliedAt = now.getTime(); return { claimed: true, leadId: row.leadId }; }
-            return { claimed: false, leadId: row.leadId };
+            if (!row) { replies.set(phone, { repliedAt: now.getTime(), leadId: null, actionId: null }); return { claimed: true, leadId: null, actionId: null }; }
+            if (row.repliedAt < now.getTime() - REPLY_WINDOW_MS) { row.repliedAt = now.getTime(); return { claimed: true, leadId: row.leadId, actionId: row.actionId }; }
+            return { claimed: false, leadId: row.leadId, actionId: row.actionId };
         },
         async release(phone) { replies.get(phone)!.repliedAt = 0; },
+        async confirmUnknown() {
+            confirms++;
+            if (o.lookupFails) throw new Error('Request failed with status code 429');
+            if (o.known) throw new Error('the CRM says this number is known after all');
+        },
         async createLead(phone) {
             if (o.leadFails) throw new Error('the CRM did not make the lead');
+            // As the real port: a lead already on the number is adopted, never doubled.
+            const existing = leads.find((l) => l.phone === phone);
+            if (existing) return existing.id;
             const id = `lead-${leads.length + 1}`;
             leads.push({ phone, id });
             return id;
@@ -61,7 +70,7 @@ function world(o: { leadFails?: boolean; actionFails?: boolean; sendFails?: bool
         },
         log: (line) => void log.push(line),
     };
-    return { ports, replies, sent, leads, actions, log, contacts, texts: () => sent.map((m) => m.text) };
+    return { ports, replies, sent, leads, actions, log, contacts, confirms: () => confirms, texts: () => sent.map((m) => m.text) };
 }
 
 test('AC 1, 2, 3, 5: the Jane Smith message gets one fixed reply with the tax link, one Tax lead and one Created action, and no contact is touched', async () => {
@@ -192,7 +201,7 @@ test('a CRM that refuses the Created action keeps the lead (so there is never a 
     assert.deepEqual(out, { replied: true, leadCreated: true, leadId: 'lead-1' });
     assert.equal(w.replies.get(STRANGER)!.leadId, 'lead-1');
     assert.equal(w.replies.get(STRANGER)!.actionId, null);
-    assert.match(w.log.join('\n'), /Created action was not/);
+    assert.match(w.log.join('\n'), /has no Created action yet/);
     const later = await answerUnknownNumber(w.ports, STRANGER, LINK, hoursLater(30), 'wamid.2');
     assert.equal(later.leadCreated, false);
     assert.equal(w.leads.length, 1);
@@ -231,14 +240,62 @@ test('a lead that is made but could not be kept is kept on a second try, and the
     assert.equal(w.actions.length, 1);
 });
 
-test('a lead that cannot be kept at all is named in the log, the reply still goes, and no Created action is written', async () => {
+test('a lead that cannot be kept at all gives the claim back and throws, so the worker retries: the retry adopts the lead and keeps it', async () => {
     const w = world();
+    const remember = w.ports.remember;
     w.ports.remember = async () => { throw new Error('Supabase is down'); };
-    const out = await answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1');
-    assert.deepEqual(out, { replied: true, leadCreated: true, leadId: 'lead-1' });
-    assert.match(w.log.join('\n'), /lead-1 was made but could not be kept against the number/);
-    assert.equal(w.sent.length, 1);
+    await assert.rejects(answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1'), /could not be kept against the number/);
+    assert.equal(w.sent.length, 0, 'no reply: the message is retried, not answered half-done');
+    assert.equal(w.replies.get(STRANGER)!.repliedAt, 0, 'the claim is given back');
     assert.equal(w.actions.length, 0);
+
+    w.ports.remember = remember;
+    const retry = await answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1');
+    assert.deepEqual(retry, { replied: true, leadCreated: true, leadId: 'lead-1' });
+    assert.equal(w.leads.length, 1, 'the retry adopted the lead: never two');
+    assert.equal(w.replies.get(STRANGER)!.leadId, 'lead-1');
+    assert.equal(w.actions.length, 1);
+});
+
+test('a Created action that failed is written on the next answer, so the Tax team does hear of the lead', async () => {
+    const w = world({ actionFails: true });
+    await answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1');
+    assert.equal(w.actions.length, 0);
+    assert.equal(w.replies.get(STRANGER)!.actionId, null);
+    assert.match(w.log.join('\n'), /has no Created action yet/);
+
+    // The CRM is back (a fresh world with the same row, minus the action).
+    const healthy = world();
+    healthy.replies.set(STRANGER, { repliedAt: T0.getTime(), leadId: 'lead-1', actionId: null });
+    healthy.leads.push({ phone: STRANGER, id: 'lead-1' });
+    const later = await answerUnknownNumber(healthy.ports, STRANGER, LINK, hoursLater(25), 'wamid.9');
+    assert.deepEqual(later, { replied: true, leadCreated: false, leadId: 'lead-1' });
+    assert.equal(healthy.leads.length, 1, 'no second lead');
+    assert.equal(healthy.actions.length, 1, 'the action that was missing');
+    assert.equal(healthy.replies.get(STRANGER)!.actionId, 'aa-1');
+    // And once it exists it is not written again.
+    await answerUnknownNumber(healthy.ports, STRANGER, LINK, hoursLater(50), 'wamid.10');
+    assert.equal(healthy.actions.length, 1);
+});
+
+test('a number the CRM says is known after all (or whose lookup failed) gets no reply and no lead; the claim is given back and the message is retried', async () => {
+    for (const o of [{ known: true }, { lookupFails: true }]) {
+        const w = world(o);
+        await assert.rejects(answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1'));
+        assert.equal(w.sent.length, 0);
+        assert.equal(w.leads.length, 0);
+        assert.equal(w.replies.get(STRANGER)!.repliedAt, 0);
+    }
+});
+
+test('the CRM is asked again once, when the reply is claimed and Tina has no lead on the number: a repeat or the placeholder costs no call', async () => {
+    const w = world();
+    await answerUnknownNumber(w.ports, STRANGER, LINK, T0, 'wamid.1');
+    assert.equal(w.confirms(), 1);
+    await answerUnknownNumber(w.ports, STRANGER, LINK, hoursLater(1), 'wamid.2');
+    assert.equal(w.confirms(), 1, 'a repeat inside 24 hours: not even claimed, so no CRM call');
+    await answerUnknownNumber(w.ports, STRANGER, LINK, hoursLater(25), 'wamid.3');
+    assert.equal(w.confirms(), 1, 'Tina\'s own lead is on the number: the placeholder needs no lookup');
 });
 
 // ---- AC 8: a known number is served as before ------------------------------------------------------------------------

@@ -24,13 +24,18 @@ function taxTeamId(): Promise<string | null> {
     return taxTeam;
 }
 
-export function unknownNumberPorts(): UnknownNumberPorts {
+export function unknownNumberPorts(o: { lookupFailed?: boolean } = {}): UnknownNumberPorts {
     return {
         claim: (phone, now) => supabaseService.claimUnknownNumberReply(phone, now, REPLY_WINDOW_MS),
         release: (phone) => supabaseService.releaseUnknownNumberReply(phone),
         remember: (phone, leadId, actionId) => supabaseService.saveUnknownNumberLead(phone, leadId, actionId),
         send: async (phone, text) => !!(await metaWhatsAppService.sendMessage(phone, text)),
         log: (line) => console.log(`[UnknownNumber] ${line}`),
+
+        async confirmUnknown(phone) {
+            if (o.lookupFailed) throw new Error(`${phone}: the CRM lookup failed, so this may be a known number; the message will be retried`);
+            if (await dynamicsService.phoneKnownStrict(phone)) throw new Error(`${phone}: the CRM says this number is known after all; the message will be retried`);
+        },
 
         async createLead(phone) {
             // A lead already on the number (made by an earlier attempt whose bookkeeping failed) is adopted, never doubled.
@@ -52,8 +57,8 @@ export function unknownNumberPorts(): UnknownNumberPorts {
 }
 
 /** An unknown number's message (not roadside, a claim or a referral code): the one reply, the one lead. */
-export function handleUnknownNumber(from: string, wamid?: string): Promise<UnknownNumberOutcome> {
-    return answerUnknownNumber(unknownNumberPorts(), from, SIGN_UP_LINK, new Date(), wamid);
+export function handleUnknownNumber(from: string, wamid?: string, o: { lookupFailed?: boolean } = {}): Promise<UnknownNumberOutcome> {
+    return answerUnknownNumber(unknownNumberPorts(o), from, SIGN_UP_LINK, new Date(), wamid);
 }
 
 /**

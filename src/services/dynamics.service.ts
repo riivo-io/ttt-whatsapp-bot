@@ -831,7 +831,7 @@ export class DynamicsService {
     }
 
     /**
-     * TTTFG-5340: whether an active contact or lead has this number. searchEntity (so getContactByPhone) reads a CRM error
+     * TTTFG-5340: whether an active contact or lead (or, in staff mode, a user) has this number. searchEntity (so getContactByPhone) reads a CRM error
      * as "no match", which is harmless for a reply but not for a number about to get a new lead: a known client whose
      * lookup was throttled would get a second record. This asks again and lets any CRM error throw, so the worker
      * retries the message instead.
@@ -839,13 +839,18 @@ export class DynamicsService {
     async phoneKnownStrict(phoneNumber: string): Promise<boolean> {
         const token = await this.getToken();
         const headers = { 'Authorization': `Bearer ${token}`, 'OData-MaxVersion': '4.0', 'OData-Version': '4.0', 'Accept': 'application/json' };
-        const any = async (collection: string, field: string, id: string): Promise<boolean> => {
-            const filter = `(${this.phoneOrFilter(field, phoneNumber)}) and statecode eq 0`;
+        const any = async (collection: string, field: string, id: string, active = true): Promise<boolean> => {
+            const filter = `(${this.phoneOrFilter(field, phoneNumber)})${active ? ' and statecode eq 0' : ''}`;
             const res = await axios.get(`${this.baseUrl}/api/data/v9.2/${collection}?$filter=${encodeURIComponent(filter)}&$select=${id}&$top=1`, { headers });
             return Array.isArray(res.data?.value) && res.data.value.length > 0;
         };
-        const [contact, lead] = await Promise.all([any('contacts', 'mobilephone', 'contactid'), any('new_leads', 'ttt_mobilephone', 'new_leadid')]);
-        return contact || lead;
+        // The same sources getContactByPhone reads: staff only while STAFF_MODE_ENABLED, as there.
+        const [contact, lead, user] = await Promise.all([
+            any('contacts', 'mobilephone', 'contactid'),
+            any('new_leads', 'ttt_mobilephone', 'new_leadid'),
+            process.env.STAFF_MODE_ENABLED === 'true' ? any('systemusers', 'mobilephone', 'systemuserid', false) : Promise.resolve(false),
+        ]);
+        return contact || lead || user;
     }
 
     /**

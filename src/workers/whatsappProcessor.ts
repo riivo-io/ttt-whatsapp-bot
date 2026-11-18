@@ -992,15 +992,10 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
             // TTTFG-5340 (SPEC-05 "Unknown numbers"): every other message from a number on no contact or lead gets one fixed reply
             // with the tax sign-up link and one Tax lead, and a repeat inside 24 hours gets nothing. No tax question is answered, no
             // ID number is asked for or used, and no contact is touched. A lookup that failed is not an unknown number: a known
-            // client whose lookup was throttled must not get a second record, so the message is retried instead. That guard is
-            // here, where a record is made, and not on the claims and referral branches above: they make no record, and roadside
-            // help must not wait on the CRM (TTTFG-5299).
-            tax: async () => {
-                if (!placeholderLead && (resolved.lookupFailed || await dynamicsService.phoneKnownStrict(from))) {
-                    throw new Error(`[Processor] ${from}: the CRM lookup did not settle who this is; the message will be retried`);
-                }
-                return handleUnknownNumber(from, wamid);
-            },
+            // client whose lookup was throttled must not get a second record, so the message is retried instead (confirmUnknown, asked
+            // once the reply is claimed). That guard is on this branch, where a record is made, and not on the claims and referral
+            // branches above: they make no record, and roadside help must not wait on the CRM (TTTFG-5299).
+            tax: () => handleUnknownNumber(from, wamid, { lookupFailed: resolved.lookupFailed }),
         });
         return;
     }

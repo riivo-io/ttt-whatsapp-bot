@@ -76,6 +76,8 @@ export interface ReplyClaim {
     claimed: boolean;
     /** The lead Tina already made for this number, if she did. */
     leadId: string | null;
+    /** The Created action she already wrote for it, if she did. */
+    actionId: string | null;
 }
 
 export interface UnknownNumberPorts {
@@ -89,6 +91,12 @@ export interface UnknownNumberPorts {
     createAction(phone: string, leadId: string, at: string, sourceMessageId?: string): Promise<string>;
     /** Keeps the lead (and the action) against the number. */
     remember(phone: string, leadId: string, actionId: string | null): Promise<void>;
+    /**
+     * Throws when this number may in fact be known: the CRM lookup failed, or something answers on it. Asked once the reply is
+     * claimed and no lead of Tina's is on the number, so a repeat inside 24 hours costs no CRM call. A known client whose
+     * lookup was throttled must not get a second record: the worker retries the message instead.
+     */
+    confirmUnknown?(phone: string): Promise<void>;
     /** Sends the reply. False when WhatsApp did not take it. */
     send(phone: string, text: string): Promise<boolean>;
     log(line: string): void;
@@ -102,17 +110,14 @@ export interface UnknownNumberOutcome {
     leadId: string | null;
 }
 
-/** Keeps the lead against the number, twice if need be. False (and a log line naming the lead) when it could not. */
-async function keep(p: UnknownNumberPorts, phone: string, leadId: string, actionId: string | null, quiet = false): Promise<boolean> {
+/** Keeps the lead (and the action) against the number, twice if need be. False when it could not. */
+async function keep(p: UnknownNumberPorts, phone: string, leadId: string, actionId: string | null, _quiet = false): Promise<boolean> {
     for (let attempt = 1; attempt <= 2; attempt++) {
         try {
             await p.remember(phone, leadId, actionId);
             return true;
         } catch (e) {
-            if (attempt === 2) {
-                if (!quiet) p.log(`${phone}: the lead ${leadId} was made but could not be kept against the number: ${(e as Error).message}`);
-                return false;
-            }
+            if (attempt === 2) p.log(`${phone}: could not keep lead ${leadId} against the number: ${(e as Error).message}`);
         }
     }
     return false;
@@ -132,6 +137,16 @@ export async function answerUnknownNumber(
         return { replied: false, leadCreated: false, leadId: claim.leadId };
     }
 
+    // A number with a lead of Tina's on it is the placeholder: no lookup needed. Any other is checked once more, strictly.
+    if (!claim.leadId && p.confirmUnknown) {
+        try {
+            await p.confirmUnknown(phone);
+        } catch (e) {
+            await p.release(phone).catch(() => undefined);
+            throw e;
+        }
+    }
+
     let leadId = claim.leadId;
     let leadCreated = false;
     if (!leadId) {
@@ -141,17 +156,20 @@ export async function answerUnknownNumber(
         } catch (e) {
             p.log(`${phone}: no lead made: ${(e as Error).message}`);
         }
-        if (leadId) {
-            // The lead is kept at once, and the keeping is tried twice: a lead that is made but not kept is not a placeholder, and
-            // the number would be served as an ordinary lead. (createLead adopts a lead already on the number, so it is never doubled.)
-            const kept = await keep(p, phone, leadId, null);
-            if (kept) {
-                try {
-                    await keep(p, phone, leadId, await p.createAction(phone, leadId, now.toISOString(), sourceMessageId), true);
-                } catch (e) {
-                    p.log(`${phone}: the lead ${leadId} was made but its Created action was not: ${(e as Error).message}`);
-                }
-            }
+    }
+    if (leadId && (leadCreated || !claim.actionId)) {
+        // The lead is kept at once, tried twice. A lead that is made but not kept would not be a placeholder, and the number would be
+        // served as an ordinary lead: so the claim is given back and the worker retries (createLead adopts a lead already on the
+        // number, so it is never doubled).
+        if (!(await keep(p, phone, leadId, null))) {
+            await p.release(phone).catch(() => undefined);
+            throw new Error(`${phone}: the lead ${leadId} was made but could not be kept against the number`);
+        }
+        // The Created action follows the lead, and is tried again on the next answer if it failed this time.
+        try {
+            await keep(p, phone, leadId, await p.createAction(phone, leadId, now.toISOString(), sourceMessageId), true);
+        } catch (e) {
+            p.log(`${phone}: the lead ${leadId} has no Created action yet: ${(e as Error).message}`);
         }
     }
 

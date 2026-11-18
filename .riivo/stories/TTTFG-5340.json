@@ -137,6 +137,15 @@
       "area": "build",
       "fix": true,
       "verified_by": "agent"
+    },
+    {
+      "task": "Fix: Code review round 2: retry a missing Created action, retry a lead that could not be kept, ask the CRM again only once the reply is claimed, include staff in the strict check, no duplicated notes on a retry, and a script that signs in only when it needs DEV",
+      "owner": "agent",
+      "reason": "checkpoint 2 feedback",
+      "done": true,
+      "area": "build",
+      "fix": true,
+      "verified_by": "agent"
     }
   ],
   "approval": {

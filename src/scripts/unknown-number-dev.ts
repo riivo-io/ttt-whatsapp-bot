@@ -25,13 +25,15 @@ const LINK = 'https://www.ttt-tax.co.za/client-onboarding';
 function token(): string {
     return execFileSync('az', ['account', 'get-access-token', '--resource', DEV, '--query', 'accessToken', '-o', 'tsv'], { encoding: 'utf8' }).trim();
 }
-const t = token();
+let cached: string | undefined;
+/** Signs in only when a command needs DEV, so the usage text prints without `az`. */
+const bearer = () => (cached ??= token());
 
 async function dv<T>(method: 'GET' | 'PATCH' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${DEV}/api/data/v9.2/${path}`, {
         method,
         headers: {
-            Authorization: `Bearer ${t}`, Accept: 'application/json', 'Content-Type': 'application/json', 'OData-Version': '4.0',
+            Authorization: `Bearer ${bearer()}`, Accept: 'application/json', 'Content-Type': 'application/json', 'OData-Version': '4.0',
             Prefer: `odata.include-annotations="OData.Community.Display.V1.FormattedValue"${method === 'POST' ? ', return=representation' : ''}`,
             ...(method === 'PATCH' ? { 'If-Match': '*' } : {}),
         },
@@ -108,9 +110,9 @@ async function run(phone: string, keep: boolean) {
     const ports: UnknownNumberPorts = {
         async claim(p, now) {
             const r = replies.get(p);
-            if (!r) { replies.set(p, { at: now.getTime(), leadId: null, actionId: null }); return { claimed: true, leadId: null }; }
-            if (r.at < now.getTime() - REPLY_WINDOW_MS) { r.at = now.getTime(); return { claimed: true, leadId: r.leadId }; }
-            return { claimed: false, leadId: r.leadId };
+            if (!r) { replies.set(p, { at: now.getTime(), leadId: null, actionId: null }); return { claimed: true, leadId: null, actionId: null }; }
+            if (r.at < now.getTime() - REPLY_WINDOW_MS) { r.at = now.getTime(); return { claimed: true, leadId: r.leadId, actionId: r.actionId }; }
+            return { claimed: false, leadId: r.leadId, actionId: r.actionId };
         },
         async release(p) { replies.get(p)!.at = 0; },
         createLead: (p) => createLead(placeholderLeadParams(p, team.id)),

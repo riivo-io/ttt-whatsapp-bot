@@ -55,6 +55,11 @@ test('the form\'s notes are added to the notes already on the lead, never replac
     assert.equal('notes' in signUpLeadChanges({ ...FORM, notes: undefined }, null), false, 'nothing to say: the column is left alone');
 });
 
+test('a worker retry does not add the form\'s notes a second time', () => {
+    const once = signUpLeadChanges(FORM, 'Called us on 12 Nov').notes!;
+    assert.equal(signUpLeadChanges(FORM, once).notes, once);
+});
+
 test('a type the form did not give is left as it is on the lead', () => {
     const changes = signUpLeadChanges({ firstName: 'Jane', lastName: 'Smith', email: 'jane@example.com' }, null);
     assert.deepEqual(changes, { firstName: 'Jane', lastName: 'Smith', email: 'jane@example.com' });

@@ -41,7 +41,10 @@ export interface SignUpLeadChanges {
 
 /** What the form changes on a lead that exists: what was typed, with the notes added to the notes already there. */
 export function signUpLeadChanges(form: SignUpFormLead, existingNotes: string | null): SignUpLeadChanges {
-    const notes = [existingNotes?.trim(), form.notes?.trim()].filter(Boolean).join('\n') || undefined;
+    // A worker retry after the update must not add the same text twice.
+    const formNotes = form.notes?.trim();
+    const already = !!formNotes && !!existingNotes && existingNotes.includes(formNotes);
+    const notes = [existingNotes?.trim(), already ? undefined : formNotes].filter(Boolean).join('\n') || undefined;
     return {
         firstName: form.firstName, lastName: form.lastName, email: form.email,
         ...(notes ? { notes } : {}),

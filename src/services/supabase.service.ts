@@ -1468,10 +1468,10 @@ class SupabaseService {
      * the last reply; false inside the window. One statement decides, so two messages handled at once give one reply.
      * `leadId` is the lead Tina already made for the number. An error throws (not "already answered"): the worker retries.
      */
-    async claimUnknownNumberReply(phone: string, now: Date, windowMs: number): Promise<{ claimed: boolean; leadId: string | null }> {
+    async claimUnknownNumberReply(phone: string, now: Date, windowMs: number): Promise<{ claimed: boolean; leadId: string | null; actionId: string | null }> {
         const at = now.toISOString();
         const inserted = await this.client.from('unknown_number_replies').insert({ phone_number: phone, replied_at: at });
-        if (!inserted.error) return { claimed: true, leadId: null };
+        if (!inserted.error) return { claimed: true, leadId: null, actionId: null };
         if ((inserted.error as any).code !== '23505') throw new Error(`[Supabase] claimUnknownNumberReply: ${inserted.error.message}`);
 
         const reopened = await this.client
@@ -1479,10 +1479,13 @@ class SupabaseService {
             .update({ replied_at: at })
             .eq('phone_number', phone)
             .lt('replied_at', new Date(now.getTime() - windowMs).toISOString())
-            .select('lead_id');
+            .select('lead_id, action_id');
         if (reopened.error) throw new Error(`[Supabase] claimUnknownNumberReply: ${reopened.error.message}`);
-        if (reopened.data?.length) return { claimed: true, leadId: (reopened.data[0] as { lead_id: string | null }).lead_id ?? null };
-        return { claimed: false, leadId: await this.getUnknownNumberLeadId(phone) };
+        if (reopened.data?.length) {
+            const row = reopened.data[0] as { lead_id: string | null; action_id: string | null };
+            return { claimed: true, leadId: row.lead_id ?? null, actionId: row.action_id ?? null };
+        }
+        return { claimed: false, leadId: await this.getUnknownNumberLeadId(phone), actionId: null };
     }
 
     /** Gives the claim back (the reply was not delivered), so the person's next message is answered. The lead stays. */
