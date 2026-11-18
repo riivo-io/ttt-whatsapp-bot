@@ -2,7 +2,7 @@
 
 **Author:** Luc Duval
 **Date:** 2026-05-27
-**Status:** Approved, ready for implementation
+**Status:** Approved, ready for implementation. **Superseded in part by TTTFG-5340 (18 Nov 2026):** the cold `ttt_welcome_signup` template and its text fallback are retired; an unknown number now gets one fixed reply with the tax sign-up link and a Tax lead (see [leads-and-contacts.md](./leads-and-contacts.md) section 8). The referral template (`ttt_referral_welcome`) described here is unchanged.
 **Related:** [docs/PRD-referral-tier-update.md](./PRD-referral-tier-update.md), [docs/referral-marketing.md](./referral-marketing.md)
 
 ---

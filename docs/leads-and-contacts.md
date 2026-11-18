@@ -36,7 +36,6 @@ All on `dynamicsService` in [dynamics.service.ts](../src/services/dynamics.servi
 | `getContactByPhone` | [322](../src/services/dynamics.service.ts#L322) | Phone → contactid resolution |
 | `getContactDetails` | [466](../src/services/dynamics.service.ts#L466) | Full contact profile by id |
 | `searchContactByName` | [474](../src/services/dynamics.service.ts#L474) | Name search (optional owner filter) |
-| `searchContactByIdNumber` | [781](../src/services/dynamics.service.ts#L781) | Lookup by `riivo_idnumber` |
 | `getContactTaxNumber` | [607](../src/services/dynamics.service.ts#L607) | `riivo_taxnumber` read |
 | `getContactOwnerId` | [421](../src/services/dynamics.service.ts#L421) | Used when attributing referrals / leads |
 | `getMyClients` | [228](../src/services/dynamics.service.ts#L228) | All active contacts owned by a staff user |
@@ -150,13 +149,25 @@ Current implementation is **lead-only**. A lead uploads a signed LOE via WhatsAp
 
 ---
 
-## 8. Unknown-number / sign-up path
+## 8. Unknown-number / sign-up path  ✅ (TTTFG-5340, SPEC-05 "Unknown numbers")
 
-| Behaviour | Status | Evidence |
+A number on **no contact and no lead** is never trusted and never served. An ID number printed on an IRP5 or a payslip proves nothing, so the ID-number lookup (`verify_identity`, `searchContactByIdNumber`, `linkPhoneToContact`) and the old tax sign-up conversation are gone. Tina answers it in code (`src/domain/unknownNumber.ts`), in this order:
+
+1. **Roadside or a claim report** (claims flow): roadside gives the insurer's assist number from the CRM; a claim report gets the unknown-number reply. No sign-up reply and no lead.
+2. **A quoted referral code or keyword**: the `ttt_referral_welcome` template and its sign-up Flow, as before.
+3. **Anything else**: one fixed reply, *"I can't find this number on our system. If you're already a TTT client, please email us from the address we have on file. If you're new, you can sign up here: <tax sign-up link>"*, and one lead.
+
+| Behaviour | Status | Where |
 |---|---|---|
-| Bot sends `SIGN_UP_GREETING` + sign-up link to any phone not in contacts/leads/staff | ✅ | [webhook.controller.ts:157-161](../src/controllers/webhook.controller.ts#L157-L161) |
-| Lead auto-created in Dynamics for unknown phone | ❌ | No code path does this |
-| Signup URL | `https://www.taxtechnicianstoday.co.za/sign-up` | [webhook.controller.ts:14](../src/controllers/webhook.controller.ts#L14) |
+| One fixed reply with the tax sign-up link (`TAX_SIGNUP_LINK`, default `https://www.ttt-tax.co.za/client-onboarding`); no question answered, no ID number asked for | ✅ | `answerUnknownNumber`, `unknownNumberReply` |
+| One lead: name `WhatsApp <number>`, lead type **Tax**, lead source WhatsApp, owned by the Tax team; plus an open agent action of Kind **Created** owned by the Tax team (what the person typed is not kept) | ✅ | `placeholderLeadParams`, `createdActionColumns` |
+| A second message inside 24 hours gets no reply; the number never gets a second lead | ✅ | Supabase `unknown_number_replies` (migration `20261118120000`) |
+| A lead Tina made herself and that has **no email yet** is still the unknown number (silent for 24 hours, the same reply again after that), so Tina does not chat to a stranger; once an email is on it (the sign-up form or a consultant), it is an ordinary lead | ✅ | `isPlaceholderLead` |
+| The WhatsApp sign-up form **updates** the lead on the number instead of making a second | ✅ | `saveSignUpLead` (`src/domain/signUpLead.ts`) |
+| A CRM lookup that errors is never read as "unknown": the message is retried, so a known client whose lookup was throttled gets no second record | ✅ | `phoneKnownStrict`, `findActiveLeadByPhone` |
+| The online sign-up (the LOE app) matches the same lead on phone number | ⚠️ the LOE app is outside this repo | TTTFG-5581 |
+
+Some genuine clients who changed their number have to email from the address on file once: that is the price of not trusting a typed ID number. Tests: [unknown-numbers-test-steps.md](unknown-numbers-test-steps.md).
 
 ---
 

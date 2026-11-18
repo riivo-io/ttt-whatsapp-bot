@@ -194,3 +194,11 @@ With every Tool a registry entry, the strangler scaffolding is gone, not merely 
 The registry tests are the backstop (212 now: the prior 211 minus the deleted legacy-fallback test,
 plus a hard-error test and a description/schema-invariant test). No Tool changed its schema,
 description, role visibility, permission, or output.
+
+## Update: the unknown-caller tool is gone (TTTFG-5340, 18 Nov 2026)
+
+Slice 6's `verify_identity` (role `'unknown'`, `leadTools.ts`) was removed with `searchContactByIdNumber` and `linkPhoneToContact`.
+A typed ID number is not proof of who someone is (SPEC-05, decided 12 October 2026), and the tool was unreachable on WhatsApp
+anyway, because the processor answered an unknown number before Claude was called. The `'unknown'` role stays in the registry
+so the gate denies it every tool: `deriveOfferedTools('unknown', …)` is empty and `leadTools.ts` no longer exists. Unknown
+numbers are answered in code (`src/domain/unknownNumber.ts`).

@@ -184,9 +184,9 @@ Tools: `get_my_clients`, `get_my_leads`, `search_contact_by_name`, `search_lead_
 
 ### Unknown (number we've never seen)
 
-1 tool: identity verification by SA ID number. If they're a client we missed by phone, this catches them. Otherwise the bot points them at the WhatsApp signup Flow or `ttt-tax.co.za/client-onboarding`.
+No tools, and Claude is not asked (TTTFG-5340). Tina answers an unknown number in code with one fixed reply that carries the tax sign-up link (`ttt-tax.co.za/client-onboarding`), and makes one Tax lead for the Tax team. She never asks for an ID number and never looks a client up by one. Roadside help and claim reports are answered first by the claims flow. See `docs/leads-and-contacts.md` section 8.
 
-Tools: `verify_identity`.
+Tools: none.
 
 ### Tool filtering, three layers
 
@@ -427,9 +427,11 @@ If the staff member has `create_task`, an extra block on how to gather task fiel
 
 ### 8.4 Unknown
 
+An unknown number does not reach Claude (TTTFG-5340), so there is no UNKNOWN prompt in normal use: `processMessage` answers it in code (`src/domain/unknownNumber.ts`). The block below is a guard that only applies if one ever did reach the model:
+
 ~~~text
 **User Role: UNKNOWN**
-This person's phone number was not found in our system. Greet them warmly and ask them to provide their 13-digit South African ID number so you can look them up using verify_identity. If they can't be found by ID number, let them know a consultant will be in touch, or they can sign up at https://ttt-tax.co.za/client-onboarding.
+This person's phone number was not found in our system. Do not answer their question, share any client information or ask for an ID number. Say only that you can't find this number, that an existing TTT client should email us from the address we have on file, and that someone new can sign up at https://ttt-tax.co.za/client-onboarding
 ~~~
 
 ---
