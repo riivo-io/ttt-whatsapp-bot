@@ -68,7 +68,7 @@ import {
     type CrmStats, type DemoChannels, type DemoLog, type DemoSigning, type Graph,
 } from './claimsDemoWiring';
 import type { SignedCallback } from '../departments/insurance/signing';
-import { createGuidedLink, EMAIL_CLAIM_CALLER, guidedFormOn, guidedLinksFromEnv, postFormDone, type GuidedLinkRow } from '../claimform/links';
+import { brokerFormOn, createGuidedLink, EMAIL_CLAIM_CALLER, guidedFormOn, guidedLinksFromEnv, postFormDone, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
 import type { ClaimFormDeps, ClaimFormSession } from '../routes/claimForm.route';
 import { callbackSecretFromEnv, signingFromEnv } from '../signing/env';
 import { callerCallbackKey, createSigningRequest } from '../signing/signing';
@@ -197,9 +197,25 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Prom
 
 /** TTTFG-5562: the guided form's links, when the page is set up (src/claimform/links.ts). */
 function guidedLinkMaker(): Pick<DemoChannels, 'guidedLink'> {
-    const d = guidedLinksFromEnv();
-    if (!d) return {};
+    const found = guidedLinksFromEnv();
+    if (!found) return {};
+    const d = withBrokerLink(found);
     return { guidedLink: ({ claimId, phone, contactId }) => createGuidedLink(d, { claimId, phone, contactId, phoneNumberId: getActivePhoneNumberId() || null }) };
+}
+
+/**
+ * The user (20 Nov 2026): with CLAIMS_BROKER_FORM on, the client's form link also gives the claim's broker a link of their
+ * own (links.ts), and it goes on the claim: My Day shows it with the claim, and the email agent emails it to the broker
+ * (the claim's change step on riivo_brokerformlink). Both channels: the WhatsApp link here, an email claim's through the API.
+ */
+function withBrokerLink(d: GuidedLinkDeps): GuidedLinkDeps {
+    if (!brokerFormOn(process.env.CLAIMS_BROKER_FORM)) return d;
+    return {
+        ...d,
+        onBrokerLink: async ({ claimId, url, expiresAt }) => {
+            await dataverse(newCrmStats())('PATCH', `riivo_claims(${claimId})`, { riivo_brokerformlink: url, riivo_brokerformlinkexpires: expiresAt });
+        },
+    };
 }
 
 /** TTTFG-5196: the signing page, when it's set up. Its callback comes back to /webhook/claim-signed (handleClaimSigned). */
@@ -388,7 +404,8 @@ function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
 
 /** TTTFG-5562: the guided form's route, when the page is set up. */
 export function claimFormDeps(): ClaimFormDeps | null {
-    const d = guidedLinksFromEnv();
+    const found = guidedLinksFromEnv();
+    const d = found ? withBrokerLink(found) : null;
     const signingDeps = signingFromEnv();
     return d ? { ...d, session: claimFormSession, whatsApp: process.env.CLAIMS_TINA_NUMBER?.trim() || null, apiKey: process.env.SIGNING_API_KEY || undefined,
         // The user (9 Nov 2026): with the signing page set up, the client signs at the end of the form.

@@ -10,10 +10,22 @@ import crypto from 'crypto';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 export const LINK_DAYS = 7;
+/**
+ * The user (20 Nov 2026): the claim's broker gets a link to the client's form too, so they can fill it in when the client is
+ * stuck. Longer than the client's: the broker's link goes out once, while the client gets a new one with every reminder.
+ */
+export const BROKER_LINK_DAYS = 30;
 /** TTTFG-5188: the email agent, as it signs on the signing page; its callbacks use this caller's key. */
 export const EMAIL_CLAIM_CALLER = 'claim-email';
 
 export type LinkStatus = 'open' | 'done' | 'expired' | 'superseded';
+/**
+ * Whose link it is. 'broker' (the user, 20 Nov 2026): the claim's broker fills in the client's form for them. It saves to the
+ * same claim, but never signs, submits, accepts the terms or stops the reminders: those stay the client's. A client's link
+ * and a broker's link never stop each other; a new one stops only the earlier one of its own kind.
+ */
+export type LinkKind = 'client' | 'broker';
+export const kindOf = (row: Pick<GuidedLinkRow, 'kind'>): LinkKind => (row.kind === 'broker' ? 'broker' : 'client');
 
 export interface GuidedLinkRow {
     id: string;
@@ -37,6 +49,8 @@ export interface GuidedLinkRow {
     signature_ip?: string | null;
     signature_user_agent?: string | null;
     signed_at?: string | null;
+    /** The user (20 Nov 2026), migration 20261120120000_guided_form_links_kind.sql. Absent or 'client': the client's own link. */
+    kind?: LinkKind | null;
 }
 
 /** What the signing step needs of a signature from the form (the claims package's FormSignature). */
@@ -45,8 +59,10 @@ export interface FormSignature { signature: string; ip: string | null; userAgent
 export interface GuidedLinkStore {
     insert(row: GuidedLinkRow): Promise<void>;
     byTokenHash(hash: string): Promise<GuidedLinkRow | null>;
-    /** The claim's open links made before `createdBefore` become superseded. */
-    supersedeOpen(claimId: string, createdBefore: string): Promise<void>;
+    /** The claim's open links of this kind made before `createdBefore` become superseded. */
+    supersedeOpen(claimId: string, createdBefore: string, kind?: LinkKind): Promise<void>;
+    /** The claim's newest open broker link, or null (the user, 20 Nov 2026). */
+    openBrokerLink?(claimId: string): Promise<GuidedLinkRow | null>;
     update(id: string, patch: Partial<GuidedLinkRow>): Promise<void>;
     /** The claim's newest link that holds a signature from the form, or null. */
     signedFor(claimId: string): Promise<GuidedLinkRow | null>;
@@ -57,24 +73,52 @@ export interface GuidedLinkDeps {
     /** Where the page is served (https://host, no trailing slash). */
     publicUrl: string;
     now?: () => Date;
+    /**
+     * The user (20 Nov 2026): a new client link also gives the claim's broker a link of their own, once while it works, and
+     * this is told of it (Tina writes it on the claim, where My Day shows it and the email agent emails it to the broker).
+     * Absent: no broker link. Never fails the client's link.
+     */
+    onBrokerLink?(link: { claimId: string; url: string; expiresAt: string }): Promise<void>;
 }
 
 const nowOf = (d: GuidedLinkDeps) => d.now?.() ?? new Date();
 export const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
-export async function createGuidedLink(d: GuidedLinkDeps, input: { claimId: string; phone: string; contactId: string; phoneNumberId?: string | null; callbackUrl?: string }): Promise<{ id: string; url: string; expiresAt: string }> {
+export async function createGuidedLink(d: GuidedLinkDeps, input: { claimId: string; phone: string; contactId: string; phoneNumberId?: string | null; callbackUrl?: string; kind?: LinkKind }): Promise<{ id: string; url: string; expiresAt: string }> {
     const token = crypto.randomBytes(32).toString('base64url');
     const created = nowOf(d);
+    const broker = input.kind === 'broker';
     const row: GuidedLinkRow = {
         id: crypto.randomUUID(), token_hash: sha256(token), claim_id: input.claimId, phone: input.phone, contact_id: input.contactId,
-        phone_number_id: input.phoneNumberId ?? null, status: 'open', expires_at: new Date(created.getTime() + LINK_DAYS * 86_400_000).toISOString(),
+        phone_number_id: input.phoneNumberId ?? null, status: 'open', expires_at: new Date(created.getTime() + (broker ? BROKER_LINK_DAYS : LINK_DAYS) * 86_400_000).toISOString(),
         created_at: created.toISOString(), opened_at: null, finished_at: null,
         // Only when there is one: a WhatsApp link writes the row as it always has.
         ...(input.callbackUrl ? { callback_url: input.callbackUrl } : {}),
+        // Only on a broker's link, so a client's link is written as before the column was there.
+        ...(broker ? { kind: 'broker' as const } : {}),
     };
     await d.store.insert(row);
-    await d.store.supersedeOpen(input.claimId, row.created_at);
-    return { id: row.id, url: `${d.publicUrl.replace(/\/$/, '')}/claim-form/${token}`, expiresAt: row.expires_at };
+    await d.store.supersedeOpen(input.claimId, row.created_at, broker ? 'broker' : 'client');
+    const made = { id: row.id, url: `${d.publicUrl.replace(/\/$/, '')}/claim-form/${token}`, expiresAt: row.expires_at };
+    if (!broker) await shareWithBroker(d, input);
+    return made;
+}
+
+/**
+ * The user (20 Nov 2026): when the client's form goes out, the broker gets the same form on a link of their own. Once while
+ * it works: the client's reminders make new client links, not new broker links. Its details are the client's link's, so
+ * what the broker saves and uploads goes through the same pipeline as the client's. Never throws: the client's link counts.
+ */
+async function shareWithBroker(d: GuidedLinkDeps, input: { claimId: string; phone: string; contactId: string; phoneNumberId?: string | null; callbackUrl?: string }): Promise<void> {
+    if (!d.onBrokerLink || !d.store.openBrokerLink) return;
+    try {
+        const open = await d.store.openBrokerLink(input.claimId);
+        if (open && Date.parse(open.expires_at) > nowOf(d).getTime()) return;
+        const made = await createGuidedLink(d, { ...input, kind: 'broker' });
+        await d.onBrokerLink({ claimId: input.claimId, url: made.url, expiresAt: made.expiresAt });
+    } catch (e) {
+        console.error(`[ClaimForm] no broker link for claim ${input.claimId}: ${(e as Error).message}`);
+    }
 }
 
 export type LinkRefusal = 'not-found' | 'expired' | 'done' | 'superseded';
@@ -155,8 +199,12 @@ export function memoryLinkStore(): GuidedLinkStore & { rows: Map<string, GuidedL
             const r = [...rows.values()].find((x) => x.token_hash === h);
             return r ? { ...r } : null;
         },
-        async supersedeOpen(claimId, before) {
-            for (const r of rows.values()) if (r.claim_id === claimId && r.status === 'open' && r.created_at < before) r.status = 'superseded';
+        async supersedeOpen(claimId, before, kind = 'client') {
+            for (const r of rows.values()) if (r.claim_id === claimId && r.status === 'open' && r.created_at < before && kindOf(r) === kind) r.status = 'superseded';
+        },
+        async openBrokerLink(claimId) {
+            const r = [...rows.values()].filter((x) => x.claim_id === claimId && x.status === 'open' && kindOf(x) === 'broker').sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+            return r ? { ...r } : null;
         },
         async update(id, patch) {
             const r = rows.get(id);
@@ -171,7 +219,11 @@ export function memoryLinkStore(): GuidedLinkStore & { rows: Map<string, GuidedL
 
 // ------------------------------------------------------------------------------------------------- Supabase
 
-export function supabaseLinkStore(client?: SupabaseClient): GuidedLinkStore {
+/**
+ * `kinds`: the `kind` column is there (migration 20261120120000_guided_form_links_kind.sql), so a client's link stops only
+ * client links and broker links can be made. Without it every query is as it was before the column.
+ */
+export function supabaseLinkStore(client?: SupabaseClient, kinds = false): GuidedLinkStore {
     let c = client;
     const db = () => (c ??= createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false } }));
     const fail = (what: string, e: { message: string } | null) => { if (e) throw new Error(`[ClaimForm] ${what}: ${e.message}`); };
@@ -185,10 +237,20 @@ export function supabaseLinkStore(client?: SupabaseClient): GuidedLinkStore {
             fail('read', error);
             return (data as GuidedLinkRow | null) ?? null;
         },
-        async supersedeOpen(claimId, before) {
-            const { error } = await db().from('guided_form_links').update({ status: 'superseded' }).eq('claim_id', claimId).eq('status', 'open').lt('created_at', before);
+        async supersedeOpen(claimId, before, kind = 'client') {
+            if (!kinds && kind === 'broker') throw new Error('[ClaimForm] broker links need the kind column');
+            const q = db().from('guided_form_links').update({ status: 'superseded' }).eq('claim_id', claimId).eq('status', 'open').lt('created_at', before);
+            const { error } = await (kinds ? q.eq('kind', kind) : q);
             fail('supersede', error);
         },
+        ...(kinds ? {
+            async openBrokerLink(claimId: string) {
+                const { data, error } = await db().from('guided_form_links').select('*').eq('claim_id', claimId).eq('status', 'open').eq('kind', 'broker')
+                    .order('created_at', { ascending: false }).limit(1).maybeSingle();
+                fail('broker link', error);
+                return (data as GuidedLinkRow | null) ?? null;
+            },
+        } : {}),
         async update(id, patch) {
             const { error } = await db().from('guided_form_links').update(patch).eq('id', id);
             fail('update', error);
@@ -215,8 +277,14 @@ export function guidedLinksFromEnv(): GuidedLinkDeps | null {
         warned = true;
         return null;
     }
-    return (deps ??= { store: supabaseLinkStore(), publicUrl: publicUrl.replace(/\/$/, '') });
+    return (deps ??= { store: supabaseLinkStore(undefined, brokerFormOn(process.env.CLAIMS_BROKER_FORM)), publicUrl: publicUrl.replace(/\/$/, '') });
 }
+
+/**
+ * CLAIMS_BROKER_FORM (the user, 20 Nov 2026): "on" gives the claim's broker a link to the client's form. Needs the `kind`
+ * column first (migration 20261120120000_guided_form_links_kind.sql). Off by default, so merging changes nothing.
+ */
+export const brokerFormOn = (raw: string | undefined) => (raw ?? '').trim().toLowerCase() === 'on';
 
 /**
  * CLAIMS_GUIDED_FORM: "on" sends every new claim the link; a list of numbers sends only those (for trying it on your own

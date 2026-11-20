@@ -191,6 +191,7 @@ textarea.inp { min-height:96px; resize:vertical; line-height:1.45; display:block
 .spin.dark { border-color:var(--line-strong); border-top-color:var(--accent); width:14px; height:14px; border-width:2px; display:inline-block; vertical-align:-2px; margin-right:6px; }
 .foot .spin { width:15px; height:15px; border-width:2px; display:inline-block; vertical-align:-2px; margin-right:8px; }
 @keyframes spin { to { transform:rotate(360deg); } }
+.brokerbar { padding:8px 18px; background:var(--accent-soft, #e8f0fb); color:var(--accent-deep); font-size:13px; line-height:1.35; }
 .notice { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:8px 18px; background:var(--warn-soft); color:var(--warn); font-size:13px; line-height:1.35; }
 .notice button { flex:none; border:none; background:none; color:var(--accent-deep); font-weight:500; font-size:13px; cursor:pointer; padding:4px 0 4px 8px; }
 .sign-pad { position:relative; height:200px; }
@@ -831,12 +832,13 @@ const SCRIPT = String.raw`
   }
   /** The summary: the one step that may scroll. */
   function reviewHtml() {
-    var html = '<p class="help">Tap Change to fix anything. Next, ' + (V.sign ? 'you sign, and your claim is submitted' : V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
+    var html = V.broker ? '<p class="help">Tap Change to fix anything. Everything here is saved on the client\'s claim. The client checks it and signs from their own link.</p>'
+      : '<p class="help">Tap Change to fix anything. Next, ' + (V.sign ? 'you sign, and your claim is submitted' : V.emailed ? 'we email you your form to sign' : 'Tina sends your form to sign on WhatsApp') + '.</p>';
     // The user (16 Nov 2026): nothing holds up signing or submitting, so what is still blank is only listed, to jump back to. The
     // client is reminded of what is required, and the broker follows the rest up.
     var missing = missingUploads().map(function (e) { return { text: e.prompt, jump: 'e:' + e.key }; });
     visibleScreens().forEach(function (i) { V.screens[i].fields.forEach(function (f) { if (f.required && shows(f) && !f.hidden && !filled(A[f.key]) && f.control.kind !== 'stepper') missing.push({ text: promptOf(f), jump: 'f:' + f.key }); }); });
-    if (missing.length) html += listBox('Still to come', missing, 'You can still ' + (V.sign ? 'sign' : 'submit') + '. We will remind you about these, and your broker will follow them up with you.');
+    if (missing.length) html += listBox('Still to come', missing, V.broker ? 'The client is reminded about these.' : 'You can still ' + (V.sign ? 'sign' : 'submit') + '. We will remind you about these, and your broker will follow them up with you.');
     visibleScreens().forEach(function (i) {
       var s = V.screens[i], rows = '';
       s.fields.forEach(function (f) {
@@ -946,8 +948,8 @@ const SCRIPT = String.raw`
     $('prog').style.width = Math.round((i + part) / Math.max(1, steps.length - 1) * 100) + '%';
     if (!submitting) {
       if (step.id === 'review') toReview = false;
-      $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm'
-        : V.topUp && step.id === 'photos' && !morePages ? 'Send'
+      $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.broker ? 'Save for the client' : V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm'
+        : V.topUp && step.id === 'photos' && !morePages ? (V.broker ? 'Save for the client' : 'Send')
         : toReview && (step.id === 'screen' || step.id === 'photos') ? 'Back to summary' : 'Continue';
     }
     $('next').disabled = busy;
@@ -1180,7 +1182,29 @@ const SCRIPT = String.raw`
   /** The user (18 Nov 2026): the missing-items form's last words. Nothing to sign: the claim is signed already. */
   var TOP_UP_DONE = 'We have added this to your claim. Tina will let you know on WhatsApp if anything else is still needed.';
   function doneHtml(title, text) { return '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>' + esc(title) + '</h1><p class="help">' + esc(text) + '</p></div>'; }
+  /**
+   * The user (20 Nov 2026): the broker's link. Each screen saved as they went; this waits for what is still on its way and
+   * says so. Nothing is submitted or signed: that is the client's, from their own link. The link keeps working.
+   */
+  function brokerSave() {
+    busy = true; submitting = true; $('next').disabled = true;
+    $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(busyUp) ? 'Uploading the photos…' : 'Saving…');
+    whenIdle(function () {
+      busy = false; submitting = false;
+      if (uploads.some(function (u) { return u.state === 'fail'; })) {
+        errors = { photos: 'A photo or file did not upload. Tap it to try again, or tap × to take it off, then carry on.' };
+        here = { id: 'photos', anchor: null };
+        return render();
+      }
+      finished = true;
+      $('foot').hidden = true; $('notice').hidden = true;
+      $('sec').textContent = '';
+      $('prog').style.width = '100%';
+      $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Saved for the client</h1><p class="help">Everything you entered is on the client\'s claim. Ask them to open their own link to check it and sign. You can open this link again to change anything.</p></div>';
+    });
+  }
   function submit(sig) {
+    if (V.broker) return brokerSave();
     if (V.sign && !sig) { errors = { sign: 'Please sign in the box first.' }; return render(); }
     busy = true; submitting = true; $('next').disabled = true;
     $('next').innerHTML = '<span class="spin"></span>' + (uploads.some(busyUp) ? 'Uploading your photos…' : 'Submitting…');
@@ -1817,7 +1841,8 @@ const SCRIPT = String.raw`
       // Back to where the camera was opened, not to the first question still blank.
       if (camLost) here = { id: 'photos' };
     }
-    $('foot').hidden = false; $('stopline').hidden = false;
+    $('foot').hidden = false; $('stopline').hidden = !!s.broker;
+    $('brokerbar').hidden = !s.broker;
     render();
     // What opens the form: read once, one tap, and straight on.
     if (s.terms) {
@@ -1870,6 +1895,7 @@ export function claimFormPage(): string {
     <div class="prog"><i id="prog"></i></div>
     <div class="sec" id="sec"></div>
   </div>
+  <div class="brokerbar" id="brokerbar" hidden>You are filling in this claim form for your client. What you enter is saved on their claim. The client checks it and signs from their own link.</div>
   <div class="notice" id="notice" role="status" hidden></div>
   <main class="body" id="body"><div class="sk" style="width:62%"></div><div class="sk tall"></div><div class="sk tall"></div><div class="sk tall"></div><div class="sk" style="width:44%"></div></main>
   <div class="foot" id="foot" hidden><button type="button" id="back">Back</button><button type="button" class="go" id="next">Continue</button></div>
