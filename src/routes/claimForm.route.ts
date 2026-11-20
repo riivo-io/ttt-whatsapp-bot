@@ -16,13 +16,17 @@
  *   POST /claim-form/api/sign-with-form  signs the email agent's new signing request with that signature, with the same key
  *   GET  /claim-form/api/blank-form    TTTFG-5188: an insurer's blank form for the email agent, with the same key
  * The token is the only key: it can't be guessed, and every call checks it again.
+ *
+ * The user (20 Nov 2026): a broker's link (links.ts `kind`) opens the same form for the claim's broker, to fill in for a client
+ * who is stuck. It saves answers and files, and nothing else is the broker's: no signature, no Submit, no terms, no stopping
+ * the reminders. The client checks and signs from their own link.
  */
 import express, { Router, type Request, type Response } from 'express';
 import type { ClientFile } from '../departments/insurance/followon';
 import type { GuidedSave, GuidedSaved, GuidedView } from '../departments/insurance/guided';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../claimform/page';
 import { sniffFile, UPLOAD_ID, UPLOAD_MAX_BYTES } from '../claimform/photo';
-import { createGuidedLink, finishGuidedLink, isBlankFormUrl, openGuidedLink, saveFormSignature, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
+import { createGuidedLink, finishGuidedLink, isBlankFormUrl, kindOf, openGuidedLink, saveFormSignature, type GuidedLinkDeps, type GuidedLinkRow } from '../claimform/links';
 import { signaturePng } from '../signing/signing';
 import { clientIp, LINK_PREVIEW, sameKey } from './signing.route';
 
@@ -68,7 +72,11 @@ export interface ClaimFormDeps extends GuidedLinkDeps {
  * Whether this link's client signs on the form: signing set up, and for an email claim's link (callback_url) only when the
  * email agent can use the signature.
  */
-const signsHere = (d: ClaimFormDeps, link: GuidedLinkRow) => !!d.signOnForm && (!link.callback_url || !!d.emailSigning);
+const signsHere = (d: ClaimFormDeps, link: GuidedLinkRow) => !isBroker(link) && !!d.signOnForm && (!link.callback_url || !!d.emailSigning);
+/** The user (20 Nov 2026): the claim's broker's link to the client's form. */
+const isBroker = (link: GuidedLinkRow) => kindOf(link) === 'broker';
+/** What a broker's link is refused, said once. */
+const BROKER_REFUSED = 'Only the client can do this, from their own link. Everything you entered is saved on their claim.';
 
 const VOICE_MAX = 16 * 1024 * 1024;
 /** WhatsApp's own limit for an image is 5 MB and a document 100 MB; the page sends photos small, so a PDF or a video is what reaches this. */
@@ -91,7 +99,7 @@ function privateHeaders(res: Response) {
     res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow', 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff' });
 }
 
-/** A link's calls run one at a time, so two saves from the same page can't overwrite each other's answers. */
+/** A claim's calls run one at a time, so two saves (the client's page and the broker's, 20 Nov 2026) can't overwrite each other's answers. */
 const queues = new Map<string, Promise<unknown>>();
 function inTurn<T>(id: string, work: () => Promise<T>): Promise<T> {
     const run = (queues.get(id) ?? Promise.resolve()).then(work, work);
@@ -242,6 +250,11 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
             const link = await linked(d, req, res);
             if (!link) return;
             const view = await d.session(link).view();
+            if (isBroker(link)) {
+                // The terms are the client's to accept: the broker fills in, and the client still sees them on their own link.
+                const { terms: _t, ...rest } = view;
+                return void res.json({ ...rest, broker: true, ...(link.callback_url ? { emailed: true } : {}) });
+            }
             // The missing-items form signs nothing: the claim is signed already.
             res.json({ ...view, ...(link.callback_url ? { emailed: true } : {}), ...(signsHere(d, link) && !view.topUp ? { sign: true } : {}) });
         } catch (e) { failed('state', res, e); }
@@ -252,7 +265,11 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!d) return void off(res);
         try {
             const link = res.locals.link as GuidedLinkRow;
-            res.json(await inTurn(link.id, () => d.session(link).save(saveInput(req.body))));
+            const input = saveInput(req.body);
+            // A broker never accepts the client's terms for them.
+            if (isBroker(link)) input.termsAccepted = false;
+            // In the claim's own turn, not the link's: the client's link and the broker's link save the same answers.
+            res.json(await inTurn(`claim:${link.claim_id}`, () => d.session(link).save(input)));
         } catch (e) { failed('save', res, e); }
     });
 
@@ -288,7 +305,7 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
             const id = req.header('x-upload-id') ?? '';
             // A link's files go in one at a time, as its answers do (each one scores the claim and may raise a flag), and a try
             // the page repeats after a dropped answer is not filed twice.
-            const r = await once(UPLOAD_ID.test(id) ? `${link.id}:${id}` : null, () => inTurn(`file:${link.id}`, () => d.session(link).file({ fileName, mimeType, media: type.media }, bytes, item)));
+            const r = await once(UPLOAD_ID.test(id) ? `${link.id}:${id}` : null, () => inTurn(`file:${link.claim_id}`, () => d.session(link).file({ fileName, mimeType, media: type.media }, bytes, item)));
             res.json({ ok: true, count: r.count });
         } catch (e) { failed('file', res, e); }
     });
@@ -298,7 +315,8 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!d) return void off(res);
         try {
             const link = res.locals.link as GuidedLinkRow;
-            await inTurn(link.id, () => d.session(link).stopReminders());
+            if (isBroker(link)) return void res.status(403).json({ ok: false, message: BROKER_REFUSED });
+            await inTurn(`claim:${link.claim_id}`, () => d.session(link).stopReminders());
             res.json({ ok: true });
         } catch (e) { failed('stop-reminders', res, e); }
     });
@@ -308,12 +326,13 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
         if (!d) return void off(res);
         try {
             const link = res.locals.link as GuidedLinkRow;
+            if (isBroker(link)) return void res.status(403).json({ ok: false, message: BROKER_REFUSED });
             const signature = typeof req.body?.signature === 'string' ? req.body.signature : '';
             const session = d.session(link);
             // The same check as the signing page's: a PNG from the pad, of a pad's size. Not on the missing-items form
             // (the user, 18 Nov 2026), which has nothing to sign: the view says which it is.
             if (signsHere(d, link) && !signaturePng(signature) && !(await session.view()).topUp) return void res.status(400).json({ ok: false, message: 'Please sign in the box.' });
-            const r = await inTurn(link.id, () => session.finish());
+            const r = await inTurn(`claim:${link.claim_id}`, () => session.finish());
             if (r.open.length) {
                 // Question keys only, never an answer. When a client says Submit did nothing, this says what the form still wanted.
                 console.warn(`[ClaimForm] submit held for link ${link.id}${link.callback_url ? ' (email claim)' : ''}: still open: ${r.open.slice(0, 25).join(', ')}`);

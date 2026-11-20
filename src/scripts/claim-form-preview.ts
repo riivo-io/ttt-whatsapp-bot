@@ -39,6 +39,8 @@ const PORT = Number(arg('port', '3456'));
 const DIR = arg('configs', '../ttt-preseason-agent/config/claimforms');
 const HTTPS = process.argv.includes('--https');
 const EMAIL = process.argv.includes('--email');
+/** The user (20 Nov 2026): --broker opens each form as the claim's broker sees it (links.ts kind 'broker'). */
+const BROKER = process.argv.includes('--broker');
 const CARRY = arg('carry', '');
 const CARRY_MS = Number(arg('carry-ms', '20000'));
 const TOP_UP = process.argv.includes('--top-up');
@@ -168,7 +170,7 @@ async function main() {
     const listening = async () => {
         for (const [i, row] of rows.entries()) {
             claims.set(row.name, claimFor(row, i));
-            links[row.name] = (await createGuidedLink(d, { claimId: row.name, phone: EMAIL ? '' : '27000000000', contactId: 'preview', ...(EMAIL ? { callbackUrl: 'https://agent.example/claim-form-done' } : {}) })).url;
+            links[row.name] = (await createGuidedLink(d, { claimId: row.name, phone: EMAIL ? '' : '27000000000', contactId: 'preview', ...(EMAIL ? { callbackUrl: 'https://agent.example/claim-form-done' } : {}), ...(BROKER ? { kind: 'broker' as const } : {}) })).url;
         }
         console.log(JSON.stringify(links, null, 1));
         console.log(`Preview on ${SCHEME}://localhost:${PORT}, ${rows.length} forms. Nothing here touches the CRM or WhatsApp.`);
