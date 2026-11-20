@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/optout.ts (commit 15ef83b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/optout.ts (commit 20a642e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // The user (18 Nov 2026): a client can opt out of Tina's morning reminders (reminder.ts). Two ways in, one effect:
 // - on WhatsApp they reply "stop" (asksToStopReminders), which Tina's host checks before it reads the reply as anything

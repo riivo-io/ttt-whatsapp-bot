@@ -180,6 +180,11 @@ export interface ClaimsDemoDeps {
     transcribe?(voice: DemoVoice, hint: string): Promise<VoiceHeard>;
     /** TTTFG-5562: a new claim gets the link to the guided form (CLAIMS_GUIDED_FORM). Absent: every question on WhatsApp. */
     guidedForm?: boolean;
+    /**
+     * The user (20 Nov 2026): CLAIMS_MISSING_ITEMS. The email agent thanks the client for the missing-items form's Submit, so
+     * Tina sends nothing of her own on it (the package's missingItemsByAgent).
+     */
+    missingItemsByAgent?: boolean;
     /** TTTFG-5299: roadside help (ROADSIDE_ENABLED). Absent: off, and a breakdown is read as anything else is. */
     roadsideModel?: RoadsideModel;
     /** TTTFG-5299: opens the riivo_request (Insurance, topic Roadside assistance). Null when refused: the number still goes. */
@@ -481,7 +486,10 @@ export async function claimsDemoBatchCheck(deps: ClaimsDemoDeps, phone: string, 
 }
 
 /** The user (18 Nov 2026): the guided form's switch on every follow-on turn, so what's still missing goes with its link. */
-const guided = (deps: Pick<ClaimsDemoDeps, 'guidedForm'>) => (deps.guidedForm ? { guidedForm: true } : {});
+const guided = (deps: Pick<ClaimsDemoDeps, 'guidedForm' | 'missingItemsByAgent'>) => ({
+    ...(deps.guidedForm ? { guidedForm: true } : {}),
+    ...(deps.missingItemsByAgent ? { missingItemsByAgent: true } : {}),
+});
 
 /**
  * TTTFG-5562 (AC 6): the client submitted the guided form. The claim carries on as a chat-answered one does: what's still
