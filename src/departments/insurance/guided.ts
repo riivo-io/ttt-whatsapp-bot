@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 20a642e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit df632d8). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -511,6 +511,17 @@ export interface GuidedSave {
   detailsConfirmed?: boolean;
   /** The client agreed to what opens the form. */
   termsAccepted?: boolean;
+  /**
+   * The user (20 Nov 2026): the client and the broker can have the same claim's form open at once, each on their own link.
+   * A page saves a screen's blanks ("I don't know", a value taken off) and the values it filled in itself (a pre-fill from
+   * an earlier claim, a count nobody touched, the "is there another?" after the last entry) as well as what was typed.
+   * For each such key the page says what it showed: the value, or null for nothing. If the claim holds another answer
+   * for that key now, someone saved it after this page last read the claim, so theirs stays and this key is left out
+   * (withoutStale). A key the person typed has no entry here: the latest typed answer wins, as it always has.
+   */
+  seen?: Readonly<Record<string, string | number | boolean | null>>;
+  /** Whose link this came from (AnswerRecord `by`). The host sets it from the link, never from what the page sent. */
+  by?: 'client' | 'broker';
 }
 
 export interface GuidedSaved {
@@ -519,6 +530,8 @@ export interface GuidedSaved {
   answers: GuidedView['answers'];
   notKnown: string[];
   open: string[];
+  /** The user (20 Nov 2026): keys left out because someone else answered them after the page last read the claim (withoutStale). */
+  kept?: string[];
 }
 
 const NOT_READ = "That doesn't look right. Could you check it?";
@@ -537,6 +550,55 @@ function dropEndedEntries(form: ClaimForm, answers: ClaimAnswers): void {
       if (more?.status === 'answered' && more.value === false) ended = true;
     }
   }
+}
+
+/** The question a key asks: `<key>.<n>` is the n-th entry of a repeating group. */
+const itemFor = (form: ClaimForm, key: string) => form.questionList.find((q) => q.key === key) ?? form.questionList.find((q) => q.key === key.replace(/\.\d+$/, ''));
+
+/** Whether what the claim holds is what the page showed, allowing for how a value is stored (trimmed, a number, a choice's own case). */
+function sameAsShown(held: string | number | boolean, shown: string | number | boolean, item: QuestionItem | undefined): boolean {
+  if (held === shown) return true;
+  if (typeof held === 'string' && typeof shown === 'string' && held.trim() === shown.trim()) return true;
+  if (item) {
+    const stored = accept(item, shown);
+    if (stored !== undefined && stored === held) return true;
+  }
+  return false;
+}
+
+/**
+ * The user (20 Nov 2026): the client's link and the broker's link save to the same claim. A page that read the claim
+ * before the other person saved still shows their questions blank, and its next save would say "I don't know" over
+ * their answers (or a pre-fill, or "no more" after the last entry when they had added one). So a key the page didn't
+ * have typed into (`seen`) is saved only while the claim holds no other answer for it than the one the page showed.
+ * Otherwise it's left out and comes back in `kept`, and the claim keeps the other person's answer.
+ *
+ * A key typed on this page is never in `seen`, so the latest typed answer still wins. A page that sends no `seen` (one
+ * opened before this change) saves as before.
+ */
+export function withoutStale(form: ClaimForm, claim: FollowOnClaim, input: GuidedSave): { input: GuidedSave; kept: string[] } {
+  const seen = input.seen;
+  if (!seen || !Object.keys(seen).length) return { input, kept: [] };
+  // What the page was given for each key (guidedView and every save's answer): the same map, read from the claim as it is now.
+  const held = knownValues(form, claim).answers;
+  const kept = new Set<string>();
+  const ok = (key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(seen, key)) return true;
+    const now = Object.prototype.hasOwnProperty.call(held, key) ? held[key] : undefined;
+    // Nothing answered there now: a blank or a pre-fill loses nobody's answer.
+    if (now === undefined) return true;
+    const shown = seen[key];
+    if (shown !== null && shown !== undefined && sameAsShown(now, shown, itemFor(form, key))) return true;
+    kept.add(key);
+    return false;
+  };
+  const out: GuidedSave = {
+    ...input,
+    answers: (input.answers ?? []).filter((a) => ok(a.key)),
+    notKnown: (input.notKnown ?? []).filter(ok),
+    cleared: (input.cleared ?? []).filter(ok),
+  };
+  return { input: out, kept: [...kept] };
 }
 
 /**
@@ -638,6 +700,9 @@ export function applyGuidedSave(
   }
   const phone = phoneFromItems(form, answers);
   if (phone !== undefined) answers[PHONE_OR_TABLET_KEY] = { value: phone, status: 'answered', at, source: 'computed' };
+  // The user (20 Nov 2026): whose link each answer written by this save came from. A record this save didn't write is the
+  // claim's own object, so it keeps whatever it said.
+  if (input.by) for (const [k, r] of Object.entries(answers)) if (r !== claim.answers[k] && r.source === 'form') answers[k] = { ...r, by: input.by };
   return { answers, saps, clearSaps, problems };
 }
 
@@ -671,6 +736,8 @@ export async function earlierClaimAnswers(dv: Dv, contactId: string, claimId: st
 /** One screen's answers, saved as chat answers are. */
 export async function saveGuided(ports: GuidedPorts, claimId: string, input: GuidedSave, now: Date): Promise<GuidedSaved> {
   const { claim, form, sapsRequired } = await loaded(ports, claimId);
+  const fresh = withoutStale(form, claim, input);
+  input = fresh.input;
   if (formSubmitted(claim)) input = topUpInput(input, topUpKeys(form, claim));
   const { answers, saps, clearSaps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
   if (saps.caseNumber || saps.station) await ports.saveSaps(claimId, saps);
@@ -700,7 +767,7 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
     sapsRequired: claim.sapsRequired || statesTheft(form, answers),
     facts: { ...claim.facts, ...columns, ...(saps.caseNumber ? { saps: true } : {}) },
   };
-  return { problems, ...knownValues(form, after), open: guidedOpen(form, after, policeOpen(after, form)) };
+  return { problems, ...knownValues(form, after), open: guidedOpen(form, after, policeOpen(after, form)), ...(fresh.kept.length ? { kept: fresh.kept } : {}) };
 }
 
 /**
@@ -714,6 +781,8 @@ function topUpInput(input: GuidedSave, keys: ReadonlySet<string>): GuidedSave {
     notKnown: (input.notKnown ?? []).filter(mine),
     cleared: (input.cleared ?? []).filter(mine),
     checked: (input.checked ?? []).filter(mine),
+    ...(input.seen ? { seen: input.seen } : {}),
+    ...(input.by ? { by: input.by } : {}),
   };
 }
 

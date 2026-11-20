@@ -958,7 +958,12 @@ const SCRIPT = String.raw`
 
   // ---- saving: a blank says "I don't know" -------------------------------------------------------------------------
   function collect(blocks) {
-    var answers = [], notKnown = [], cleared = [];
+    var answers = [], notKnown = [], cleared = [], seen = {};
+    // The user (20 Nov 2026): the client and the broker can have this claim open at once, each on their own link. Every key
+    // saved here that wasn't typed on this screen (a blank, a pre-fill, a count nobody touched, the "no more" after the last
+    // entry) goes with what this page showed for it, so the server keeps an answer the other person gave since (guided.ts
+    // withoutStale). What was typed goes without: the latest typed answer wins.
+    function saw(k) { seen[k] = A[k] !== undefined ? A[k] : null; }
     blocks.forEach(function (b) {
       b.fields.forEach(function (f) {
         var v = value(f.key);
@@ -968,28 +973,30 @@ const SCRIPT = String.raw`
           Object.keys(draft).forEach(function (k) {
             if (k.indexOf(f.control.group + '.more.') !== 0) return;
             if (filled(draft[k])) answers.push({ key: k, value: draft[k] });
-            else if (A[k] !== undefined) cleared.push(k);
+            else if (A[k] !== undefined) { cleared.push(k); saw(k); }
           });
           // The count the client sees is their answer, even untouched: "1" came from what they told Tina, so the
           // "is there another?" after the last card is a no. Without it the server holds that question open and
           // Submit keeps sending them back to this step.
           var n = stepCount(f, f.control), last = f.control.group + '.more.' + n;
-          if ((v === true || f.control.min) && n < stepMax(f.control) && !filled(value(last))) answers.push({ key: last, value: false });
+          if ((v === true || f.control.min) && n < stepMax(f.control) && !filled(value(last))) { answers.push({ key: last, value: false }); if (!(last in draft)) saw(last); }
           // A count of items is the page's own: only the "is there another?" answers are saved.
           if (f.control.min) return;
         }
         if (filled(v)) {
-          if (v !== A[f.key] || NK[f.key]) answers.push({ key: f.key, value: v });
+          if (v !== A[f.key] || NK[f.key]) { answers.push({ key: f.key, value: v }); if (!(f.key in draft)) saw(f.key); }
           return;
         }
-        if (A[f.key] !== undefined) cleared.push(f.key);
-        if (!NK[f.key] || A[f.key] !== undefined) notKnown.push(f.key);
+        var blank = false;
+        if (A[f.key] !== undefined) { cleared.push(f.key); blank = true; }
+        if (!NK[f.key] || A[f.key] !== undefined) { notKnown.push(f.key); blank = true; }
+        if (blank) saw(f.key);
       });
     });
-    return { answers: answers, notKnown: notKnown, cleared: cleared };
+    return { answers: answers, notKnown: notKnown, cleared: cleared, seen: seen };
   }
   // ---- saving behind the page: in order, one at a time, trying again until it's in ---------------------------------------
-  var queue = [], sending = false, failures = 0, refused = 0, lost = false, problems = {}, waiters = [], submitting = false;
+  var queue = [], sending = false, failures = 0, refused = 0, lost = false, problems = {}, waiters = [], submitting = false, keptNote = false;
   function idle() { return !queue.length && !sending && !hearing && !uploads.some(busyUp); }
   function whenIdle(fn) { if (idle()) return fn(); waiters.push(fn); }
   function checkIdle() { if (!idle()) return; var w = waiters; waiters = []; w.forEach(function (f) { f(); }); }
@@ -1008,6 +1015,13 @@ const SCRIPT = String.raw`
     to.answers = (to.answers || []).filter(function (a) { return keep(a.key); }).concat(b.answers || []);
     to.notKnown = (to.notKnown || []).filter(keep).concat(b.notKnown || []);
     to.cleared = (to.cleared || []).filter(keep).concat(b.cleared || []);
+    // What the later save says about a key replaces what the earlier one said: a key typed now has no "seen" any more.
+    if (to.seen || b.seen) {
+      var seen = {};
+      Object.keys(to.seen || {}).forEach(function (k) { if (keep(k)) seen[k] = to.seen[k]; });
+      Object.keys(b.seen || {}).forEach(function (k) { seen[k] = b.seen[k]; });
+      to.seen = seen;
+    }
     if (b.detailsConfirmed) to.detailsConfirmed = true;
     if (b.termsAccepted) to.termsAccepted = true;
   }
@@ -1068,6 +1082,9 @@ const SCRIPT = String.raw`
       problems[p.key] = p.text; errors[p.key] = p.text; checked[p.key] = true;
       redraw = true;
     });
+    // The user (20 Nov 2026): an answer the other link gave while this page showed it blank was kept. A is the claim's now,
+    // so the review and any step gone back to show their answer; the bar says why it isn't what was left here.
+    if (r.kept && r.kept.length) { keptNote = true; redraw = true; }
     // An answer can open a question only the server knows about. It's read in behind the page.
     if (r.open && !r.open.every(holdsKey)) api('/state').then(function (s) { adopt(s); queue.forEach(overlay); if (!typing() && !sheetOpen()) render(); }).catch(function () {});
     if (redraw && !typing() && !sheetOpen()) render();
@@ -1087,6 +1104,7 @@ const SCRIPT = String.raw`
     else if (camLost) html = '<span>Your phone closed this page while the camera was open, so that photo did not come through. Please take it again.</span><button type="button" data-camok>OK</button>';
     else if (failures >= 2) html = '<span>No connection. Your answers are safe here and save when you\'re back online.</span>';
     else if (keys.length) html = '<span>' + esc(labelFor(keys[0])) + ' ' + esc(problems[keys[0]]) + '</span><button type="button" data-fix="' + q(keys[0]) + '">Fix</button>';
+    else if (keptNote) html = '<span>' + (V.broker ? 'Some answers were already filled in on the claim, so we kept them.' : 'Some answers were already filled in on your claim, so we kept them. You can check them before you submit.') + '</span><button type="button" data-keptok>OK</button>';
     el.innerHTML = html;
     el.hidden = !html;
   }
@@ -1799,6 +1817,7 @@ const SCRIPT = String.raw`
   });
   $('notice').addEventListener('click', function (e) {
     if (e.target.closest('[data-camok]')) { camLost = false; return drawNotice(); }
+    if (e.target.closest('[data-keptok]')) { keptNote = false; return drawNotice(); }
     var b = e.target.closest('[data-fix]');
     if (b) goFix(b.dataset.fix);
   });
