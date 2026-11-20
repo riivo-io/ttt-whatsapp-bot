@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 20a642e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit df632d8). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -489,6 +489,28 @@ export interface StatusUpdateVars {
   reference: string;
   /** The insurer's claim number, when the claim has one: the under review message gives it (UNDER_REVIEW_TEMPLATE). */
   number?: string;
+  /** The email only (statusEmail): the client's first name, and the broker's name it is signed with. Never on WhatsApp. */
+  firstName?: string;
+  broker?: string;
+}
+
+export const STATUS_CLOSING = 'We will keep you updated on the status of your claim.';
+
+/**
+ * The user (20 Nov 2026): a status update by email reads
+ *   Hi <first name>,
+ *   Just wanted to give you an update on the status of your claim:
+ *   <what happened: submitted, under review and the claim number, more information asked for>
+ *   We will keep you updated on the status of your claim.
+ *   Regards
+ *   <broker's name>
+ * The WhatsApp template keeps its own words (`whatsappBody`, registered with Meta). A client with no first name on the CRM is
+ * "there"; a claim owned by a team signs "Regards" alone, as the general mailbox's frame puts "Team TTT" right under it.
+ */
+export function statusEmail(v: StatusUpdateVars, update: string): string {
+  const broker = v.broker?.trim();
+  return [`Hi ${v.firstName?.trim() || 'there'},`, 'Just wanted to give you an update on the status of your claim:', update, STATUS_CLOSING,
+    broker ? `Regards\n${broker}` : 'Regards'].join('\n\n');
 }
 
 /** The vars of a message that gives the insurer's number. */
@@ -517,7 +539,10 @@ export interface StatusTemplate {
   templateVersion: number;
   whatsappBody: string;
   params(v: StatusUpdateVars): string[];
+  /** The WhatsApp message as the client reads it. */
   render(v: StatusUpdateVars): string;
+  /** The email's text (statusEmail). */
+  emailText(v: StatusUpdateVars): string;
   emailSubject(v: StatusUpdateVars): string;
   withoutNumber?: StatusTemplate;
 }
@@ -545,6 +570,7 @@ export const UNDER_REVIEW_NO_NUMBER_TEMPLATE: StatusTemplate = {
   whatsappBody: 'Your claim submitted to {{1}} is under review.\nWe will keep you updated on the status of your claim.',
   params: (v) => [v.insurer],
   render: (v) => `Your claim submitted to ${v.insurer} is under review.\nWe will keep you updated on the status of your claim.`,
+  emailText: (v) => statusEmail(v, `Your claim submitted to ${v.insurer} is under review.`),
   emailSubject: (v) => `Your claim ${v.reference} is under review`,
 };
 
@@ -560,6 +586,7 @@ export const UNDER_REVIEW_TEMPLATE: StatusTemplate = {
   whatsappBody: 'Your claim submitted to {{1}} is under review.\n\nYour claim number is: {{2}}.\n\nWe will keep you updated on the status of your claim.',
   params: (v) => [v.insurer, v.number ?? ''],
   render: (v) => `Your claim submitted to ${v.insurer} is under review.\n\nYour claim number is: ${v.number ?? ''}.\n\nWe will keep you updated on the status of your claim.`,
+  emailText: (v) => statusEmail(v, `Your claim submitted to ${v.insurer} is under review.\n\nYour claim number is: ${v.number ?? ''}.`),
   emailSubject: (v) => `Your claim ${v.reference} is under review`,
   withoutNumber: UNDER_REVIEW_NO_NUMBER_TEMPLATE,
 };
@@ -582,6 +609,7 @@ export const SUBMITTED_UPDATE_TEMPLATE: StatusTemplate = {
   whatsappBody: "Update on your claim: your claim has been submitted to {{1}}. You don't need to do anything for now. We will keep you updated on the status of your claim.",
   params: (v) => [v.insurer],
   render: (v) => `Update on your claim: your claim has been submitted to ${v.insurer}. You don't need to do anything for now. We will keep you updated on the status of your claim.`,
+  emailText: (v) => statusEmail(v, `Your claim has been submitted to ${v.insurer}. You don't need to do anything for now.`),
   emailSubject: (v) => `Your claim ${v.reference} has been submitted to ${v.insurer}`,
 };
 
@@ -589,7 +617,7 @@ export const SUBMITTED_UPDATE_TEMPLATE: StatusTemplate = {
 // still has to confirm it (AC 4), and their wording goes in as a new version. `metaApproved` stays false here: Meta approves
 // per WhatsApp account, so each environment says so with CLAIMS_STATUS_META_APPROVED (statusupdate-dataverse.ts).
 // Meta refuses a body that starts or ends with a variable, or is mostly variables, so it carries fixed text around them.
-// Unchanged on 18 Nov 2026 (the user: additional info requested stays as it is).
+// Unchanged on 18 Nov 2026 (the user: additional info requested stays as it is); its email takes the 20 Nov 2026 shape (statusEmail).
 export const ADDITIONAL_INFO_TEMPLATE: StatusTemplate = {
   name: 'Claim - additional info requested',
   version: 'riivo-1',
@@ -602,6 +630,7 @@ export const ADDITIONAL_INFO_TEMPLATE: StatusTemplate = {
   whatsappBody: 'An update on your claim {{1}}: {{2}} has asked for more information before they can carry on. We will be in touch to tell you what is needed.',
   params: (v) => [v.reference, v.insurer],
   render: (v) => `An update on your claim ${v.reference}: ${v.insurer} has asked for more information before they can carry on. We will be in touch to tell you what is needed.`,
+  emailText: (v) => statusEmail(v, `${v.insurer} has asked for more information on your claim ${v.reference} before they can carry on. We will be in touch to tell you what is needed.`),
   emailSubject: (v) => `More information needed on your claim ${v.reference}`,
 };
 

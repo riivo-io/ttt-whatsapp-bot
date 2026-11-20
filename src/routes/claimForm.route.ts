@@ -144,7 +144,16 @@ function saveInput(body: unknown): GuidedSave {
         ? b.answers.filter((a): a is { key: string; value: string | number | boolean } => !!a && typeof a.key === 'string' && a.key.length < 120 && ['string', 'number', 'boolean'].includes(typeof a.value)
             && (typeof a.value !== 'string' || a.value.length <= 5000)).slice(0, 500)
         : [];
-    return { answers, notKnown: keys(b.notKnown), cleared: keys(b.cleared), checked: keys(b.checked), detailsConfirmed: b.detailsConfirmed === true, termsAccepted: b.termsAccepted === true };
+    // The user (20 Nov 2026): what the page showed for the keys it saves without them being typed (guided.ts withoutStale), so
+    // a page that read the claim before the client or the broker saved on their own link never blanks their answers.
+    const seen = b.seen && typeof b.seen === 'object' && !Array.isArray(b.seen)
+        ? Object.fromEntries(Object.entries(b.seen as Record<string, unknown>).filter((e): e is [string, string | number | boolean | null] => e[0].length < 120
+            && (e[1] === null || typeof e[1] === 'number' || typeof e[1] === 'boolean' || (typeof e[1] === 'string' && e[1].length <= 5000))).slice(0, 500))
+        : undefined;
+    return {
+        answers, notKnown: keys(b.notKnown), cleared: keys(b.cleared), checked: keys(b.checked), detailsConfirmed: b.detailsConfirmed === true, termsAccepted: b.termsAccepted === true,
+        ...(seen ? { seen } : {}),
+    };
 }
 
 export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
@@ -273,6 +282,8 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
             const input = saveInput(req.body);
             // A broker never accepts the client's terms for them.
             if (isBroker(link)) input.termsAccepted = false;
+            // Whose link it was, on every answer this save writes: from the link, never from what the page sent.
+            input.by = isBroker(link) ? 'broker' : 'client';
             // In the claim's own turn, not the link's: the client's link and the broker's link save the same answers.
             res.json(await inTurn(`claim:${link.claim_id}`, () => d.session(link).save(input)));
         } catch (e) { failed('save', res, e); }

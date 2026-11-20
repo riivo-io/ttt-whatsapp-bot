@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit 20a642e). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/contracts.ts (commit df632d8). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // Shared types for the claims stories that build on TTTFG-5168: the claim form config (TTTFG-5172), the client's
 // saved answers (TTTFG-5176) and the signing seam between TTTFG-5176 and TTTFG-5192.
@@ -261,6 +261,12 @@ export interface AnswerRecord {
    * kept as given, with the reason, for the broker to check.
    */
   doubt?: string;
+  /**
+   * The user (20 Nov 2026): whose link the guided form was saved from, when `source` is form: the client's own link or the
+   * claim's broker's link (Tina's links.ts `kind`). Set by Tina from the link, never by the page. Absent: an answer saved
+   * before this was kept, or one that didn't come from the form.
+   */
+  by?: 'client' | 'broker';
 }
 /** riivo_claim.riivo_answers, keyed by question key (`<key>.<n>` for the n-th entry of a grouped question). */
 export type ClaimAnswers = Record<string, AnswerRecord>;

@@ -15,6 +15,9 @@
  * It prints one link per form. A voice recording comes back as a sample sentence; Submit prints what Tina would do next.
  * GET /__claim/<form name> shows what the form has saved so far, for the checks in the test walkthrough.
  *
+ * --both (the user, 20 Nov 2026): each claim gets the client's link and the broker's link, as when both are out, to try the
+ * two at once (open them in two windows). The list shows the broker's link under each form.
+ *
  * --top-up (the user, 18 Nov 2026): every claim is one already submitted and signed, with its questions answered and its
  * files and SAPS case number still to come, so each link opens the missing-items form (guided.ts topUp).
  */
@@ -41,6 +44,8 @@ const HTTPS = process.argv.includes('--https');
 const EMAIL = process.argv.includes('--email');
 /** The user (20 Nov 2026): --broker opens each form as the claim's broker sees it (links.ts kind 'broker'). */
 const BROKER = process.argv.includes('--broker');
+const BOTH = process.argv.includes('--both');
+const brokerLinks: Record<string, string> = {};
 const CARRY = arg('carry', '');
 const CARRY_MS = Number(arg('carry-ms', '20000'));
 const TOP_UP = process.argv.includes('--top-up');
@@ -156,7 +161,10 @@ function session(link: GuidedLinkRow): ClaimFormSession {
     };
 }
 
-const D: GuidedLinkDeps = { store: memoryLinkStore(), publicUrl: `${SCHEME}://localhost:${PORT}` };
+const D: GuidedLinkDeps = {
+    store: memoryLinkStore(), publicUrl: `${SCHEME}://localhost:${PORT}`,
+    ...(BOTH ? { onBrokerLink: async (l: { claimId: string; url: string }) => { brokerLinks[l.claimId] = l.url; } } : {}),
+};
 
 async function main() {
     const d = D;
@@ -172,13 +180,14 @@ async function main() {
     // A list of every form, so the preview opens on something to click.
     app.get('/', (_req, res) => res.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Guided form preview</title>
 <style>body{font:15px/1.5 system-ui,sans-serif;margin:0 auto;max-width:520px;padding:20px 16px;color:#0B0F14}h1{font-size:20px;margin:0 0 4px}p{color:#6B7684;margin:0 0 16px}a{display:block;padding:12px 14px;margin:0 0 8px;border:1px solid #CDD2D8;border-radius:10px;color:#015A8E;text-decoration:none}</style>
-<h1>Guided claim form preview</h1><p>Made-up claims in memory. Nothing here touches the CRM or WhatsApp.</p>${Object.entries(links).map(([name, url]) => `<a href="${new URL(url).pathname}">${name.replace('--', ' · ').replace(/-/g, ' ')}</a>`).join('')}`));
+<h1>Guided claim form preview</h1><p>Made-up claims in memory. Nothing here touches the CRM or WhatsApp.</p>${Object.entries(links).map(([name, url]) => `<a href="${new URL(url).pathname}">${name.replace('--', ' · ').replace(/-/g, ' ')}</a>${brokerLinks[name] ? `<a href="${new URL(brokerLinks[name]).pathname}" data-broker="${name}">↳ the broker's link</a>` : ''}`).join('')}`));
     const listening = async () => {
         for (const [i, row] of rows.entries()) {
             claims.set(row.name, claimFor(row, i));
             links[row.name] = (await createGuidedLink(d, { claimId: row.name, phone: EMAIL ? '' : '27000000000', contactId: 'preview', ...(EMAIL ? { callbackUrl: 'https://agent.example/claim-form-done' } : {}), ...(BROKER ? { kind: 'broker' as const } : {}) })).url;
         }
         console.log(JSON.stringify(links, null, 1));
+        if (BOTH) console.log('Broker links:', JSON.stringify(brokerLinks, null, 1));
         console.log(`Preview on ${SCHEME}://localhost:${PORT}, ${rows.length} forms. Nothing here touches the CRM or WhatsApp.`);
         for (const ip of LAN) console.log(`On a phone on the same Wi-Fi: ${SCHEME}://${ip}:${PORT}/`);
     };
