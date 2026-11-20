@@ -972,3 +972,45 @@ test('TTTFG-5299 (code review): an answer to an open claim\'s question is never 
     assert.notEqual(out, 'roadside');
     assert.equal(roadsideCalls, 0);
 });
+
+// ---- Claims go live (20 Nov 2026): a real client, through the same host (deps.live) ----
+
+test('claims go live: a live client who says something that is not a claim is let go: nothing said, opened or kept', async () => {
+    const w = world({ isClaim: false });
+    w.deps.live = true;
+    assert.equal(await say(w, 'Can you check my car cover is up to date?', DAY1), 'not-claims');
+    assert.deepEqual(w.sent, []);
+    assert.equal(w.requests.length, 0);
+    assert.equal(w.store.has(PHONE), false);
+    // A file with no claim: let go too (service routing files it for the broker), not held for a claim that never comes.
+    assert.equal(await say(w, '', tick(DAY1, 1), photo), 'not-claims');
+    assert.equal(w.store.has(PHONE), false);
+});
+
+test('claims go live: the claim tap or link (force) starts a claim without asking the model whether it is one', async () => {
+    const w = guidedWorld();
+    w.deps.live = true;
+    w.deps.intentModel = async () => { throw new Error('the intent model must not be asked'); };
+    const outcome = await claimsDemoTurn(w.deps, { phone: PHONE, contactId: CONTACT, text: "Hi Tina, I'd like to open an insurance claim.", wamid: 'w1', force: true }, DAY1);
+    assert.ok(['started', 'opened'].includes(outcome), outcome);
+    assert.equal(w.requests.length, 1);
+});
+
+test('claims go live: a live claim runs to the form exactly as on a demo number', async () => {
+    const w = guidedWorld();
+    w.deps.live = true;
+    await openClaim(w);
+    assert.equal(w.store.get(PHONE)?.resume.followOn?.phase, 'form');
+    assert.equal(w.sent.at(-1), 'Fill out the form below to submit your claim.');
+});
+
+test('claims go live: "#reset" means nothing to a real client: no claim is withdrawn', async () => {
+    const w = guidedWorld();
+    w.deps.live = true;
+    const t = await openClaim(w);
+    assert.equal(w.rows.length, 1);
+    assert.notEqual(await say(w, '#reset', tick(t, 30)), 'reset');
+    assert.deepEqual(w.withdrawn, []);
+    assert.notEqual(w.rows[0].status, 'Withdrawn');
+    assert.ok(w.store.has(PHONE));
+});

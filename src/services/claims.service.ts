@@ -27,6 +27,8 @@ import { RateLimitError } from '../utils/anthropicRateLimit';
 import { dynamicsService } from './dynamics.service';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService } from './supabase.service';
+import { handleClaimsLiveMessage } from './claimsDemo.service';
+import { claimsLiveMode, claimsLiveOn } from '../utils/claimsLiveSwitch';
 
 const INTENT_MODEL = process.env.CLAIMS_INTENT_MODEL || 'claude-haiku-4-5-20251001';
 const UNDERSTAND_MODEL = process.env.CLAIMS_UNDERSTAND_MODEL || 'claude-sonnet-4-6';
@@ -35,7 +37,11 @@ const ROADSIDE_MODEL = process.env.CLAIMS_ROADSIDE_MODEL || INTENT_MODEL;
 const SIGN_UP_LINK = process.env.CLAIMS_SIGNUP_LINK || 'https://www.ttt-tax.co.za/client-onboarding';
 const REQUEST_CATEGORY_INSURANCE = 1; // riivo_request.riivo_category: 0 Tax, 1 Insurance, 2 Accounting
 
-export const claimsEnabled = () => process.env.CLAIMS_ENABLED === 'true';
+/**
+ * The October chat walkthrough (claimsHost.ts). Claims go live (CLAIMS_LIVE, 20 Nov 2026) retires it for every number: a
+ * live client's claim goes to the form flow (claimsDemo.service.ts), and a number not (yet) live gets no claims at all.
+ */
+export const claimsEnabled = () => process.env.CLAIMS_ENABLED === 'true' && !claimsLiveMode();
 
 let anthropic: Anthropic | undefined;
 const client = () => (anthropic ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '', maxRetries: 0 }));
@@ -156,7 +162,8 @@ async function guarded(limits: RateLimitError[], run: () => Promise<ClaimsOutcom
 
 /** A message from a number that matches no contact. True when the claims flow answered it. */
 export async function handleUnknownNumberClaim(from: string, text: string): Promise<boolean> {
-    if (!claimsEnabled()) return false;
+    // Claims go live: an unknown number reporting a claim still gets the unknown-number reply (no claim is opened).
+    if (!claimsEnabled() && !claimsLiveMode()) return false;
     const limits: RateLimitError[] = [];
     const out = await guarded(limits, () => claimFromUnknownNumber(deps(from, null, null, limits), from, text, new Date()));
     if (out.handled) console.log(out.kind === 'roadside' ? `[Roadside] ${from} unknown number: roadside help` : `[Claims] ${from} unknown number reported a claim: unknown-number reply sent`);
@@ -181,6 +188,12 @@ export async function handleClientClaimMessage(from: string, text: string, entit
 export async function handleInsuranceClaimMessage(
     from: string, text: string, contact: { id: string; fullname: string }, sessionId: string, o: { force?: boolean } = {},
 ): Promise<boolean> {
+    // Claims go live: the form flow, on the number's insurance contact. False: not a claim; the hand-over has it.
+    if (claimsLiveOn(from)) {
+        const handled = await handleClaimsLiveMessage({ from, text }, contact.id, { force: !!o.force });
+        if (handled) console.log(`[ClaimsLive] ${from} claim taken by the form flow (service routing${o.force ? ', claim tap' : ''})`);
+        return handled;
+    }
     if (!claimsEnabled()) return false;
     const entity: CrmEntity = { id: contact.id, type: 'client', fullname: contact.fullname };
     const limits: RateLimitError[] = [];
