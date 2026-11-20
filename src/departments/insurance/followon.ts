@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 7f40c96). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 8729d59). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -1429,10 +1429,17 @@ function formAgain(st: FollowOnState): Step {
   return { state: { ...st, phase: 'form', asking: '', misses: 0 }, out: [{ kind: 'guided-link', lead: FORM_ONLY }] };
 }
 
-/** A yes on the form to "Was it reported to the police?" brings the SAPS step with it, now the client can't change it there. */
+/**
+ * What the form said brings the SAPS step with it, now the client can't change it there: a yes to "Was it reported to the
+ * police?", or (the user, 20 Nov 2026) a theft ("Stolen" on a household form, TTT 18 Nov), which the form's save marks on the
+ * claim (riivo_sapsrequired). The conversation started before either was known, so its own flag can't be the only one read:
+ * CLM-000508 went to evidence complete with the case number "not yet", and the morning reminder never asked for it.
+ */
 function policeFromForm(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState {
-  if (st.sapsRequired || (w.answers.saps?.value !== true && c.claim.facts.saps !== true)) return st;
-  out.push({ kind: 'saps-required' });
+  if (st.sapsRequired) return st;
+  const police = w.answers.saps?.value === true || c.claim.facts.saps === true;
+  if (!police && !c.claim.sapsRequired && !sapsStepApplies(c.claim.claimType, c.form, false, false, w.answers)) return st;
+  if (!c.claim.sapsRequired) out.push({ kind: 'saps-required' });
   return { ...st, sapsRequired: true };
 }
 
@@ -1504,9 +1511,11 @@ function formEnd(c: Ctx, w: Work, st: FollowOnState, out: Out[]): FollowOnState 
  * The list Tina sent is the conversation's (phase `still-need`, its `skipped`). Without it (the conversation moved on, so
  * the state was rebuilt) the broker is asked to look at the claim instead.
  */
-function topUpDone(c: Ctx, st: FollowOnState): Step {
+function topUpDone(c: Ctx, st0: FollowOnState): Step {
   const w = work(c.claim);
   const out: Out[] = [];
+  // The user (20 Nov 2026): a theft said on the form, as at the first submit (policeFromForm).
+  const st = policeFromForm(c, w, st0, out);
   const missing = missingItems(c.form, w.answers, w.evidence, { facts: w.facts, sapsRequired: st.sapsRequired });
   const listed = st.phase === 'still-need' ? st.skipped : [];
   const open = new Set(missing.map((i) => i.key));
