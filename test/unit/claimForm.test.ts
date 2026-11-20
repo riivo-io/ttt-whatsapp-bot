@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { createGuidedLink, guidedFormOn, isBlankFormUrl, LINK_DAYS, memoryLinkStore, openGuidedLink, postFormDone, sha256, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
+import { cleanLinkToken, createGuidedLink, guidedFormOn, isBlankFormUrl, LINK_DAYS, memoryLinkStore, openGuidedLink, postFormDone, sha256, type GuidedLinkDeps, type GuidedLinkRow } from '../../src/claimform/links';
 import { CLAIM_FORM_CSP, claimFormPage, refusedPage } from '../../src/claimform/page';
 import { joinParts, LINK_LOGGED, linkInteractive, withLinkLine } from '../../src/domain/claimsOutbox';
 import { claimFormRouter, type ClaimFormSession } from '../../src/routes/claimForm.route';
@@ -49,6 +49,42 @@ test('a new link for the same claim stops the earlier one, and a bad token finds
     assert.equal((await openGuidedLink(d, tokenOf(second.url))).ok, true);
     assert.deepEqual(await openGuidedLink(d, 'x'.repeat(43)), { ok: false, reason: 'not-found' });
     assert.deepEqual(await openGuidedLink(d, '../../etc/passwd'), { ok: false, reason: 'not-found' });
+});
+
+test('20 Nov 2026: a link the reminder button gave a literal {{1}} in front of still opens the form', async () => {
+    const d = deps(() => new Date());
+    const { url } = await createGuidedLink(d, INPUT);
+    const token = tokenOf(url);
+    // As Express hands the path segment over (decoded), and as it would arrive still encoded.
+    for (const prefixed of [`{{1}}${token}`, `%7B%7B1%7D%7D${token}`, `%7b%7b1%7d%7d${token}`, `{{1}}{{1}}${token}`]) {
+        const opened = await openGuidedLink(d, prefixed);
+        assert.equal(opened.ok, true, prefixed);
+    }
+    assert.equal(cleanLinkToken(token), token);
+    // Only that exact placeholder goes: nothing else is trimmed, and a wrong token is still a wrong token.
+    assert.deepEqual(await openGuidedLink(d, `{{2}}${token}`), { ok: false, reason: 'not-found' });
+    assert.deepEqual(await openGuidedLink(d, `{{1}}${'x'.repeat(43)}`), { ok: false, reason: 'not-found' });
+    assert.deepEqual(await openGuidedLink(d, '{{1}}'), { ok: false, reason: 'not-found' });
+});
+
+test('20 Nov 2026: the page and every call under a link with the {{1}} in front work, as the client\'s phone sends them', async () => {
+    const d = deps(() => new Date());
+    const { url } = await createGuidedLink(d, INPUT);
+    const calls: string[] = [];
+    const s = await server(d, calls);
+    try {
+        // The broken link from the reminder: the browser keeps the braces encoded, and the page's own calls are built from its path.
+        const broken = `${s.base}/%7B%7B1%7D%7D${tokenOf(url)}`;
+        const page = await fetch(broken);
+        assert.equal(page.status, 200);
+        assert.match(await page.text(), /Check your claim/);
+        assert.equal((await fetch(`${broken}/state`)).status, 200);
+        const saved = await fetch(`${broken}/answers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ termsAccepted: true }) });
+        assert.equal(saved.status, 200);
+        assert.ok(calls.some((c) => c === 'terms:true'));
+        // A made-up token behind the same prefix is still refused.
+        assert.equal((await fetch(`${s.base}/%7B%7B1%7D%7D${'x'.repeat(43)}/state`)).status, 404);
+    } finally { await s.close(); }
 });
 
 test('CLAIMS_GUIDED_FORM is off by default, on for everyone, or on for listed numbers', () => {

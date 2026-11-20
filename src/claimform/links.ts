@@ -124,8 +124,18 @@ async function shareWithBroker(d: GuidedLinkDeps, input: { claimId: string; phon
 export type LinkRefusal = 'not-found' | 'expired' | 'done' | 'superseded';
 export type OpenedLink = { ok: true; row: GuidedLinkRow } | { ok: false; reason: LinkRefusal; emailed?: boolean };
 
+/**
+ * The user (20 Nov 2026): the reminder's "Add missing items" button was registered at Meta with "{{1}}" typed into the URL, which
+ * WhatsApp Manager URL-encodes and then adds its own variable after, so every reminder link came out as
+ * ".../claim-form/%7B%7B1%7D%7D<token>" and the form said it did not work. A leading "{{1}}" (as Express hands it over, or
+ * still encoded) is never part of a token (tokens are base64url), so it is dropped; the links already sent work, and so do
+ * the templates as registered. Once the five templates are re-registered without it, this never fires.
+ */
+export const cleanLinkToken = (raw: string): string => raw.replace(/^(?:\{\{1\}\}|%7B%7B1%7D%7D)+/i, '');
+
 /** The link's row, or why it doesn't work. `record`: this is the client opening it (a link preview doesn't count). */
-export async function openGuidedLink(d: GuidedLinkDeps, token: string, o: { record?: boolean } = {}): Promise<OpenedLink> {
+export async function openGuidedLink(d: GuidedLinkDeps, rawToken: string, o: { record?: boolean } = {}): Promise<OpenedLink> {
+    const token = cleanLinkToken(rawToken);
     if (!/^[A-Za-z0-9_-]{20,100}$/.test(token)) return { ok: false, reason: 'not-found' };
     const row = await d.store.byTokenHash(sha256(token));
     if (!row) return { ok: false, reason: 'not-found' };

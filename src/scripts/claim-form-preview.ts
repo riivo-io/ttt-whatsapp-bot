@@ -115,6 +115,12 @@ const ports = (form: StoredClaimForm): GuidedPorts => ({
         if (v.caseNumber) c.sapsCaseNumber = v.caseNumber;
         if (v.station) c.sapsStation = v.station;
     },
+    // 20 Nov 2026: a case number or station the client takes off the form comes off the claim, as in the CRM.
+    clearSaps: async (id: string, v) => {
+        const c = claims.get(id)!;
+        if (v.caseNumber) c.sapsCaseNumber = undefined;
+        if (v.station) c.sapsStation = undefined;
+    },
     fileToPipeline: async (file, to) => {
         console.log(`  filed ${file.fileName} (${file.mimeType}) as ${to.itemKey ?? 'other'}`);
         keep(to);

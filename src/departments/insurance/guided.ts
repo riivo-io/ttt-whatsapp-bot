@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 0b56e23). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 7f40c96). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -496,7 +496,7 @@ export function guidedOpen(form: ClaimForm, claim: Pick<FollowOnClaim, 'answers'
 
 // ---------------------------------------------------------------------------------------------------- saving
 
-export type GuidedPorts = Pick<FollowOnPorts, 'loadClaim' | 'claimForm' | 'saveAnswers' | 'saveSaps' | 'setSapsRequired' | 'fileToPipeline' | 'storeVideo' | 'claimEvidence' | 'claimFlags'>
+export type GuidedPorts = Pick<FollowOnPorts, 'loadClaim' | 'claimForm' | 'saveAnswers' | 'saveSaps' | 'clearSaps' | 'setSapsRequired' | 'fileToPipeline' | 'storeVideo' | 'claimEvidence' | 'claimFlags'>
   & Partial<Pick<FollowOnPorts, 'saveFacts' | 'createAgentAction'>>;
 
 export interface GuidedSave {
@@ -546,15 +546,23 @@ function dropEndedEntries(form: ClaimForm, answers: ClaimAnswers): void {
  */
 export function applyGuidedSave(
   form: ClaimForm, claim: FollowOnClaim, sapsRequired: boolean, input: GuidedSave, now: Date,
-): { answers: ClaimAnswers; saps: { caseNumber?: string; station?: string }; problems: GuidedSaved['problems'] } {
+): { answers: ClaimAnswers; saps: { caseNumber?: string; station?: string }; clearSaps: { caseNumber?: true; station?: true }; problems: GuidedSaved['problems'] } {
   const at = now.toISOString();
   const answers: ClaimAnswers = { ...claim.answers };
   const facts = factsOf(claim);
   const saps: { caseNumber?: string; station?: string } = {};
+  const clearSaps: { caseNumber?: true; station?: true } = {};
   const problems: GuidedSaved['problems'] = [];
   const checked = new Set(input.checked ?? []);
   for (const key of input.cleared ?? []) if (answers[key]?.status === 'answered' || deferred(key, answers)) delete answers[key];
   const given = new Map((input.answers ?? []).map((a) => [a.key, a.value] as const));
+  // The user (20 Nov 2026): the client typed the case number, went back, took it off and submitted, and the form kept the first
+  // one. The case number and station are not answers: they are on the claim, so taking one off the page has to take it off the
+  // claim. A value given in the same save wins. From here the question is open again, as it was before the client typed it.
+  const blankedKeys = new Set([...(input.cleared ?? []), ...(input.notKnown ?? [])]);
+  const typed = (key: string) => typeof given.get(key) === 'string' && String(given.get(key)).trim() !== '';
+  if (facts.sapsCaseNumber && blankedKeys.has(SAPS_CASE_KEY) && !typed(SAPS_CASE_KEY)) { clearSaps.caseNumber = true; delete facts.sapsCaseNumber; }
+  if (facts.sapsStation && blankedKeys.has(SAPS_STATION_KEY) && !typed(SAPS_STATION_KEY)) { clearSaps.station = true; delete facts.sapsStation; }
   const blanks: string[] = [];
 
   // What TTT holds: a changed value on the form. The CRM stays as it is; the broker gets a Follow-up (followon.ts formDone).
@@ -630,7 +638,7 @@ export function applyGuidedSave(
   }
   const phone = phoneFromItems(form, answers);
   if (phone !== undefined) answers[PHONE_OR_TABLET_KEY] = { value: phone, status: 'answered', at, source: 'computed' };
-  return { answers, saps, problems };
+  return { answers, saps, clearSaps, problems };
 }
 
 /** The claim and its form, for the page's calls. */
@@ -664,8 +672,9 @@ export async function earlierClaimAnswers(dv: Dv, contactId: string, claimId: st
 export async function saveGuided(ports: GuidedPorts, claimId: string, input: GuidedSave, now: Date): Promise<GuidedSaved> {
   const { claim, form, sapsRequired } = await loaded(ports, claimId);
   if (formSubmitted(claim)) input = topUpInput(input, topUpKeys(form, claim));
-  const { answers, saps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
+  const { answers, saps, clearSaps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
   if (saps.caseNumber || saps.station) await ports.saveSaps(claimId, saps);
+  if (clearSaps.caseNumber || clearSaps.station) await ports.clearSaps?.(claimId, clearSaps);
   // TTT (18 Nov 2026): the client said it was stolen, so the claim needs a case from here on, as one Tina read as a theft does.
   if (!claim.sapsRequired && statesTheft(form, answers)) await ports.setSapsRequired?.(claimId);
   if (JSON.stringify(answers) !== JSON.stringify(claim.answers)) await ports.saveAnswers(claimId, answers);
@@ -685,7 +694,9 @@ export async function saveGuided(ports: GuidedPorts, claimId: string, input: Gui
   }
   // saveSaps sets riivo_sapsinvolved with a case number, so the questions that hang on the police being involved are open now.
   const after: FollowOnClaim = {
-    ...claim, answers, sapsCaseNumber: saps.caseNumber ?? claim.sapsCaseNumber, sapsStation: saps.station ?? claim.sapsStation,
+    ...claim, answers,
+    sapsCaseNumber: clearSaps.caseNumber ? undefined : saps.caseNumber ?? claim.sapsCaseNumber,
+    sapsStation: clearSaps.station ? undefined : saps.station ?? claim.sapsStation,
     sapsRequired: claim.sapsRequired || statesTheft(form, answers),
     facts: { ...claim.facts, ...columns, ...(saps.caseNumber ? { saps: true } : {}) },
   };
