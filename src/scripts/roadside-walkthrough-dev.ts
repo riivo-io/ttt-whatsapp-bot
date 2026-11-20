@@ -4,9 +4,12 @@
  * Roadside assistance requests and the agent actions written. What Claude decides (is it roadside, after an accident,
  * someone hurt) is given per scenario, so this runs without a Claude key; claims-chat.ts runs the same path with Claude.
  *
- *   npx tsx src/scripts/roadside-dev.ts --seed                 first: the Test5299 clients and the test assist numbers
+ * As decided on 18 Nov 2026: no question about whether anyone is hurt or whether it was an accident, no emergency number,
+ * and every number comes in one message with a "Complete my claim" button whose tap starts the claim.
+ *
+ *   npx tsx src/scripts/roadside-dev.ts --seed                 first: the Test5299 clients, and Discovery's number on every insurer but Old Mutual
  *   npx tsx src/scripts/roadside-walkthrough-dev.ts            every scenario; evidence in Shared data model/TTTFG-5299/
- *   npx tsx src/scripts/roadside-dev.ts --unseed               after: the test assist numbers come off again
+ *   npx tsx src/scripts/roadside-dev.ts --unseed               after: every insurer's number goes back as it was
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -62,7 +65,7 @@ async function conversation(phone: string, contactId: string | null, r: Roadside
         `riivo_agentactions?$select=riivo_name,riivo_kind,riivo_status,riivo_urgency,riivo_urgencyreason,riivo_department,riivo_actedon,riivo_duedate,_riivo_client_value,_ownerid_value`
         + `&$filter=riivo_sourcemessageid eq 'riivo_request:${requestId}'&$orderby=createdon asc`, undefined, { formatted: true })).value;
     const request = await dv<Record<string, unknown>>('GET', `riivo_requests(${requestId})?$select=riivo_classificationtopic,_riivo_client_value`);
-    return { said, rows, request, requestId, claim: res.claim, ports: ports(contact), conv };
+    return { said, rows, request, requestId, claim: res.claim, again: res.again, ports: ports(contact), conv };
 }
 
 const F = (r: Record<string, unknown>, k: string) => String(r[`${k}@OData.Community.Display.V1.FormattedValue`] ?? r[k]);
@@ -77,42 +80,52 @@ function record(scenario: string, criteria: string, said: { text: string }[], ro
 
 async function main() {
     const PHONE = { one: '+27600052991', two: '+27600052992', nonumber: '+27600052993', home: '+27600052994', unknown: '+27600052999' };
+    // Discovery's number stands in for every insurer's until TTT's list arrives (roadside-dev.ts --seed copies it).
+    const NUMBER = (await dv<{ riivo_assistnumber: string | null }>('GET', 'riivo_providers(5506724c-dc89-f011-b4cc-7c1e52881828)?$select=riivo_assistnumber')).riivo_assistnumber?.trim();
+    if (!NUMBER) throw new Error('Discovery has no assist number: run roadside-dev.ts --seed first');
+    type Said = { text: string; choices?: string[] };
+    const BUTTON = ['Complete my claim'];
+    const hasButton = (m?: Said) => JSON.stringify(m?.choices) === JSON.stringify(BUTTON) && /When you're ready, tap the button below to complete your claim\.$/.test(m?.text ?? '');
+    const noQuestion = (said: Said[]) => said.every((m) => !/\?/.test(m.text));
 
-    // S1: AC 1, 5, 7, 9 — one motor policy.
+    // S1: AC 1, 5, 7, 8, 9 — one motor policy: one message, the number and the button.
     {
         const c = await conversation(PHONE.one, FIX.contacts.one, route(), ["I've broken down on the N1 near Worcester, the car won't start"]);
         const a = c.rows[0] ?? {};
-        record('S1 Rosa, one Discovery motor policy, breaks down', 'AC 1, 5, 7, 9', c.said, c.rows, [
-            ['the reply gives the CRM number 0800 5299 01', c.said[0]?.text.includes('*0800 5299 01*')],
+        record('S1 Rosa, one Discovery motor policy, breaks down', 'AC 1, 5, 7, 8, 9', c.said, c.rows, [
+            ['one message, with the CRM number', c.said.length === 1 && (c.said[0]?.text ?? '').includes(`*${NUMBER}*`)],
+            ['nothing is asked: not whether anyone is hurt, not whether it was an accident', noQuestion(c.said)],
             ['the reply says the insurer will confirm what the policy includes', /Discovery Insure will confirm what your policy includes when you call\./.test(c.said[0]?.text ?? '')],
             ['no emergency number, no word on cover', !EMERGENCY.test(c.said[0]?.text ?? '') && !/\bcover(ed|s)?\b/i.test(c.said[0]?.text ?? '')],
+            ['the "Complete my claim" button is on it, and no claim is handed over yet', hasButton(c.said[0]) && !c.claim],
             ['the request: Roadside assistance, on Rosa', c.request.riivo_classificationtopic === 'Roadside assistance' && c.request._riivo_client_value === FIX.contacts.one],
             ['one agent action: Created, Open, Insurance and Advice, the broker, on Rosa', c.rows.length === 1 && F(a, 'riivo_kind') === 'Created' && F(a, 'riivo_status') === 'Open'
                 && F(a, 'riivo_department') === 'Insurance and Advice' && a._ownerid_value === MEDUPI && a._riivo_client_value === FIX.contacts.one],
-            ['its text: insurer, number, policy and time', /Discovery Insure's assist number 0800 5299 01 \(policy Motor RS5299-DI-1\)/.test(String(a.riivo_name)) && /\d{2}:\d{2}/.test(String(a.riivo_name))],
+            ['its text: insurer, number, policy and time', new RegExp(`Discovery Insure's assist number ${NUMBER} \\(policy Motor RS5299-DI-1\\)`).test(String(a.riivo_name)) && /\d{2}:\d{2}/.test(String(a.riivo_name))],
         ]);
     }
 
-    // S2: AC 3 — motor at two insurers, and a household policy whose number must never go.
+    // S2: AC 3 — motor at two insurers, and a household policy that must never be offered.
     {
         const c = await conversation(PHONE.two, FIX.contacts.two, route(), ['My car broke down, I need a tow', '2']);
-        record('S2 Thabo, motor at Discovery and Momentum, picks the second', 'AC 3, 9', c.said, c.rows, [
+        record('S2 Thabo, motor at Discovery and Momentum, picks the second', 'AC 3, 8, 9', c.said, c.rows, [
             ['first "Which policy is this car on?" with the two motor policies to tap', c.said[0]?.text === 'Which policy is this car on?'
-                && JSON.stringify((c.said[0] as { choices?: string[] }).choices) === JSON.stringify(['Discovery Insure', 'Momentum Insure'])],
-            ['no number before the choice', !/0800/.test(c.said[0]?.text ?? '')],
-            ['the tap sends Momentum\'s 0800 5299 02 only', (c.said[1]?.text ?? '').includes('0800 5299 02') && !(c.said[1]?.text ?? '').includes('0800 5299 01')],
-            ['the household insurer\'s number never goes', !c.said.some((s) => s.text.includes('0800 5299 03'))],
+                && JSON.stringify((c.said[0] as Said).choices) === JSON.stringify(['Discovery Insure', 'Momentum Insure'])],
+            ['no number before the choice', !c.said[0]?.text.includes(NUMBER)],
+            ['the tap sends Momentum\'s line and the button, in one message', new RegExp(`^Call Momentum Insure's roadside assistance line on \\*${NUMBER}\\*`).test(c.said[1]?.text ?? '') && hasButton(c.said[1]) && c.said.length === 2],
+            ['the household insurer is never offered', !c.said.some((s) => /Hybrid/.test(s.text) || /Hybrid/.test(JSON.stringify(s.choices ?? [])))],
             ['one Created row, for the Momentum policy', c.rows.length === 1 && /RS5299-MO-2/.test(String(c.rows[0].riivo_name))],
         ]);
     }
 
-    // S3: AC 4 — someone hurt, two insurers: every number at once, no question, no emergency number.
+    // S3: someone hurt, two insurers: every number at once, no question, no emergency number, and the button.
     {
         const c = await conversation(PHONE.two, FIX.contacts.two, route({ someoneHurt: true }), ["We hit a cow on the R62, my wife is hurt and the car won't go"]);
-        record('S3 Thabo, someone hurt', 'AC 4 (no 112, the developer\'s decision)', c.said, c.rows, [
-            ['the first reply holds both assist numbers', (c.said[0]?.text ?? '').includes('0800 5299 01') && (c.said[0]?.text ?? '').includes('0800 5299 02')],
-            ['it says to tell the insurer someone is hurt, before any question', /^Call your insurer's assist line now and tell them someone is hurt:/.test(c.said[0]?.text ?? '') && c.said.length === 1],
+        record('S3 Thabo, someone hurt', 'AC 4 (as decided: no 112, no question), 8', c.said, c.rows, [
+            ['one message holding both insurers\' numbers', c.said.length === 1 && (c.said[0]?.text ?? '').includes(`• Discovery Insure: *${NUMBER}*`) && (c.said[0]?.text ?? '').includes(`• Momentum Insure: *${NUMBER}*`)],
+            ['it says to tell the insurer someone is hurt, and asks nothing', /^Call your insurer's assist line now and tell them someone is hurt:/.test(c.said[0]?.text ?? '') && noQuestion(c.said)],
             ['no 112, 10111, police or emergency services', !c.said.some((s) => EMERGENCY.test(s.text))],
+            ['the button is on it', hasButton(c.said[0])],
             ['a Created row per insurer, each saying someone is hurt', c.rows.length === 2 && c.rows.every((r) => /someone is hurt/.test(String(r.riivo_name)))],
         ]);
     }
@@ -121,8 +134,9 @@ async function main() {
     {
         const c = await conversation(PHONE.nonumber, FIX.contacts.nonumber, route(), ['Stuck on the M5, flat battery']);
         const f = c.rows.find((r) => F(r, 'riivo_kind') === 'Follow-up') ?? {};
-        record('S4 Lindi, Old Mutual motor, no assist number on file', 'AC 6, 9', c.said, c.rows, [
+        record('S4 Lindi, Old Mutual motor, no assist number on file', 'AC 6, 8, 9', c.said, c.rows, [
             ['the policy card, no number', /Please call the roadside or assist number on your policy card or schedule\./.test(c.said[0]?.text ?? '') && !/\d{3}/.test(c.said[0]?.text ?? '')],
+            ['the button is on it too: the claim does not need the number', hasButton(c.said[0])],
             ['an urgent Follow-up for the broker, open, due within two working hours', F(f, 'riivo_urgency') === 'Urgent' && F(f, 'riivo_status') === 'Open' && f._ownerid_value === MEDUPI && !!f.riivo_duedate],
             ['its reason: no assist number on file', f.riivo_urgencyreason === 'The client broke down and the insurer has no assist number on file'],
             ['and the open Created row', c.rows.some((r) => F(r, 'riivo_kind') === 'Created' && F(r, 'riivo_status') === 'Open')],
@@ -134,47 +148,55 @@ async function main() {
         const c = await conversation(PHONE.home, FIX.contacts.home, route(), ['My bakkie broke down on the way to work']);
         const f = c.rows.find((r) => F(r, 'riivo_kind') === 'Follow-up') ?? {};
         record('S5 Pieter, household policy only', 'AC 6', c.said, c.rows, [
-            ['"I can\'t see a car policy", the policy card, no number', /^I can't see a car policy for you on our system\. Please call the roadside or assist number on your policy card or schedule\./.test(c.said[0]?.text ?? '')
-                && !(c.said[0]?.text ?? '').includes('0800 5299 03')],
+            ['"I can\'t see a car policy", the policy card, no number, no button', /^I can't see a car policy for you on our system\. Please call the roadside or assist number on your policy card or schedule\./.test(c.said[0]?.text ?? '')
+                && !(c.said[0]?.text ?? '').includes(NUMBER) && !c.said[0]?.choices],
             ['an urgent Follow-up: no active motor policy on file', F(f, 'riivo_urgency') === 'Urgent' && f.riivo_urgencyreason === 'The client broke down and has no active motor policy on file'],
         ]);
     }
 
-    // S6: AC 8 — after an accident: the offer, yes, and the walkthrough on the same policy (no claim opened here).
+    // S6: AC 8 — the tap on "Complete my claim": the walkthrough on the same policy (the claim itself opens in the host).
     {
-        const c = await conversation(PHONE.one, FIX.contacts.one, route({ fromDamage: true }), ['A taxi hit me on Main Road and I need a tow', 'Yes']);
-        const t = c.claim ? await claimTurn(c.ports, c.conv, null, { kind: 'start', facts: { claimType: 'Motor accident' }, opening: c.claim.opening, ...(c.claim.policyId ? { policyId: c.claim.policyId } : {}) }, new Date()) : null;
-        record('S6 Rosa, a breakdown after an accident, says yes to a claim', 'AC 8', c.said, c.rows, [
-            ['the number first, then "Once you\'re safe, would you like me to start a claim for the damage?"', (c.said[0]?.text ?? '').includes('0800 5299 01')
-                && c.said[1]?.text === "Once you're safe, would you like me to start a claim for the damage?"],
-            ['yes hands over on Rosa\'s policy, with her words', !!c.claim?.policyId && c.claim.opening === 'A taxi hit me on Main Road and I need a tow'],
+        const c = await conversation(PHONE.one, FIX.contacts.one, route(), ['A taxi hit me on Main Road and I need a tow', 'Complete my claim']);
+        const t = c.claim ? await claimTurn(c.ports, c.conv, null, { kind: 'start', facts: c.claim.facts, opening: c.claim.opening, ...(c.claim.policyId ? { policyId: c.claim.policyId } : {}) }, new Date()) : null;
+        record('S6 Rosa, a breakdown, taps Complete my claim', 'AC 8', c.said, c.rows, [
+            ['the number and the button first, in one message', (c.said[0]?.text ?? '').includes(`*${NUMBER}*`) && hasButton(c.said[0])],
+            ['the tap hands over on Rosa\'s policy, with her words', !!c.claim?.policyId && c.claim.opening === 'A taxi hit me on Main Road and I need a tow'],
             ['the walkthrough goes on from that policy: no policy question, the on-scene list', t?.state?.policyId === c.claim?.policyId && t?.state?.step === 'ready'
                 && /^While you're still at the scene/.test(c.said.at(-1)?.text ?? '')],
         ]);
     }
     {
-        const c = await conversation(PHONE.one, FIX.contacts.one, route({ fromDamage: true }), ['Hit a pothole, the tyre and rim are gone', 'No thanks']);
-        record('S6b Rosa, after damage, says no', 'AC 8', c.said, c.rows, [
+        const c = await conversation(PHONE.one, FIX.contacts.one, route(), ['Hit a pothole, the tyre and rim are gone', 'No thanks']);
+        record('S6b Rosa, says no thanks to the claim', 'AC 8', c.said, c.rows, [
             ['no claim handed over, and she can come back', !c.claim && c.said.at(-1)?.text === "No problem. If you'd like to claim later, just send me a message."],
         ]);
     }
     {
-        const c = await conversation(PHONE.one, FIX.contacts.one, route(), ['The car just died on the highway']);
-        record('S6c Rosa, a plain breakdown', 'AC 8', c.said, c.rows, [['no claim and no offer of one', !c.claim && c.said.length === 1]]);
+        const c = await conversation(PHONE.one, FIX.contacts.one, route(), ['The car just died on the highway', 'ok thanks', 'Complete my claim']);
+        record('S6c Rosa, says ok thanks, then taps the button', 'AC 8', c.said, c.rows, [
+            ['"ok thanks" gets the button again and starts nothing', /^You're welcome\. When you're ready, tap the button below/.test(c.said[1]?.text ?? '') && hasButton(c.said[1]) && c.said.length === 2],
+            ['the tap afterwards still hands over on her policy', !!c.claim?.policyId && c.claim.opening === 'The car just died on the highway'],
+        ]);
+    }
+    {
+        const c = await conversation(PHONE.one, FIX.contacts.one, route(), ["I'm stuck on the N1", "I'm still waiting, please send the number again"]);
+        record('S6d Rosa, asks for the number again', 'AC 1, 8', c.said, c.rows, [
+            ['it is not an answer: the conversation ends, nothing more is said, and the host reads it as a new message', c.again === true && !c.claim && c.said.length === 1],
+        ]);
     }
 
-    // S7: AC 2 — an unknown number.
+    // S7: AC 2 — an unknown number (no claim, no button).
     {
         const c = await conversation(PHONE.unknown, null, route(), ['Hi, my car broke down on the N2, please help', 'Momentum']);
         const a = c.rows[0] ?? {};
         record('S7 an unknown number, with Momentum', 'AC 2, 9', c.said, c.rows, [
             ['asked which insurer, never for an ID number', /Which insurer is your car insured with\?/.test(c.said[0]?.text ?? '') && !/\bID\b|identity/i.test(c.said[0]?.text ?? '')],
-            ['Momentum\'s CRM number, the cover line and how to claim', (c.said[1]?.text ?? '').includes('*0800 5299 02*') && /will confirm what your policy includes/.test(c.said[1]?.text ?? '')
-                && /I can't open a claim from this number\. If you'd like to claim, please email TTT from the email address we have on file for you\./.test(c.said[1]?.text ?? '')],
+            ['Momentum\'s CRM number, the cover line and how to claim, with no button', (c.said[1]?.text ?? '').includes(`*${NUMBER}*`) && /will confirm what your policy includes/.test(c.said[1]?.text ?? '')
+                && /I can't open a claim from this number\. If you'd like to claim, please email TTT from the email address we have on file for you\./.test(c.said[1]?.text ?? '') && !c.said[1]?.choices],
             ['the request has no client', c.request._riivo_client_value === null && c.request.riivo_classificationtopic === 'Roadside assistance'],
             ['one open Created row for the Insurance and Advice team, no client, with the WhatsApp number, insurer, number and time',
                 c.rows.length === 1 && F(a, 'riivo_kind') === 'Created' && F(a, 'riivo_status') === 'Open' && a._riivo_client_value === null && a._ownerid_value !== MEDUPI
-                && String(a.riivo_name).includes('+27600052999') && /Momentum/.test(String(a.riivo_name)) && String(a.riivo_name).includes('0800 5299 02') && /\d{2}:\d{2}/.test(String(a.riivo_name))],
+                && String(a.riivo_name).includes('+27600052999') && /Momentum/.test(String(a.riivo_name)) && String(a.riivo_name).includes(NUMBER) && /\d{2}:\d{2}/.test(String(a.riivo_name))],
         ]);
     }
     {

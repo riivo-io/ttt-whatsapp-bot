@@ -6,12 +6,15 @@
  *   npx tsx src/scripts/roadside-dev.ts --set "<insurer id>" "<number>" give an insurer an assist number (DEV only)
  *   npx tsx src/scripts/roadside-dev.ts --clear "<insurer id>"          take it off again
  *   npx tsx src/scripts/roadside-dev.ts --rows +27600051841             the client's roadside requests and agent actions since today
- *   npx tsx src/scripts/roadside-dev.ts --seed                          the Test5299 clients and test assist numbers (ids kept in
- *                                                                        Shared data model/TTTFG-5299/fixtures.json)
- *   npx tsx src/scripts/roadside-dev.ts --unseed                        clear the test assist numbers; prints the rows to delete by hand
+ *   npx tsx src/scripts/roadside-dev.ts --seed                          the Test5299 clients, and Discovery's assist number on every
+ *                                                                        other insurer too, except Old Mutual (so "no number on file" can be
+ *                                                                        tested). Run it again after changing Discovery's number. The ids and
+ *                                                                        every insurer's number before are kept in Shared data model/TTTFG-5299/fixtures.json
+ *   npx tsx src/scripts/roadside-dev.ts --unseed                        put every insurer's number back as it was; prints the rows to delete by hand
  *
- * Insurance staff keep the real numbers in each environment; in DEV a test number stands in for them. DEV only: it refuses
- * any other Dataverse. Sign-in: `az login` as a DEV user, as claims-chat.ts.
+ * Insurance staff keep the real numbers in each environment; until TTT's list arrives (18 Nov 2026), in DEV Discovery's
+ * number stands in for every insurer's. DEV only: it refuses any other Dataverse. Sign-in: `az login` as a DEV user, as
+ * claims-chat.ts.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -58,8 +61,10 @@ const INSURER = {
     discovery: '5506724c-dc89-f011-b4cc-7c1e52881828', momentum: 'f801f851-dc89-f011-b4cc-7c1e52348d13',
     hybrid: '0102f851-dc89-f011-b4cc-7c1e52348d13', oldMutual: 'ae0ffd4b-dc89-f011-b4cc-7ced8d485380',
 } as const;
-/** Test numbers only, never a real insurer's line. The Hybrid one is a household insurer's: it must never be sent. */
-const TEST_ASSIST: Partial<Record<keyof typeof INSURER, string>> = { discovery: '0800 5299 01', momentum: '0800 5299 02', hybrid: '0800 5299 03' };
+/** Discovery's number when the CRM has none yet: a test number, never a real insurer's line. */
+const TEST_DISCOVERY = '0800 5299 01';
+/** Left without a number on purpose: the "no number on file" path (Old Mutual Insure has two rows). */
+const NO_NUMBER = new Set<string>([INSURER.oldMutual, '0d02f851-dc89-f011-b4cc-7c1e52348d13']);
 const CLIENTS: { key: string; firstname: string; mobile: string; policies: { insurer: keyof typeof INSURER; number: string; product: string }[] }[] = [
     { key: 'one', firstname: 'Rosa', mobile: '0600052991', policies: [{ insurer: 'discovery', number: 'RS5299-DI-1', product: 'Motor' }] },
     { key: 'two', firstname: 'Thabo', mobile: '0600052992', policies: [
@@ -74,15 +79,24 @@ const saveFx = (f: Fixtures) => { fs.mkdirSync(path.dirname(FIXTURES), { recursi
 
 async function seed() {
     const fx = loadFx();
-    for (const [k, number] of Object.entries(TEST_ASSIST) as [keyof typeof INSURER, string][]) {
-        const id = INSURER[k];
+    type Provider = { riivo_providerid: string; riivo_providername: string; riivo_assistnumber: string | null };
+    const providers = (await dv<{ value: Provider[] }>('GET', 'riivo_providers?$select=riivo_providerid,riivo_providername,riivo_assistnumber&$filter=statecode eq 0')).value;
+    const discovery = providers.find((p) => p.riivo_providerid === INSURER.discovery);
+    if (!discovery) throw new Error('Discovery Insure is not an active insurer here');
+    const number = discovery.riivo_assistnumber?.trim() || TEST_DISCOVERY;
+    for (const p of providers) {
+        const id = p.riivo_providerid;
+        if (NO_NUMBER.has(id)) { console.log(`  ${p.riivo_providername} (${id}): left with no number`); continue; }
+        if (id !== INSURER.discovery && p.riivo_assistnumber?.trim() === number) continue;
         if (!(id in fx.assistBefore)) {
-            fx.assistBefore[id] = (await dv<{ riivo_assistnumber: string | null }>('GET', `riivo_providers(${id})?$select=riivo_assistnumber`)).riivo_assistnumber;
+            fx.assistBefore[id] = p.riivo_assistnumber;
             saveFx(fx);
         }
+        if (p.riivo_assistnumber?.trim() === number) continue;
         await dv('PATCH', `riivo_providers(${id})`, { riivo_assistnumber: number });
-        console.log(`  ${k}: assist number ${number} (test)`);
+        console.log(`  ${p.riivo_providername} (${id}): assist number ${number}`);
     }
+    console.log(`  every insurer but Old Mutual now has ${number} (Discovery's)`);
     for (const c of CLIENTS) {
         if (!fx.contacts[c.key]) {
             const row = await dv<{ contactid: string }>('POST', 'contacts?$select=contactid', {

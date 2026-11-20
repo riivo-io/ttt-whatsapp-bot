@@ -890,32 +890,66 @@ test('TTTFG-5299: a demo client who has broken down gets the insurer\'s number, 
     const roadside = withRoadside(w);
     assert.equal(await say(w, "I've broken down on the N1", DAY1), 'roadside');
     const [reply] = w.since();
-    assert.match(reply, /Discovery Insure's roadside assist line on \*0860 333 444\*/);
+    assert.match(reply, /Discovery Insure's roadside assistance line on \*0860 333 444\*/);
+    assert.match(reply, /tap the button below to complete your claim/);
     assert.match(reply, /Discovery Insure will confirm what your policy includes when you call\./);
     assert.deepEqual(roadside, ["I've broken down on the N1"]);
     assert.deepEqual(w.requests, [], 'no claim request');
     assert.equal(w.rows.length, 0);
     assert.deepEqual(w.actions.map((a) => [a.kind, a.open, a.regarding.id]), [['Created', true, 'req-roadside']]);
-    assert.equal(w.store.get(PHONE)!.roadside ?? null, null, 'nothing left to ask');
+    assert.equal(w.store.get(PHONE)!.roadside?.step, 'claim-offer', 'kept for the "Complete my claim" tap');
 });
 
-test('TTTFG-5299: after an accident, yes starts the claim walkthrough on the same policy; the roadside state is kept between', async () => {
+test('TTTFG-5299: the "Complete my claim" tap starts the claim walkthrough on the same policy; the roadside state is kept between', async () => {
     const OM: Policy = { id: 'pol-om', providerId: 'prov-om', insurer: 'Old Mutual Insure', product: 'Motor', policyNumber: 'OM-1', assistNumber: '0860 600 600' };
     const w = world({ policies: [POLICY, OM] });
-    withRoadside(w, { roadside: true, fromDamage: true, someoneHurt: false });
-    assert.equal(await say(w, 'A taxi hit me and I need a tow', DAY1), 'roadside');
+    withRoadside(w);
+    assert.equal(await say(w, 'My car broke down and I need a tow', DAY1), 'roadside');
     assert.deepEqual(w.since(), ['Which policy is this car on?']);
     assert.equal(w.store.get(PHONE)!.roadside?.requestId, 'req-roadside');
     assert.equal(await say(w, '2', tick(DAY1, 1)), 'roadside');
-    const [number, offer] = w.since();
+    const [number, ...more] = w.since();
     assert.match(number, /0860 600 600/);
-    assert.equal(offer, "Once you're safe, would you like me to start a claim for the damage?");
-    assert.equal(await say(w, 'Yes', tick(DAY1, 2)), 'started');
-    assert.deepEqual(w.requests, ['A taxi hit me and I need a tow']);
+    assert.match(number, /tap the button below to complete your claim/);
+    assert.deepEqual(more, [], 'one message: the number and the button together');
+    assert.equal(await say(w, 'Complete my claim', tick(DAY1, 2)), 'started');
+    assert.deepEqual(w.requests, ['My car broke down and I need a tow']);
     const kept = w.store.get(PHONE)!;
     assert.equal(kept.roadside ?? null, null);
     assert.equal(kept.walk?.policyId, 'pol-om');
     assert.doesNotMatch(w.since().join('\n'), /Which policy|Is this claim about/);
+});
+
+test('TTTFG-5299 (18 Nov 2026): with the guided form on, the tap opens the claim at once and sends the form: no question in between', async () => {
+    const w = guidedWorld();
+    withRoadside(w);
+    assert.equal(await say(w, "I've broken down on the N1", DAY1), 'roadside');
+    const [number, ...more] = w.since();
+    assert.match(number, /roadside assistance line on \*0860 333 444\*/);
+    assert.deepEqual(more, []);
+    assert.equal(w.rows.length, 0, 'nothing opens before the tap');
+    assert.equal(await say(w, 'Complete my claim', tick(DAY1, 1)), 'opened');
+    assert.equal(w.rows.length, 1);
+    assert.equal(w.rows[0].claimType, 'Motor accident', 'roadside knows it is a car: a motor claim');
+    assert.equal(w.store.get(PHONE)!.resume.followOn?.phase, 'form');
+    const after = w.since().join('\n');
+    assert.match(after, /Fill out the form below to submit your claim\./);
+    assert.doesNotMatch(after, /What kind of claim|Which policy|Is this claim about/);
+    assert.equal(w.store.get(PHONE)!.roadside ?? null, null, 'roadside is over');
+});
+
+test('TTTFG-5299 (18 Nov 2026): "ok" keeps the button on offer; "send the number again" is a new roadside request', async () => {
+    const w = world({ isClaim: false });
+    const roadside = withRoadside(w);
+    assert.equal(await say(w, "I've broken down on the N1", DAY1), 'roadside');
+    w.since();
+    assert.equal(await say(w, 'ok', tick(DAY1, 1)), 'roadside');
+    assert.match(w.since()[0], /^You're welcome\./);
+    assert.equal(w.store.get(PHONE)!.roadside?.step, 'claim-offer');
+    assert.equal(await say(w, "I'm still stuck, please send the roadside number again", tick(DAY1, 2)), 'roadside');
+    assert.match(w.since()[0], /0860 333 444/);
+    assert.deepEqual(roadside, ["I've broken down on the N1", "I'm still stuck, please send the roadside number again"]);
+    assert.equal(w.rows.length, 0, 'still no claim');
 });
 
 test('TTTFG-5299: roadside off (no model): a breakdown is read as anything else, and no roadside request opens', async () => {

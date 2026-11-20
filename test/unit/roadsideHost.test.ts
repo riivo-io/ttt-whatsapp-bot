@@ -65,10 +65,12 @@ test('TTTFG-5299 AC 1: a known client who has broken down gets the number, under
     const w = world();
     const out = await claimFromClient(w.deps, PHONE, JANE, "I've broken down on the N1", NOW);
     assert.deepEqual(out, { handled: true, kind: 'roadside' });
-    assert.match(w.texts()[0], /Santam's roadside assist line on \*0860 505 911\*/);
+    assert.match(w.texts()[0], /Santam's roadside assistance line on \*0860 505 911\*/);
+    assert.match(w.texts()[0], /tap the button below to complete your claim/);
+    assert.deepEqual(w.sent[0].kind === 'text' && w.sent[0].choices, [{ title: 'Complete my claim' }]);
     assert.deepEqual(w.requests, [{ topic: 'Roadside assistance', contactId: 'c-jane', text: "I've broken down on the N1" }]);
     assert.equal(w.claimCalls(), 0, 'roadside comes first: no claim check');
-    assert.equal(w.store.size, 0, 'nothing left to ask: nothing kept');
+    assert.equal((w.store.get(PHONE)!.state as { step?: string }).step, 'claim-offer', 'kept for the tap');
     assert.deepEqual(w.actions.map((a) => [a.kind, a.open, a.regarding.id]), [['Created', true, 'req-roadside']]);
 });
 
@@ -83,33 +85,67 @@ test('TTTFG-5299 AC 3: the "which policy" question is kept between messages, and
     const out = await claimFromClient(w.deps, PHONE, JANE, '2. Hollard Motor policy (HOL-1)', NOW);
     assert.deepEqual(out, { handled: true, kind: 'roadside' });
     assert.match(w.texts()[1], /0861 000 123/);
-    assert.equal(w.store.size, 0);
+    assert.equal((w.store.get(PHONE)!.state as { step?: string }).step, 'claim-offer', 'kept for the tap');
     assert.equal(w.roadsideCalls(), 1, 'the reply is read by code, not by Claude');
 });
 
-test('TTTFG-5299 AC 8: yes after an accident starts the claim walkthrough on the same policy, under a Claim request', async () => {
-    const w = world({ route: { roadside: true, fromDamage: true, someoneHurt: false }, policies: [SANTAM, HOLLARD] });
-    await claimFromClient(w.deps, PHONE, JANE, 'A taxi hit me, I need a tow', NOW);
+test('TTTFG-5299 AC 8: the tap on "Complete my claim" starts the claim walkthrough on the same policy, under a Claim request', async () => {
+    const w = world({ policies: [SANTAM, HOLLARD] });
+    await claimFromClient(w.deps, PHONE, JANE, 'My car broke down, I need a tow', NOW);
     await claimFromClient(w.deps, PHONE, JANE, 'Santam', NOW);
-    assert.equal(w.texts().at(-1), "Once you're safe, would you like me to start a claim for the damage?");
-    const out = await claimFromClient(w.deps, PHONE, JANE, 'Yes', NOW);
+    assert.match(w.texts().at(-1)!, /tap the button below to complete your claim/);
+    const out = await claimFromClient(w.deps, PHONE, JANE, 'Complete my claim', NOW);
     assert.deepEqual(out, { handled: true, kind: 'started' });
     assert.deepEqual(w.requests.map((r) => r.topic), ['Roadside assistance', 'Claim']);
-    assert.equal(w.requests[1].text, 'A taxi hit me, I need a tow', 'the claim starts from the client\'s own words');
+    assert.equal(w.requests[1].text, 'My car broke down, I need a tow', 'the claim starts from the client\'s own words');
     const walk = w.store.get(PHONE)!.state as { policyId?: string; step: string; roadside?: true };
     assert.equal(walk.roadside, undefined);
     assert.equal(walk.policyId, 'p1', 'the policy roadside settled');
     assert.doesNotMatch(w.texts().at(-1)!, /Which policy|Is this claim about/);
 });
 
-test('TTTFG-5299 AC 8: no after an accident opens nothing', async () => {
-    const w = world({ route: { roadside: true, fromDamage: true, someoneHurt: false } });
+test('TTTFG-5299 AC 8: "no thanks" after the number opens nothing', async () => {
+    const w = world();
     await claimFromClient(w.deps, PHONE, JANE, 'Hit a pothole, need a tow', NOW);
     const out = await claimFromClient(w.deps, PHONE, JANE, 'No thanks', NOW);
     assert.deepEqual(out, { handled: true, kind: 'roadside' });
     assert.equal(w.claims.length, 0);
     assert.equal(w.store.size, 0);
     assert.deepEqual(w.requests.map((r) => r.topic), ['Roadside assistance']);
+});
+
+test('TTTFG-5299 (18 Nov 2026): "ok" or "thanks" keeps the button on offer and starts nothing', async () => {
+    const w = world();
+    await claimFromClient(w.deps, PHONE, JANE, "I've broken down on the N1", NOW);
+    const out = await claimFromClient(w.deps, PHONE, JANE, 'ok thanks', NOW);
+    assert.deepEqual(out, { handled: true, kind: 'roadside' });
+    assert.match(w.texts().at(-1)!, /^You're welcome\. When you're ready, tap the button below/);
+    assert.equal(w.claims.length, 0);
+    assert.deepEqual(w.requests.map((r) => r.topic), ['Roadside assistance']);
+    assert.equal((w.store.get(PHONE)!.state as { step?: string }).step, 'claim-offer');
+});
+
+test('TTTFG-5299 (18 Nov 2026): "send the number again" after the number is a new roadside request, not "I didn\'t get that"', async () => {
+    const w = world();
+    await claimFromClient(w.deps, PHONE, JANE, "I've broken down on the N1", NOW);
+    const out = await claimFromClient(w.deps, PHONE, JANE, "I'm still stuck, please send the roadside number again", NOW);
+    assert.deepEqual(out, { handled: true, kind: 'roadside' });
+    assert.equal(w.texts().length, 2);
+    assert.match(w.texts()[1], /0860 505 911/);
+    assert.doesNotMatch(w.texts()[1], /didn't quite get that/);
+    assert.deepEqual(w.requests.map((r) => r.topic), ['Roadside assistance', 'Roadside assistance']);
+});
+
+test('TTTFG-5299 (18 Nov 2026): something else after the number leaves roadside and goes on as any message would', async () => {
+    const w = world({ isClaim: false });
+    await claimFromClient(w.deps, PHONE, JANE, "I've broken down on the N1", NOW);
+    const sentBefore = w.texts().length;
+    w.deps.roadsideModel = async () => ({ roadside: false, fromDamage: false, someoneHurt: false });
+    const out = await claimFromClient(w.deps, PHONE, JANE, 'When is my tax return due?', NOW);
+    assert.deepEqual(out, { handled: false }, 'Tina\'s normal path answers it');
+    assert.equal(w.texts().length, sentBefore, 'roadside says nothing more');
+    assert.equal(w.store.size, 0);
+    assert.equal(w.claims.length, 0);
 });
 
 test('TTTFG-5299 AC 2: an unknown number is asked which insurer, kept with no contact, and gets that insurer\'s number', async () => {
