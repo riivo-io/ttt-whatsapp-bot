@@ -160,7 +160,7 @@ A number on **no contact and no lead** is never trusted and never served. An ID 
 | Behaviour | Status | Where |
 |---|---|---|
 | One fixed reply with the tax sign-up link (`TAX_SIGNUP_LINK`, default `https://www.ttt-tax.co.za/client-onboarding`); no question answered, no ID number asked for | ✅ | `answerUnknownNumber`, `unknownNumberReply` |
-| One lead: name `WhatsApp <number>`, lead type **Tax**, lead source WhatsApp, owned by the Tax team; plus an open agent action of Kind **Created** owned by the Tax team (what the person typed is not kept) | ✅ | `placeholderLeadParams`, `createdActionColumns` |
+| One lead: name `WhatsApp <number>`, lead type **Tax**, no lead source (DEV labels the sign-up form's `463630005` "Refer and Earn"), owned by the Tax team; plus an open agent action of Kind **Created** owned by the Tax team (what the person typed is not kept) | ✅ | `placeholderLeadParams`, `createdActionColumns` |
 | A second message inside 24 hours gets no reply; the number never gets a second lead | ✅ | Supabase `unknown_number_replies` (migration `20261118120000`) |
 | A lead Tina made herself and that has **no email yet** is still the unknown number (silent for 24 hours, the same reply again after that), so Tina does not chat to a stranger; once an email is on it (the sign-up form or a consultant), it is an ordinary lead | ✅ | `isPlaceholderLead` |
 | The WhatsApp sign-up form **updates** the lead on the number instead of making a second | ✅ | `saveSignUpLead` (`src/domain/signUpLead.ts`) |

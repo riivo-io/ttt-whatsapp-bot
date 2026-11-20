@@ -117,9 +117,9 @@ test('AC 5: the lead is made for the Tax team from the number alone', () => {
     assert.ok(createdActionName('27839990000').length <= 300);
 });
 
-test('AC 5: the lead is a Tax lead from WhatsApp owned by the Tax team, with only the number to go on', () => {
+test('AC 5: the lead is a Tax lead owned by the Tax team, with only the number to go on and no lead source (DEV labels 463630005 "Refer and Earn")', () => {
     assert.deepEqual(placeholderLeadParams('27839990000', 'team-tax'), {
-        firstName: 'WhatsApp', lastName: '27839990000', phone: '27839990000', leadType: 100000000, leadSource: 463630005, ownerTeamId: 'team-tax',
+        firstName: 'WhatsApp', lastName: '27839990000', phone: '27839990000', leadType: 100000000, ownerTeamId: 'team-tax',
     });
     assert.equal('ownerTeamId' in placeholderLeadParams('27839990000'), false, 'no team found: the CRM default owner');
 });

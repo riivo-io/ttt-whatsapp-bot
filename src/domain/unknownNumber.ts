@@ -5,7 +5,7 @@
  *  - It gets ONE fixed reply with the tax sign-up link and nothing else: no tax question is answered, no ID number is asked
  *    for, and a typed ID number is never used to find a client (AC 1 to 3). The wording is the package's
  *    `unknownNumberText`, so an unknown number is told the same thing whichever department it asks about.
- *  - Tina makes ONE lead for the Tax team (riivo_leadtype Tax, lead source WhatsApp) and a riivo_agentaction of Kind Created
+ *  - Tina makes ONE lead for the Tax team (riivo_leadtype Tax, no lead source) and a riivo_agentaction of Kind Created
  *    owned by the Tax team, so the team sees it in My Day (AC 5).
  *  - A second message inside 24 hours gets no reply, and no second lead is ever made (AC 6).
  *  - A lead Tina made herself, with no email yet, is that same unknown number: it is not served as a lead (Tina would chat to
@@ -21,7 +21,10 @@ export const REPLY_WINDOW_MS = 24 * 3_600_000;
 
 /** riivo_leadtype Tax (the global riivo_leadtypes: 100000000 Tax, 100000001 Accounting, 463630001 Long Term, 463630002 Short Term). */
 export const TAX_LEAD_TYPE = 100000000;
-/** riivo_leadsource WhatsApp. A dev-only option in some environments: createLead retries without it when it is refused. */
+/**
+ * riivo_leadsource the WhatsApp sign-up form sets (processor). Not used for an unknown number's lead: TTT DEV labels 463630005
+ * "Refer and Earn", so a WhatsApp enquiry would read as a referral. The Created action says WhatsApp (its channel) instead.
+ */
 export const WHATSAPP_LEAD_SOURCE = 463630005;
 
 /** The one reply an unknown number gets. */
@@ -46,7 +49,7 @@ const URGENCY_NORMAL = 463630002;
 
 /** What createLead is given for an unknown number's lead (the Tax team owns it when the team is known). */
 export const placeholderLeadParams = (phone: string, ownerTeamId?: string) => ({
-    ...placeholderLeadNames(phone), phone, leadType: TAX_LEAD_TYPE, leadSource: WHATSAPP_LEAD_SOURCE, ...(ownerTeamId ? { ownerTeamId } : {}),
+    ...placeholderLeadNames(phone), phone, leadType: TAX_LEAD_TYPE, ...(ownerTeamId ? { ownerTeamId } : {}),
 });
 
 /**

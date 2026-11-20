@@ -67,12 +67,23 @@ async function taxTeam(): Promise<{ id: string; name: string }> {
 
 function line(ok: boolean, what: string, detail = '') { console.log(`${ok ? 'PASS' : 'FAIL'}  ${what}${detail ? `  (${detail})` : ''}`); return ok; }
 
+const F = '@OData.Community.Display.V1.FormattedValue';
+const say = (row: Record<string, unknown>, col: string) => String(row[`${col}${F}`] ?? row[col] ?? '(blank)');
+
+/** What a person would read in DEV: the contacts, leads and agent actions on the number, with labels instead of ids. */
 async function show(phone: string) {
     const leads = await leadsOn(phone);
     const actions = await actionsOn(phone);
-    console.log(`${phone}: ${(await contactsOn(phone)).length} contact(s), ${leads.length} lead(s), ${actions.length} agent action(s)`);
-    for (const l of leads) console.log('  lead', JSON.stringify(l));
-    for (const a of actions) console.log('  action', JSON.stringify(a));
+    const contacts = await contactsOn(phone);
+    console.log(`Number ${phone} in TTT DEV: ${contacts.length} contact(s), ${leads.length} lead(s), ${actions.length} agent action(s)`);
+    for (const l of leads) {
+        console.log(`  LEAD    ${say(l, 'ttt_firstname')} ${say(l, 'ttt_lastname')} | lead type: ${say(l, 'riivo_leadtype')} | source: ${say(l, 'riivo_leadsource')} | owner: ${say(l, '_ownerid_value')} | email: ${say(l, 'ttt_email')}`);
+    }
+    for (const a of actions) {
+        const regarding = leads.find((l) => l.new_leadid === a._riivo_client_value);
+        console.log(`  ACTION  ${say(a, 'riivo_name')}`);
+        console.log(`          kind: ${say(a, 'riivo_kind')} | status: ${say(a, 'riivo_status')} | department: ${say(a, 'riivo_department')} | owner: ${say(a, '_ownerid_value')} | regarding the lead: ${regarding ? 'yes' : 'NO'}`);
+    }
 }
 
 async function clean(phone: string) {
@@ -81,20 +92,13 @@ async function clean(phone: string) {
     for (const l of await leadsOn(phone)) { await dv('DELETE', `new_leads(${l.new_leadid})`); console.log('deleted lead', l.new_leadid); }
 }
 
-/** The columns DynamicsService.createLead sets for these parameters (riivo_leadsource is dropped if this DEV does not have it). */
+/** The columns DynamicsService.createLead sets for these parameters. */
 async function createLead(p: ReturnType<typeof placeholderLeadParams>): Promise<string> {
     const payload: Record<string, unknown> = {
-        ttt_firstname: p.firstName, ttt_lastname: p.lastName, ttt_mobilephone: p.phone, riivo_leadtype: p.leadType, riivo_leadsource: p.leadSource,
+        ttt_firstname: p.firstName, ttt_lastname: p.lastName, ttt_mobilephone: p.phone, riivo_leadtype: p.leadType,
         ...(p.ownerTeamId ? { 'ownerid@odata.bind': `/teams(${p.ownerTeamId})` } : {}),
     };
-    try {
-        return (await dv<{ new_leadid: string }>('POST', 'new_leads', payload)).new_leadid;
-    } catch (e) {
-        if (!/riivo_leadsource/i.test((e as Error).message)) throw e;
-        console.log('note: this DEV rejects riivo_leadsource; retried without it, as createLead does');
-        delete payload.riivo_leadsource;
-        return (await dv<{ new_leadid: string }>('POST', 'new_leads', payload)).new_leadid;
-    }
+    return (await dv<{ new_leadid: string }>('POST', 'new_leads', payload)).new_leadid;
 }
 
 async function run(phone: string, keep: boolean) {
