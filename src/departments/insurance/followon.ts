@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 0b56e23). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 7f40c96). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -141,6 +141,8 @@ export interface FollowOnPorts {
   setClaimForm(claimId: string, formId: string): Promise<void>;
   /** riivo_sapscasenumber and riivo_sapsstation; a case number also sets riivo_sapsinvolved = Yes. */
   saveSaps(claimId: string, v: { caseNumber?: string; station?: string }): Promise<void>;
+  /** The user (20 Nov 2026): the client took the case number (or station) off the form, so the claim stops holding it. */
+  clearSaps?(claimId: string, v: { caseNumber?: true; station?: true }): Promise<void>;
   /** TTTFG-5562: what the form (or chat, on a claim opened for the form) asked instead of the walkthrough, on the claim's columns. */
   saveFacts?(claimId: string, v: Partial<FactColumns>): Promise<void>;
   /**

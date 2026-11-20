@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit 0b56e23). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon-dataverse.ts (commit 7f40c96). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the follow-on's ports (followon.ts FollowOnPorts) against Dataverse, in the style of TTTFG-5168's
 // dataverse.ts: the host passes its Dataverse call (`Dv`), its WhatsApp send and where files go, so this file runs
@@ -254,6 +254,14 @@ export function dataverseFollowOnPorts(o: FollowOnDataverseOptions): FollowOnPor
       await patch(claimId, {
         ...(v.caseNumber ? { riivo_sapscasenumber: v.caseNumber.slice(0, 50), riivo_sapsinvolved: true } : {}),
         ...(v.station ? { riivo_sapsstation: v.station.slice(0, 100) } : {}),
+      });
+    },
+
+    // The client took the case number or station off the form: the column is emptied. riivo_sapsinvolved stays as it was.
+    async clearSaps(claimId, v) {
+      await patch(claimId, {
+        ...(v.caseNumber ? { riivo_sapscasenumber: null } : {}),
+        ...(v.station ? { riivo_sapsstation: null } : {}),
       });
     },
 
