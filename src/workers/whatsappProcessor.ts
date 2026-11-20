@@ -43,7 +43,7 @@ import {
 import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
 import { routeClientMessage, serviceRoutingOn } from '../services/serviceRouting.service';
 import { ROUTE_IDS } from '../domain/serviceRoute';
-import { claimsDemoContact, handleClaimsDemoBatchCheck, handleClaimsDemoMessage, handleClaimsFormDone, handleClaimsDemoReminder } from '../services/claimsDemo.service';
+import { claimsDemoContact, claimsLiveConversation, handleClaimsDemoBatchCheck, handleClaimsDemoMessage, handleClaimsFormDone, handleClaimsDemoReminder, handleClaimsLiveMessage } from '../services/claimsDemo.service';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
@@ -792,6 +792,16 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
     const demoContact = claimsDemoContact(from);
     if (demoContact) {
         await handleClaimsDemoMessage({ from, text, document, ...(audio ? { audio: { id: audio.id, mimeType: audio.mimeType } } : {}), interactiveId, wamid }, demoContact);
+        return;
+    }
+    // Claims go live (CLAIMS_LIVE, src/utils/claimsLiveSwitch.ts): a live client with a claim conversation in progress (the
+    // form, its follow-on, a reminder they are answering) talks to the claims flow first: files and voice notes too. A
+    // message that isn't about the claim is let go and carries on below. A new claim comes through service routing.
+    const liveContact = await claimsLiveConversation(from).catch((e) => {
+        console.warn(`[ClaimsLive] ${from}: claim conversation not read, Tina's normal path has the message:`, (e as Error).message);
+        return null;
+    });
+    if (liveContact && await handleClaimsLiveMessage({ from, text, document, ...(audio ? { audio: { id: audio.id, mimeType: audio.mimeType } } : {}), interactiveId, wamid }, liveContact)) {
         return;
     }
     // TTTFG-4830: voice notes are read on the claims demo only. For everyone else, as before: no reply.

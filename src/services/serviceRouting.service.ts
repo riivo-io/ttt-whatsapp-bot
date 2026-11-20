@@ -22,6 +22,7 @@ import { claimsEnabled, contactFirstName, handleInsuranceClaimMessage, toolModel
 import { dynamicsService } from './dynamics.service';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService } from './supabase.service';
+import { claimsLiveOn } from '../utils/claimsLiveSwitch';
 
 const SIDE_MODEL = process.env.SERVICE_ROUTING_MODEL || process.env.CLAIMS_INTENT_MODEL || 'claude-haiku-4-5-20251001';
 const REQUEST_CATEGORY_INSURANCE = 1; // riivo_request.riivo_category: 0 Tax, 1 Insurance, 2 Accounting
@@ -115,7 +116,8 @@ function insurancePorts(a: RouteArgs, handover: { current: Handover | null }): I
     const { from, entity, session } = a;
     let wamid = a.wamid;
     return {
-        claimsEnabled: claimsEnabled(),
+        // Claims go live: the form flow takes this number's claims (handleInsuranceClaimMessage).
+        claimsEnabled: claimsEnabled() || claimsLiveOn(from),
         claim: async (contact, text, { force }) => {
             const fullname = contact.id === entity.id ? entity.fullname : contact.firstName;
             return handleInsuranceClaimMessage(from, text, { id: contact.id, fullname }, session.id, { force });

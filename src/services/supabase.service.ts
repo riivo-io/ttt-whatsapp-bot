@@ -1469,6 +1469,13 @@ class SupabaseService {
         return (data as ClaimConversationRow) || null;
     }
 
+    /** Claims go live (20 Nov 2026): every number with a claim conversation, for the morning reminders. */
+    async listClaimConversationPhones(): Promise<string[]> {
+        const { data, error } = await this.client.from('claim_conversations').select('phone_number');
+        if (error) throw new Error(`[Supabase] listClaimConversationPhones: ${error.message}`);
+        return ((data as { phone_number: string }[] | null) ?? []).map((r) => r.phone_number);
+    }
+
     async saveClaimConversation(row: Omit<ClaimConversationRow, 'created_at' | 'updated_at'>): Promise<void> {
         const { error } = await this.client
             .from('claim_conversations')

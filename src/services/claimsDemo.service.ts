@@ -5,7 +5,10 @@
  * reaches this file, so Tina's clients are untouched. A demo number gets only the claims flow, against the CRM in
  * CLAIMS_DEMO_DATAVERSE_URL (TTT DEV by default), never Tina's own CRM. Settings:
  *   CLAIMS_DEMO_NUMBERS            27821234567:<contact id in the demo CRM>,...
- *   CLAIMS_DEMO_DATAVERSE_URL      default https://tttdevelopment.crm4.dynamics.com
+ *   CLAIMS_DEMO_DATAVERSE_URL      default https://tttdevelopment.crm4.dynamics.com (CLAIMS_DATAVERSE_URL wins over it)
+ *   CLAIMS_LIVE / CLAIMS_LIVE_NUMBERS / CLAIMS_DATAVERSE_URL / CLAIMS_SHAREPOINT_SITE
+ *                                  claims go live (20 Nov 2026): real clients get this same flow against Tina's own CRM.
+ *                                  See src/utils/claimsLiveSwitch.ts and docs/claims-go-live.md
  *   CLAIMS_DEMO_DATAVERSE_CLIENT_ID / _CLIENT_SECRET / _TENANT_ID
  *                                  an app registration that is an application user in that CRM (default: DYNAMICS_*)
  *   CLAIMS_DEMO_SHAREPOINT_SITE    default tttfinancialgroup.sharepoint.com:/sites/TTTDevelopment (Graph: GRAPH_*)
@@ -47,7 +50,7 @@
  */
 import {
     batchQuietMs, claimsDemoBatchCheck, claimsFormDone, voiceHint, filesQuietMs, optionalQuietMs, claimsDemoReminder, claimsDemoTurn, demoContactFor, demoPhones, parseDemoNumbers, reminderDays, type ClaimsDemoDeps,
-    type DemoConversation, type DemoVoice, type VoiceHeard,
+    type DemoConversation, type DemoOutcome, type DemoVoice, type VoiceHeard,
 } from '../domain/claimsDemoHost';
 import type { Dv } from '../departments/insurance/dataverse';
 import type { ClientFile, ResumeFile } from '../departments/insurance/followon';
@@ -78,15 +81,49 @@ import { getActivePhoneNumberId } from '../utils/messageContext';
 import { metaWhatsAppService } from './meta.service';
 import { supabaseService, type ClaimConversationRow } from './supabase.service';
 import { transcribeVoiceNote } from './transcribe.service';
+import { claimsCrmUrl, claimsLiveMode, claimsLiveOn, claimsSite } from '../utils/claimsLiveSwitch';
 
-const DEV_URL = 'https://tttdevelopment.crm4.dynamics.com';
-const DEV_SITE = 'tttfinancialgroup.sharepoint.com:/sites/TTTDevelopment';
 const INTENT_MODEL = process.env.CLAIMS_INTENT_MODEL || 'claude-haiku-4-5-20251001';
 const UNDERSTAND_MODEL = process.env.CLAIMS_UNDERSTAND_MODEL || 'claude-sonnet-4-6';
 const SIGN_UP_LINK = process.env.CLAIMS_SIGNUP_LINK || 'https://www.ttt-tax.co.za/client-onboarding';
 
 /** The demo contact for this sender, or null: not a demo number (or no demo numbers set). */
 export const claimsDemoContact = (from: string): string | null => demoContactFor(parseDemoNumbers(process.env.CLAIMS_DEMO_NUMBERS), from);
+
+/**
+ * Claims go live (20 Nov 2026): a live client's conversation counts as in progress for this long after its last turn.
+ * Within it, their messages (files and voice notes too) go to the claims flow first; one that isn't about the claim is
+ * let go to Tina's normal path. After it, a claim reply still reaches the claim through service routing's insurance side.
+ */
+const LIVE_IN_PROGRESS_MS = 14 * 24 * 3_600_000;
+
+/** Claims go live: the contact of a live client's claim conversation, demo numbers aside. Null when there is none. */
+async function liveContact(phone: string): Promise<{ contactId: string; row: ClaimConversationRow } | null> {
+    if (claimsDemoContact(phone) || !claimsLiveOn(phone)) return null;
+    const row = await supabaseService.getClaimConversation(phone);
+    return row?.contact_id ? { contactId: row.contact_id, row } : null;
+}
+
+/**
+ * Claims go live: the live client whose claim conversation is in progress on this number (a walkthrough, roadside, or a
+ * claim the follow-on is on), else null. whatsappProcessor sends their message to handleClaimsLiveMessage first.
+ */
+export async function claimsLiveConversation(phone: string, now: Date = new Date()): Promise<string | null> {
+    const live = await liveContact(phone);
+    if (!live) return null;
+    const { row } = live;
+    if (now.getTime() - Date.parse(row.updated_at) > LIVE_IN_PROGRESS_MS) return null;
+    const resume = row.resume as ResumeState | null;
+    return row.walkthrough || resume?.followOn || resume?.pending ? live.contactId : null;
+}
+
+/** The contact a queued claims job (batch check, form done, reminder) is for: a demo number's, else a live client's. */
+async function claimsContactFor(phone: string): Promise<{ contactId: string; live: boolean } | null> {
+    const demo = claimsDemoContact(phone);
+    if (demo) return { contactId: demo, live: false };
+    const live = await liveContact(phone).catch(() => null);
+    return live ? { contactId: live.contactId, live: true } : null;
+}
 
 // --- client-credential tokens ------------------------------------------------------------------------------------------
 const tokens = new Map<string, { value: string; until: number }>();
@@ -106,7 +143,7 @@ async function appToken(tenant: string, clientId: string, secret: string, scope:
 }
 
 function dataverse(stats: CrmStats): Dv {
-    const url = (process.env.CLAIMS_DEMO_DATAVERSE_URL || DEV_URL).replace(/\/$/, '');
+    const url = claimsCrmUrl();
     const tenant = process.env.CLAIMS_DEMO_DATAVERSE_TENANT_ID || process.env.DYNAMICS_TENANT_ID || '';
     const id = process.env.CLAIMS_DEMO_DATAVERSE_CLIENT_ID || process.env.DYNAMICS_CLIENT_ID || '';
     const secret = process.env.CLAIMS_DEMO_DATAVERSE_CLIENT_SECRET || process.env.DYNAMICS_CLIENT_SECRET || '';
@@ -161,7 +198,7 @@ const channels = (stats: CrmStats, log: DemoLog): DemoChannels & { flush(): Prom
     return {
         dv: dataverse(stats),
         graph,
-        site: process.env.CLAIMS_DEMO_SHAREPOINT_SITE || DEV_SITE,
+        site: claimsSite(),
         sendText: async (to, text, choices, link) => box.push(to, { text, ...(choices?.length ? { choices } : {}), ...(link ? { link } : {}) }),
         flush: () => box.flush(),
         sendDocument: async (to, bytes, fileName, caption) => {
@@ -309,8 +346,9 @@ async function writeLog(ch: DemoChannels, log: DemoLog, phone: string, contactId
     }
 }
 
-function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog): ClaimsDemoDeps {
+function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog, live = false): ClaimsDemoDeps {
     return {
+        ...(live ? { live: true } : {}),
         async load(phone) {
             const row = await supabaseService.getClaimConversation(phone);
             return row ? {
@@ -366,13 +404,14 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
  * and the client's next message carries on from them.
  */
 export async function handleClaimsFormDone(phone: string, claimId: string): Promise<void> {
-    const contactId = claimsDemoContact(phone);
-    if (!contactId || !claimId) return;
+    const who = await claimsContactFor(phone);
+    if (!who || !claimId) return;
+    const { contactId, live } = who;
     const stats = newCrmStats();
     const log = newDemoLog();
     const ch = channels(stats, log);
     try {
-        const outcome = await claimsFormDone(deps(phone, contactId, ch, log), phone, claimId, new Date());
+        const outcome = await claimsFormDone(deps(phone, contactId, ch, log, live), phone, claimId, new Date());
         console.log(`[ClaimsDemo] ${phone}: guided form ${outcome}; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} guided form end failed:`, (e as Error).message, (e as Error).stack);
@@ -450,13 +489,14 @@ export interface DemoInbound {
  * Never throws: a check that fails leaves Tina waiting, and the client's next message carries on as usual.
  */
 export async function handleClaimsDemoBatchCheck(phone: string, token: string): Promise<void> {
-    const contactId = claimsDemoContact(phone);
-    if (!contactId || !token) return;
+    const who = await claimsContactFor(phone);
+    if (!who || !token) return;
+    const { contactId, live } = who;
     const stats = newCrmStats();
     const log = newDemoLog();
     const ch = channels(stats, log);
     try {
-        const outcome = await claimsDemoBatchCheck(deps(phone, contactId, ch, log), phone, token, new Date());
+        const outcome = await claimsDemoBatchCheck(deps(phone, contactId, ch, log, live), phone, token, new Date());
         console.log(`[ClaimsDemo] ${phone}: batch check ${outcome}; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes`);
     } catch (e) {
         console.error(`[ClaimsDemo] ${phone} batch check failed:`, (e as Error).message, (e as Error).stack);
@@ -474,8 +514,13 @@ export async function enqueueClaimsDemoReminders(now: Date = new Date(), testPho
     if ((process.env.CLAIMS_REMINDERS || '').trim().toLowerCase() === 'off') return 0;
     const day = new Date(now.getTime() + 2 * 3_600_000).toISOString().slice(0, 10);
     const local = testPhone?.replace(/\D/g, '').slice(-9);
-    const phones = demoPhones(process.env.CLAIMS_DEMO_NUMBERS).filter((p) => !testPhone || p.phone.endsWith(local ?? '-'));
-    for (const { phone } of phones) await enqueueClaimsReminder(phone, day, !!testPhone);
+    const demo = demoPhones(process.env.CLAIMS_DEMO_NUMBERS).map((p) => p.phone);
+    // Claims go live: every live client who has had a claim conversation (the reminder itself finds their open claims).
+    const live = claimsLiveMode()
+        ? (await supabaseService.listClaimConversationPhones()).filter((p) => !claimsDemoContact(p) && claimsLiveOn(p))
+        : [];
+    const phones = [...demo, ...live].filter((p) => !testPhone || p.endsWith(local ?? '-'));
+    for (const phone of phones) await enqueueClaimsReminder(phone, day, !!testPhone);
     return phones.length;
 }
 
@@ -495,14 +540,15 @@ async function reminderDaysFromCrm(dv: Dv) {
 
 /** TTTFG-5212: one demo number's morning reminder (whatsappProcessor routes it here). Never throws. */
 export async function handleClaimsDemoReminder(phone: string, o: { test?: boolean } = {}): Promise<void> {
-    const contactId = claimsDemoContact(phone);
-    if (!contactId) return;
+    const who = await claimsContactFor(phone);
+    if (!who) return;
+    const { contactId, live } = who;
     const stats = newCrmStats();
     const log = newDemoLog();
     const ch = channels(stats, log);
     try {
         // A test by hand goes out even if the client wrote today (still once per claim per day).
-        const r = await claimsDemoReminder(deps(phone, contactId, ch, log), phone, contactId, new Date(), {
+        const r = await claimsDemoReminder(deps(phone, contactId, ch, log, live), phone, contactId, new Date(), {
             ...templateSettings(), ...(o.test ? { fromDay: 0 } : {}),
             ...(await reminderDaysFromCrm(ch.dv)),
         });
@@ -522,6 +568,19 @@ export async function handleClaimsDemoReminder(phone: string, o: { test?: boolea
  * answered with an apology.
  */
 export async function handleClaimsDemoMessage(m: DemoInbound, contactId: string): Promise<void> {
+    await claimsMessage(m, contactId, { live: false });
+}
+
+/**
+ * Claims go live: one message from a live client, for the claims flow against Tina's own CRM. `force`: the client tapped
+ * Report a claim or sent the claim link. False when it wasn't about a claim (nothing was said or kept): Tina's normal
+ * path carries on with it.
+ */
+export async function handleClaimsLiveMessage(m: DemoInbound, contactId: string, o: { force?: boolean } = {}): Promise<boolean> {
+    return (await claimsMessage(m, contactId, { live: true, ...o })) !== 'not-claims';
+}
+
+async function claimsMessage(m: DemoInbound, contactId: string, o: { live: boolean; force?: boolean }): Promise<DemoOutcome | 'failed'> {
     const started = Date.now();
     const stats = newCrmStats();
     const file: ClientFile | undefined = m.document
@@ -531,17 +590,23 @@ export async function handleClaimsDemoMessage(m: DemoInbound, contactId: string)
     log.inbound = { text: file ? `${m.text ? `${m.text}\n` : ''}📎 ${file.fileName}` : m.text, wamid: m.wamid, at: new Date().toISOString() };
     const ch = channels(stats, log);
     const before = await supabaseService.getClaimConversation(m.from).catch(() => null);
+    const tag = o.live ? '[ClaimsLive]' : '[ClaimsDemo]';
+    let outcome: DemoOutcome | 'failed';
     try {
         // A tap on a claims choice is read as what it says ("1. Discovery Insure Motor policy (DI-1)"), not its short title.
         const text = tappedText(m.interactiveId) ?? m.text;
-        const outcome = await claimsDemoTurn(deps(m.from, contactId, ch, log), {
+        outcome = await claimsDemoTurn(deps(m.from, contactId, ch, log, o.live), {
             phone: m.from, contactId, text, file, ...(m.audio ? { voice: m.audio } : {}), wamid: m.wamid || `wamid.local.${Date.now()}`,
+            ...(o.force ? { force: true } : {}),
         }, new Date());
-        console.log(`[ClaimsDemo] ${m.from}: ${outcome} in ${Date.now() - started}ms; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes${stats.throttled ? `, ${stats.throttled} throttled` : ''}`);
+        console.log(`${tag} ${m.from}: ${outcome} in ${Date.now() - started}ms; CRM ${stats.reads} reads (${stats.cached} from cache), ${stats.writes} writes${stats.throttled ? `, ${stats.throttled} throttled` : ''}`);
     } catch (e) {
-        console.error(`[ClaimsDemo] ${m.from} failed after ${Date.now() - started}ms:`, (e as Error).message, (e as Error).stack);
+        console.error(`${tag} ${m.from} failed after ${Date.now() - started}ms:`, (e as Error).message, (e as Error).stack);
         await ch.sendText(m.from, 'Sorry, something went wrong on my side. Please send that again in a minute.');
+        outcome = 'failed';
     }
     await ch.flush();
-    await writeLog(ch, log, m.from, contactId, before);
+    // Let go: Tina's normal path logs the message itself.
+    if (outcome !== 'not-claims') await writeLog(ch, log, m.from, contactId, before);
+    return outcome;
 }

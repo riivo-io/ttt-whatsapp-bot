@@ -131,6 +131,8 @@ export interface DemoMessage {
     /** TTTFG-4830: a WhatsApp voice note (or audio file): Meta's media id and its type. */
     voice?: DemoVoice;
     wamid: string;
+    /** Claims go live (20 Nov 2026): the client tapped Report a claim or sent the claim link: a claim, no check needed. */
+    force?: boolean;
 }
 
 export interface DemoVoice { id: string; mimeType: string }
@@ -187,6 +189,11 @@ export interface ClaimsDemoDeps {
     missingItemsByAgent?: boolean;
     /** TTTFG-5299: roadside help (ROADSIDE_ENABLED). Absent: off, and a breakdown is read as anything else is. */
     roadsideModel?: RoadsideModel;
+    /**
+     * Claims go live (20 Nov 2026, src/utils/claimsLiveSwitch.ts): a real client, not a demo number. A message that is not
+     * about a claim is let go ('not-claims': nothing said, nothing saved) for Tina's normal path, and "#reset" means nothing.
+     */
+    live?: boolean;
     /** TTTFG-5299: opens the riivo_request (Insurance, topic Roadside assistance). Null when refused: the number still goes. */
     openRoadsideRequest?(contactId: string, phone: string, text: string): Promise<string | null>;
 }
@@ -196,7 +203,7 @@ const asRoadsidePorts = (ports: ResumePorts): RoadsidePorts => ({ ...ports, insu
 
 export type DemoOutcome =
     | 'reset' | 'hello' | 'file-held' | 'walkthrough' | 'opened' | 'started' | 'follow-on' | 'new-claim' | 'no-request' | 'busy'
-    | 'voice-unheard' | 'roadside' | 'reminders-stopped';
+    | 'voice-unheard' | 'roadside' | 'reminders-stopped' | 'not-claims';
 
 export const helloText = (firstName: string) =>
     `Hi ${firstName}, it's Tina from TTT. On this number I'm set up to help with insurance claims. Tell me what happened `
@@ -238,7 +245,7 @@ export const describedAsTheft = (w: WalkthroughState) =>
     w.facts.claimType === 'Motor theft' || w.facts.claimType === 'Hijacking' || THEFT.test(w.facts.description ?? '');
 
 export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: Date): Promise<DemoOutcome> {
-    if (!m.file && !m.voice && m.text.trim().toLowerCase() === RESET_COMMAND) {
+    if (!deps.live && !m.file && !m.voice && m.text.trim().toLowerCase() === RESET_COMMAND) {
         const refs = await deps.withdrawOpenClaims(m.contactId);
         await deps.remove(m.phone);
         await deps.say(m.phone, resetText(refs));
@@ -440,10 +447,13 @@ export async function claimsDemoTurn(deps: ClaimsDemoDeps, m: DemoMessage, now: 
     }
 
     // ---- no open claim ----
+    const route = m.force ? true : m.text.trim() ? await claimRoute(watch(deps.intentModel), m.text, { wordFilter: false }) : null;
+    if (unavailable) return busy();
+    // Claims go live: not a claim and no open claim it answers. Tina's normal path has it (service routing: the broker's
+    // hand-over, or tax), so nothing is said or kept here.
+    if (!route && deps.live) return 'not-claims';
     c.resume = NO_RESUME_STATE;
     if (m.file) c.held = [...c.held, { file: m.file }];
-    const route = m.text.trim() ? await claimRoute(watch(deps.intentModel), m.text, { wordFilter: false }) : null;
-    if (unavailable) return busy();
     if (!route) {
         if (m.file) await deps.say(m.phone, FILE_KEPT);
         else {
