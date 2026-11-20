@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 15ef83b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/followon.ts (commit 20a642e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176: the claim conversation after the acknowledgement (SPEC-04 "Tina's claim walkthrough" steps 7 to 9).
 // claimTurn() in claim.ts ends with { state: null, claim } once the FNOL acknowledgement is sent; this file takes over
@@ -69,6 +69,11 @@ export interface ClaimSettings {
   waitForMore?: boolean;
   /** TTTFG-5562: a new claim gets one link to the guided form instead of the first question (ports.guidedFormLink). */
   guidedForm?: boolean;
+  /**
+   * The user (20 Nov 2026): the email agent thanks the client for a missing-items Submit (missingitems.ts, on the host's
+   * CLAIMS_MISSING_ITEMS), so Tina sends the client nothing of her own on it: one message, and an approved template.
+   */
+  missingItemsByAgent?: boolean;
 }
 export const CLAIM_SETTINGS_DEFAULTS = { notificationWarningDays: 7 } as const;
 
@@ -439,6 +444,8 @@ export interface Ctx {
    * never asked one item at a time on WhatsApp: it is listed, with the link to the missing-items form (askOrEnd).
    */
   topUp?: boolean;
+  /** ClaimSettings.missingItemsByAgent: the agent thanks the client for a missing-items Submit; Tina says nothing. */
+  agentThanks?: boolean;
 }
 /** The claim as it stands within this turn. */
 interface Work { answers: ClaimAnswers; evidence: { key: string }[]; facts: ClaimFacts }
@@ -1527,12 +1534,14 @@ function topUpDone(c: Ctx, st0: FollowOnState): Step {
     const ttt = forTtt(c.form, w);
     out.push(
       { kind: 'evidence-complete', ...(ttt.length ? { forTtt: ttt } : {}) },
-      { kind: 'text', text: EVERYTHING_IN },
+      // The user (20 Nov 2026): the agent thanks the client (missingitems.ts), with the approved template.
+      ...(c.agentThanks ? [] : [{ kind: 'text' as const, text: EVERYTHING_IN }]),
       ...(listed.length ? [{ kind: 'follow-up' as const, detail: allInDetail(c.claim, late) }] : checkClaim),
     );
     return { state: null, out };
   }
-  out.push({ kind: 'still-missing', items: missing, lead: FILE_SAVED });
+  // The user (20 Nov 2026): with the agent's thanks, nothing more now: the next morning reminder lists what is left.
+  if (!c.agentThanks) out.push({ kind: 'still-missing', items: missing, lead: FILE_SAVED });
   if (late.length) out.push({ kind: 'follow-up', detail: lateDetail(c.claim, late) });
   out.push(...checkClaim);
   return { state: stillNeedState(c, { ...st, signingRequested: true }, missing), out };
@@ -2230,6 +2239,7 @@ export async function followOnTurn(
     // The user (12 Nov 2026): a client who comes back to a claim they haven't finished gets the form's link again.
     ...((input.kind === 'start' || input.kind === 'resume') && settings.guidedForm && ports.guidedFormLink ? { guided: true } : {}),
     ...(settings.guidedForm && ports.guidedFormLink && formSubmitted(claim) && !claim.evidenceComplete ? { topUp: true } : {}),
+    ...(settings.missingItemsByAgent ? { agentThanks: true } : {}),
   };
   // TTTFG-5196: a message from the client ends the quiet spell on an optional item; the turn sets a new one if it ends
   // on one again.

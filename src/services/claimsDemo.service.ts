@@ -348,6 +348,8 @@ function deps(phone: string, contactId: string, ch: DemoChannels, log: DemoLog):
         lastBrokerStepOn: (claimId, step) => lastReminderPort(ch.dv).lastBrokerStepOn(claimId, step),
         // Without a way to make the link the claim must carry on as chat, walkthrough and all.
         ...(ch.guidedLink && guidedFormOn(process.env.CLAIMS_GUIDED_FORM, phone) ? { guidedForm: true } : {}),
+        // The user (20 Nov 2026): the email agent thanks the client for the missing-items form's Submit (and stamps nothing else).
+        ...(missingItemsOn(process.env.CLAIMS_MISSING_ITEMS) ? { missingItemsByAgent: true } : {}),
         ...((process.env.CLAIMS_VOICE_NOTES || '').trim().toLowerCase() === 'off'
             ? {}
             : { transcribe: (voice: DemoVoice, hint: string) => hear(ch, phone, voice, hint, log) }),
@@ -380,7 +382,25 @@ export async function handleClaimsFormDone(phone: string, claimId: string): Prom
 }
 
 /** TTTFG-5562: the web host's half of the guided form: one link's claim, through the same ports as a WhatsApp message. */
+/**
+ * CLAIMS_MISSING_ITEMS (the user, 20 Nov 2026): "on" stamps the claim when the client submits the missing-items form, and the email
+ * agent (on its own CLAIMS_MISSING_ITEMS) files a PDF of what they entered, clears the SAPS flag, emails the broker and thanks the
+ * client; Tina then sends nothing of her own on that Submit. Needs riivo_claim.riivo_missingitemsreceivedon. Off by default.
+ */
+const missingItemsOn = (raw: string | undefined) => (raw ?? '').trim().toLowerCase() === 'on';
+
 function claimFormSession(link: GuidedLinkRow): ClaimFormSession {
+    const session = baseClaimFormSession(link);
+    if (!missingItemsOn(process.env.CLAIMS_MISSING_ITEMS)) return session;
+    return {
+        ...session,
+        missingItemsSent: async () => {
+            await dataverse(newCrmStats())('PATCH', `riivo_claims(${link.claim_id})`, { riivo_missingitemsreceivedon: new Date().toISOString() });
+        },
+    };
+}
+
+function baseClaimFormSession(link: GuidedLinkRow): ClaimFormSession {
     return demoClaimFormSession(channels(newCrmStats(), newDemoLog()), link, {
         hear: (bytes, mimeType, hint) => transcribeVoiceNote(bytes, mimeType, voiceHint(hint)),
         async carryOn() {

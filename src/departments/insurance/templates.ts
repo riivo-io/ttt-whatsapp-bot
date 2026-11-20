@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 15ef83b). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 20a642e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -604,3 +604,23 @@ export const ADDITIONAL_INFO_TEMPLATE: StatusTemplate = {
   render: (v) => `An update on your claim ${v.reference}: ${v.insurer} has asked for more information before they can carry on. We will be in touch to tell you what is needed.`,
   emailSubject: (v) => `More information needed on your claim ${v.reference}`,
 };
+
+/**
+ * The user (20 Nov 2026): what the client hears when they submit the missing-items form (missingitems.ts), word for word:
+ * "Thank you for the missing items. We will keep you updated on the status of your claim." Nothing about what is still to
+ * come: the next morning reminder asks for that. On WhatsApp always the approved template, as the status updates are: the
+ * client reached the form from a reminder's button, so the 24-hour window is usually closed. `meta` and `templateVersion`
+ * are its key in the WhatsApp flow's template list (WhatsApp - Automated - Send Templated Message); Meta must have it, with
+ * no variables. Its own switch, CLAIMS_MISSING_THANKS_META_APPROVED, until then the agent emails or asks the broker.
+ */
+export const MISSING_ITEMS_THANKS_TEMPLATE = {
+  name: 'Claim - missing items received',
+  version: 'draft-1',
+  approved: true,
+  meta: 'claim_missing_items_received',
+  templateVersion: 1,
+  whatsappBody: 'Thank you for the missing items. We will keep you updated on the status of your claim.',
+  params: (_v: { reference: string }): string[] => [],
+  render: (_v: { reference: string }) => 'Thank you for the missing items. We will keep you updated on the status of your claim.',
+  emailSubject: (v: { reference: string }) => `Your claim ${v.reference}: thank you for the missing items`,
+} as const;

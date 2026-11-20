@@ -69,3 +69,20 @@ test('the page knows the missing-items form: its own route, Send, and its own la
     assert.match(html, /We have added this to your claim\./);
     assert.match(html, /Nothing more needed/);
 });
+
+test('the user (20 Nov 2026): Send stamps the claim for the email agent, on WhatsApp and email claims, before Tina carries on', async () => {
+    for (const callbackUrl of [undefined, 'https://agent.example/form-done']) {
+        const d: GuidedLinkDeps = { store: memoryLinkStore(), publicUrl: 'https://tina.example' };
+        const { url } = await createGuidedLink(d, { ...INPUT, ...(callbackUrl ? { callbackUrl } : {}) });
+        const calls: string[] = [];
+        const app = express();
+        app.use('/claim-form', claimFormRouter(() => ({ ...d, session: () => ({ ...topUpSession(calls), missingItemsSent: async () => { calls.push('stamp'); } }), signOnForm: true })));
+        const srv = await new Promise<import('node:http').Server>((r) => { const x = app.listen(0, () => r(x)); });
+        try {
+            const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/claim-form`;
+            const r = await fetch(`${base}/${tokenOf(url)}/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            assert.equal(r.status, 200);
+            assert.deepEqual(calls, callbackUrl ? ['finish', 'stamp'] : ['finish', 'stamp', 'carryOn']);
+        } finally { await new Promise((r) => srv.close(r)); }
+    }
+});

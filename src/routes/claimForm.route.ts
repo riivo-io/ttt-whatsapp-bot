@@ -43,6 +43,11 @@ export interface ClaimFormSession {
     carryOn(): Promise<void>;
     /** The user (18 Nov 2026): the client stops the reminders about this claim (optout.ts). The link keeps working. */
     stopReminders(): Promise<void>;
+    /**
+     * The user (20 Nov 2026): the client submitted the missing-items form. Stamps the claim (riivo_missingitemsreceivedon), so the
+     * email agent files what they entered as a PDF, updates the flags, emails the broker and thanks the client. Absent: off.
+     */
+    missingItemsSent?(): Promise<void>;
 }
 
 export interface ClaimFormDeps extends GuidedLinkDeps {
@@ -340,7 +345,9 @@ export function claimFormRouter(getDeps: () => ClaimFormDeps | null): Router {
             }
             if (r.topUp) {
                 // Its files and answers are on the claim already; Tina thanks the client and lists what's left. An email
-                // claim's agent has no such step: its claim just has them.
+                // claim's agent has no such step: its claim just has them. The user (20 Nov 2026): the stamp tells the email
+                // agent, for both channels (PDF, flags, broker email, the client's thanks).
+                await session.missingItemsSent?.();
                 if (!link.callback_url) await session.carryOn();
                 await finishGuidedLink(d, link.id);
                 return void res.json({ ok: true, open: [] });
