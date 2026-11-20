@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit 8729d59). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/roadside.ts (commit 15ef83b). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5299: roadside help on WhatsApp. A client whose car has broken down gets their insurer's assist number from the
 // CRM straight away, at any hour, with no person involved; the broker sees in My Day that their client needed help.
@@ -15,14 +15,16 @@
 // - No number on file, or no active motor policy: the number on the policy card or schedule, and an urgent Follow-up for
 //   the broker (AC 6).
 // - Every request writes an open Created agent action, owned by the policy's broker, for My Day (AC 7).
-// - A plain breakdown opens no claim. One that came from an accident or damage gets the offer of a claim once the client
-//   is safe; a yes hands over to the claim walkthrough on the same policy (AC 8). The host starts it (RoadsideResult.claim).
+// - No question about whether anyone is hurt or whether it came from an accident (the developer, 18 Nov 2026). Every
+//   number goes out with a button, "Complete my claim", and tapping it hands over to the claim walkthrough on the same
+//   policy, which sends the form (AC 8). The host starts it (RoadsideResult.claim). Nothing opens until the client taps.
+//   "ok" and "thanks" are only thanks; a message that isn't an answer is read as a new message (RoadsideResult.again).
 //
 // An unknown number is roadside-unknown.ts (AC 2); roadside-turn.ts is what the host calls. Every text goes through the claim gate (sendText).
 // DRAFT WORDING (decision D11): the Insurance and Advice department approves it before go-live.
-import { CLIENT_BROKER, DEPARTMENT, describe, ownerFor, policyTitle, sendText, shortInsurer, YES_NO, type ClaimPorts, type Choice, type Conversation } from './claim';
+import { CLIENT_BROKER, DEPARTMENT, describe, ownerFor, policyTitle, sendText, shortInsurer, type ClaimPorts, type Choice, type Conversation } from './claim';
 import type { RoadsideRoute } from './roadside-intent';
-import { policyKind, type Policy } from './walkthrough';
+import { policyKind, type Facts, type Policy } from './walkthrough';
 
 /** An insurer as riivo_provider holds it. `assistNumber`: riivo_assistnumber, absent when none is on file. */
 export interface Insurer { id: string; name: string; assistNumber?: string }
@@ -40,7 +42,7 @@ export interface RoadsideState {
   /** Absent for an unknown number (AC 2). */
   contactId?: string;
   firstName?: string;
-  /** 'policy': asked which policy the car is on. 'insurer': asked an unknown number which insurer. 'claim-offer': asked whether to start a claim. */
+  /** 'policy': asked which policy the car is on. 'insurer': asked an unknown number which insurer. 'claim-offer': the number went out with the "Complete my claim" button. */
   step: 'policy' | 'insurer' | 'claim-offer';
   /** The motor policies offered at 'policy'. */
   policies?: Policy[];
@@ -60,8 +62,17 @@ export interface RoadsideResult {
   /** null: the roadside conversation has ended. */
   state: RoadsideState | null;
   lastSent?: string;
-  /** AC 8: the client said yes to a claim. The host starts the claim walkthrough with these, on this policy when set. */
-  claim?: { policyId?: string; opening: string };
+  /**
+   * AC 8: the client tapped "Complete my claim". The host starts the claim walkthrough with these, on this policy when set.
+   * `facts` are what roadside already knows (a car, so a motor claim): the host puts what Claude reads from `opening` over
+   * them, so the tap never meets "What kind of claim is it?" and the form can follow at once.
+   */
+  claim?: { policyId?: string; opening: string; facts: Facts };
+  /**
+   * The message isn't an answer to the roadside conversation (the client moved on, or is stuck and asks again): it ends,
+   * and the host reads the message as a new one, roadside check first. Nothing was sent.
+   */
+  again?: true;
 }
 
 /** AC 5: the line in every reply that gives a number. Cover is the insurer's to confirm, never Tina's to state. */
@@ -73,8 +84,14 @@ const BROKER_WILL_CALL = `I've asked ${CLIENT_BROKER} to contact you.`;
 /** AC 6: no number on file, or no motor policy. */
 export const POLICY_CARD = 'Please call the roadside or assist number on your policy card or schedule.';
 export const WHICH_POLICY = 'Which policy is this car on?';
-export const CLAIM_OFFER = "Once you're safe, would you like me to start a claim for the damage?";
+/** AC 8: the tap that completes the claim, sent with every number. WhatsApp sends its title back when it is tapped. */
+export const CLAIM_BUTTON = 'Complete my claim';
+export const CLAIM_BUTTONS: Choice[] = [{ title: CLAIM_BUTTON }];
+export const CLAIM_PROMPT = "When you're ready, tap the button below to complete your claim.";
 export const CLAIM_LATER = "No problem. If you'd like to claim later, just send me a message.";
+export const THANKS_REPLY = `You're welcome. ${CLAIM_PROMPT}`;
+/** What a claim started from roadside already is: a motor claim. Claude's reading of the client's words wins where it finds more. */
+export const ROADSIDE_CLAIM_FACTS: Facts = { claimType: 'Motor accident' };
 export const NOT_READ = "Sorry, I didn't quite get that.";
 export const NO_MOTOR_TEXT = `I can't see a car policy for you on our system. ${POLICY_CARD} ${BROKER_WILL_CALL}`;
 
@@ -99,7 +116,7 @@ export function numberText(g: Pick<InsurerGroup, 'insurer' | 'assistNumber'>, hu
   if (!g.assistNumber) return `I don't have a roadside number for ${g.insurer} on our system. ${POLICY_CARD}`;
   const call = hurt
     ? `Call ${g.insurer}'s assist line now on *${g.assistNumber}* and tell them someone is hurt.`
-    : `You can call ${g.insurer}'s roadside assist line on *${g.assistNumber}*.`;
+    : `Call ${g.insurer}'s roadside assistance line on *${g.assistNumber}*.`;
   return `${call}\n\n${insurerConfirms(g.insurer)}`;
 }
 
@@ -160,11 +177,15 @@ export function pickPolicy(policies: Policy[], text: string): Policy | undefined
 }
 
 /**
- * A clear yes to "would you like me to start a claim?": it starts with yes (or yeah, yep, ja, yebo, sure), or it is only
- * "ok", "please", "go ahead" or "start". "please hurry, the tow truck isn't here" is not a yes (code review, 9 Nov 2026).
+ * The tap on "Complete my claim", or a clear yes typed instead: it starts with yes (or yeah, yep, ja, yebo, sure), or it is
+ * only "go ahead", "claim", or "start / complete / finish / open a claim". "please hurry, the tow truck isn't here" is not
+ * one (code review, 9 Nov 2026), and "ok" is only thanks now that the message asks for a tap, not a yes (18 Nov 2026).
  */
-export const YES_WORDS = /^\W*(?:(?:yes|yeah|yep|ja|yebo|sure)\b|(?:ok(?:ay)?|please(?: do)?|go ahead|start(?: it| one| a claim)?)\W*$)/i;
+export const YES_WORDS = /^\W*(?:(?:yes|yeah|yep|ja|yebo|sure)\b|(?:go ahead|claim|(?:complete|finish|start|open|make|do)(?: my| the| a| it| one)?(?: claim)?)\W*$)/i;
 export const NO_WORDS = /^\W*(?:no|nope|nah|nee|not now|not yet|later|don'?t)\b/i;
+/** Thanks for the number: it keeps the button on offer and starts nothing. */
+export const THANKS_WORDS = /^\W*(?:(?:ok(?:ay)?|k|thanks?|thank you|cheers|great|perfect|got it|noted|will do|lekker|dankie|siyabonga|so much|very much|a lot|cool|awesome|brilliant|appreciate(?:d)?|ta)\b\W*)+$/i;
+const EMOJI_ONLY = /^[\s\p{Extended_Pictographic}️‍]+$/u;
 
 /** Tuesday 10 November 2026, 21:40, South African time: for the broker's row. */
 export const sastWhen = (at: string) =>
@@ -198,17 +219,18 @@ async function brokerRows(ports: ClaimPorts, conv: Conversation, s: RoadsideStat
   }
 }
 
-/** The number (or numbers) go out, the broker's rows are written, and an accident gets the offer of a claim. */
+/**
+ * The number (or numbers) go out in one message with the "Complete my claim" button, and the broker's rows are written.
+ * The conversation stays open for the tap (AC 8): the claim walkthrough starts on this policy when the number went out for
+ * one; else it asks which, as it does.
+ */
 async function sendNumbers(ports: ClaimPorts, conv: Conversation, s: RoadsideState, groups: InsurerGroup[], at: string): Promise<RoadsideResult> {
   const hurt = !!s.someoneHurt;
   const body = groups.length === 1 ? numberText(groups[0], hurt) : numbersText(groups, hurt);
   const tail = groups.some((g) => !g.assistNumber) ? BROKER_WILL_CALL : TOLD_BROKER;
-  let lastSent = await sendText(ports, conv, `${body} ${tail}`, null, at, s.contactId);
+  const lastSent = await sendText(ports, conv, `${body} ${tail}\n\n${CLAIM_PROMPT}`, null, at, s.contactId, CLAIM_BUTTONS);
   for (const g of groups) await brokerRows(ports, conv, s, g, at);
-  if (!s.fromDamage) return { state: null, lastSent };
-  // AC 8: the claim walkthrough starts on this policy when the number went out for one; else it asks, as it does.
   const only = groups.length === 1 && groups[0].policies.length === 1 ? groups[0].policies[0].id : s.policyId;
-  lastSent = await sendText(ports, conv, CLAIM_OFFER, null, at, s.contactId, YES_NO);
   const { tries: _t, policies: _p, ...rest } = s;
   return { state: { ...rest, step: 'claim-offer', ...(only ? { policyId: only } : {}) }, lastSent };
 }
@@ -269,13 +291,19 @@ export async function roadsideClientReply(ports: RoadsidePorts, conv: Conversati
   }
 
   if (state.step === 'claim-offer') {
-    if (YES_WORDS.test(text)) return { state: null, claim: { ...(state.policyId ? { policyId: state.policyId } : {}), opening: state.opening } };
-    if (NO_WORDS.test(text) || tries >= 1) {
+    // AC 8: the tap (or a clear yes) completes the claim, on the policy the number went out for.
+    if (YES_WORDS.test(text)) return { state: null, claim: { ...(state.policyId ? { policyId: state.policyId } : {}), opening: state.opening, facts: ROADSIDE_CLAIM_FACTS } };
+    if (NO_WORDS.test(text)) {
       const lastSent = await sendText(ports, conv, CLAIM_LATER, null, at, state.contactId);
       return { state: null, lastSent };
     }
-    const lastSent = await sendText(ports, conv, `${NOT_READ} ${CLAIM_OFFER}`, null, at, state.contactId, YES_NO);
-    return { state: { ...state, tries: tries + 1 }, lastSent };
+    // Thanks for the number: the button stays on offer, once more, and nothing starts.
+    if (THANKS_WORDS.test(text) || EMOJI_ONLY.test(text)) {
+      const lastSent = await sendText(ports, conv, THANKS_REPLY, null, at, state.contactId, CLAIM_BUTTONS);
+      return { state, lastSent };
+    }
+    // Anything else isn't an answer ("I'm still waiting, send the number again", a tax question): read it as a new message.
+    return { state: null, again: true };
   }
 
   return { state: null };
