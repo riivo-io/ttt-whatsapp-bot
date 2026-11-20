@@ -3,6 +3,8 @@
  *
  *   npx tsx src/scripts/unknown-number-dev.ts --run [phone]    the scenario by acceptance criterion, then clean up
  *   npx tsx src/scripts/unknown-number-dev.ts --run [phone] --keep   the same, leaving the lead and the action to look at in My Day
+ *   npx tsx src/scripts/unknown-number-dev.ts --run [phone] --keep --no-form   the same but stopping before the sign-up form, so the kept lead
+ *                                                       is still the one Tina made (name WhatsApp <number>, no email)
  *   npx tsx src/scripts/unknown-number-dev.ts --show [phone]   the leads and agent actions on the number
  *   npx tsx src/scripts/unknown-number-dev.ts --clean [phone]  delete this script's test lead and action (DEV only)
  *
@@ -101,7 +103,7 @@ async function createLead(p: ReturnType<typeof placeholderLeadParams>): Promise<
     return (await dv<{ new_leadid: string }>('POST', 'new_leads', payload)).new_leadid;
 }
 
-async function run(phone: string, keep: boolean) {
+async function run(phone: string, keep: boolean, noForm: boolean) {
     if (phone !== TEST_PHONE && !phone.startsWith('2760005340')) throw new Error(`refusing ${phone}: only a Test5340 number (27600053400 to 27600053409)`);
     if ((await contactsOn(phone)).length || (await leadsOn(phone)).length || (await actionsOn(phone)).length) {
         throw new Error(`${phone} already has rows in DEV: run --show, then --clean, first`);
@@ -159,21 +161,25 @@ async function run(phone: string, keep: boolean) {
     console.log('\nStill the unknown number until it signs up');
     ok = line(isPlaceholderLead(replies.get(phone)!.leadId, { id: String(lead?.new_leadid), email: (lead?.ttt_email as string) ?? null }), 'the lead with no email is the placeholder') && ok;
 
-    console.log('\nAC 5: the same person fills in the WhatsApp sign-up form');
-    const saved = await saveSignUpLead({
-        async findByPhone(p) { const l = (await leadsOn(p))[0]; return l ? { id: String(l.new_leadid), notes: (l.riivo_notes as string) ?? null } : null; },
-        async update(id, c) {
-            await dv('PATCH', `new_leads(${id})`, { ttt_firstname: c.firstName, ttt_lastname: c.lastName, ttt_email: c.email, ...(c.notes ? { riivo_notes: c.notes } : {}),
-                ...(typeof c.clientType === 'number' ? { riivo_clienttype: c.clientType } : {}), ...(typeof c.leadType === 'number' ? { riivo_leadtype: c.leadType } : {}) });
-            return true;
-        },
-        create: async () => { throw new Error('the form must update, not create'); },
-    }, phone, { firstName: 'Jane', lastName: 'Smith', email: 'jane.smith.5340@example.com', notes: 'Rehearsal: signed up on WhatsApp', clientType: 0, leadType: 100000000 });
-    ok = line(saved?.how === 'updated' && saved.leadId === lead?.new_leadid, 'the form updated the lead on the number') && ok;
-    const after = await leadsOn(phone);
-    ok = line(after.length === 1, 'one lead remains') && ok;
-    ok = line(after[0]?.ttt_firstname === 'Jane' && after[0]?.ttt_email === 'jane.smith.5340@example.com', 'it has the name and email the form typed') && ok;
-    ok = line(!isPlaceholderLead(replies.get(phone)!.leadId, { id: String(after[0].new_leadid), email: after[0].ttt_email as string }), 'with an email it is a normal lead, no longer the unknown number') && ok;
+    if (noForm) {
+        console.log('\n(sign-up form step skipped: --no-form)');
+    } else {
+        console.log('\nAC 5: the same person fills in the WhatsApp sign-up form');
+        const saved = await saveSignUpLead({
+            async findByPhone(p) { const l = (await leadsOn(p))[0]; return l ? { id: String(l.new_leadid), notes: (l.riivo_notes as string) ?? null } : null; },
+            async update(id, c) {
+                await dv('PATCH', `new_leads(${id})`, { ttt_firstname: c.firstName, ttt_lastname: c.lastName, ttt_email: c.email, ...(c.notes ? { riivo_notes: c.notes } : {}),
+                    ...(typeof c.clientType === 'number' ? { riivo_clienttype: c.clientType } : {}), ...(typeof c.leadType === 'number' ? { riivo_leadtype: c.leadType } : {}) });
+                return true;
+            },
+            create: async () => { throw new Error('the form must update, not create'); },
+        }, phone, { firstName: 'Jane', lastName: 'Smith', email: 'jane.smith.5340@example.com', notes: 'Rehearsal: signed up on WhatsApp', clientType: 0, leadType: 100000000 });
+        ok = line(saved?.how === 'updated' && saved.leadId === lead?.new_leadid, 'the form updated the lead on the number') && ok;
+        const after = await leadsOn(phone);
+        ok = line(after.length === 1, 'one lead remains') && ok;
+        ok = line(after[0]?.ttt_firstname === 'Jane' && after[0]?.ttt_email === 'jane.smith.5340@example.com', 'it has the name and email the form typed') && ok;
+        ok = line(!isPlaceholderLead(replies.get(phone)!.leadId, { id: String(after[0].new_leadid), email: after[0].ttt_email as string }), 'with an email it is a normal lead, no longer the unknown number') && ok;
+    }
 
     console.log(`\n${ok ? 'ALL PASS' : 'SOMETHING FAILED'}`);
     if (keep) console.log('\nKept for you to look at in DEV (My Day, Tax team). Remove with --clean.'); else { console.log(''); await clean(phone); }
@@ -183,7 +189,7 @@ async function run(phone: string, keep: boolean) {
 const args = process.argv.slice(2);
 const phone = args.find((a, i) => i > 0 && /^\+?\d{9,}$/.test(a))?.replace(/\D/g, '') ?? TEST_PHONE;
 (async () => {
-    if (args[0] === '--run') await run(phone, args.includes('--keep'));
+    if (args[0] === '--run') await run(phone, args.includes('--keep'), args.includes('--no-form'));
     else if (args[0] === '--show') await show(phone);
     else if (args[0] === '--clean') await clean(phone);
     else console.log('usage: --run [phone] [--keep] | --show [phone] | --clean [phone]');
