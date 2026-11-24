@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit df632d8). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/templates.ts (commit 231a71e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5176 (TTTFG-5254 steps 5, 6 and 16): the fixed messages Tina sends after the claim acknowledgement. Code text
 // filled with CRM data; Claude writes none of it.
@@ -489,9 +489,8 @@ export interface StatusUpdateVars {
   reference: string;
   /** The insurer's claim number, when the claim has one: the under review message gives it (UNDER_REVIEW_TEMPLATE). */
   number?: string;
-  /** The email only (statusEmail): the client's first name, and the broker's name it is signed with. Never on WhatsApp. */
+  /** The email only (statusEmail): the client's first name. Never on WhatsApp. The name it's signed with is the sender's (sendClaimEmail). */
   firstName?: string;
-  broker?: string;
 }
 
 export const STATUS_CLOSING = 'We will keep you updated on the status of your claim.';
@@ -506,11 +505,14 @@ export const STATUS_CLOSING = 'We will keep you updated on the status of your cl
  *   <broker's name>
  * The WhatsApp template keeps its own words (`whatsappBody`, registered with Meta). A client with no first name on the CRM is
  * "there"; a claim owned by a team signs "Regards" alone, as the general mailbox's frame puts "Team TTT" right under it.
+ *
+ * The user (24 Nov 2026, code review): the text ends at "Regards". The name under it is the sender's, added when the email
+ * goes (claimemail.ts sendClaimEmail, `signOff`): the mailbox's own signature image names them, so the text never does too,
+ * and the name is always the mailbox it really went from, not the claim's owner as the CRM had it when the text was made.
  */
 export function statusEmail(v: StatusUpdateVars, update: string): string {
-  const broker = v.broker?.trim();
   return [`Hi ${v.firstName?.trim() || 'there'},`, 'Just wanted to give you an update on the status of your claim:', update, STATUS_CLOSING,
-    broker ? `Regards\n${broker}` : 'Regards'].join('\n\n');
+    'Regards'].join('\n\n');
 }
 
 /** The vars of a message that gives the insurer's number. */

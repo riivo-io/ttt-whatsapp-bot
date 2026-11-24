@@ -80,12 +80,36 @@ test('a `seen` the page could not have sent is dropped, key by key, and never to
 
 test('the page sends what it showed for untyped keys, merges it across queued saves, and says when an answer was kept', () => {
     const html = claimFormPage();
-    assert.match(html, /function saw\(k\) \{ seen\[k\] = A\[k\] !== undefined \? A\[k\] : null; \}/);
-    assert.match(html, /return \{ answers: answers, notKnown: notKnown, cleared: cleared, seen: seen \};/);
+    // The user (24 Nov 2026, code review): `seen` is what the server last said (SA), never a value a queued save of this page
+    // still has on its way, and says which of them were an "I don't know" (SNK).
+    assert.match(html, /function saw\(k\) \{ seen\[k\] = SA\[k\] !== undefined \? SA\[k\] : null; if \(SNK\[k\]/);
+    assert.match(html, /return \{ answers: answers, notKnown: notKnown, cleared: cleared, seen: seen, seenNotKnown: seenNotKnown \};/);
     // A typed value (in draft) is sent without `seen`: the latest typed answer wins.
     assert.match(html, /if \(!\(f\.key in draft\)\) saw\(f\.key\)/);
     assert.match(html, /to\.seen = seen;/);
-    assert.match(html, /if \(r\.kept && r\.kept\.length\) \{ keptNote = true; redraw = true; \}/);
+    // A reply sets what the server holds, and a waiting save is rebased on what this page's own save just wrote.
+    assert.match(html, /fromServer\(r\);\s+rebase\(sent, r\.kept \|\| \[\]\);/);
+    assert.match(html, /if \(r\.kept && r\.kept\.length\) \{ keptNote = true; keptCount\+\+; redraw = true; \}/);
+    // Submit never goes with kept answers the client hasn't seen on the review page.
+    assert.match(html, /if \(keptCount !== keptReviewed\) \{/);
+    assert.match(html, /keptReviewed = keptCount;/);
+    // One function per name: a second "function heard" would replace the voice notes' own.
+    assert.equal(html.match(/function fromServer\(/g)?.length, 1);
+    assert.equal(html.match(/function heard\(/g)?.length, 1);
     assert.match(html, /so we kept them/);
     assert.match(html, /data-keptok/);
+});
+
+test('the user (24 Nov 2026): which seen keys the page showed as "I don\'t know" reaches the claims package, only for keys in `seen`', async () => {
+    const t = await setup();
+    try {
+        await t.post(t.client, { notKnown: ['a'], seen: { a: null, b: 'x' }, seenNotKnown: ['a', 'c', 7] });
+        assert.deepEqual(t.saves[0].input.seenNotKnown, ['a']);
+        // Without a `seen` there is nothing for it to say about.
+        await t.post(t.client, { notKnown: ['a'], seenNotKnown: ['a'] });
+        assert.ok(!('seenNotKnown' in t.saves[1].input));
+        // A page opened before this change sends none, and the claims package reads it as before.
+        await t.post(t.client, { notKnown: ['a'], seen: { a: null } });
+        assert.ok(!('seenNotKnown' in t.saves[2].input));
+    } finally { await t.close(); }
 });

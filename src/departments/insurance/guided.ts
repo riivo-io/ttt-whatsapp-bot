@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit df632d8). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 231a71e). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -520,6 +520,12 @@ export interface GuidedSave {
    * (withoutStale). A key the person typed has no entry here: the latest typed answer wins, as it always has.
    */
   seen?: Readonly<Record<string, string | number | boolean | null>>;
+  /**
+   * The user (24 Nov 2026): the keys in `seen` that the page showed as "I don't know" (a null in `seen` alone is nothing at
+   * all). With this list, an "I don't know" the other person gave after the page read the claim is theirs and stays. A page
+   * that sends no list (one opened before this change) is read as before: a not-known record never counts as an answer.
+   */
+  seenNotKnown?: readonly string[];
   /** Whose link this came from (AnswerRecord `by`). The host sets it from the link, never from what the page sent. */
   by?: 'client' | 'broker';
 }
@@ -575,28 +581,47 @@ function sameAsShown(held: string | number | boolean, shown: string | number | b
  *
  * A key typed on this page is never in `seen`, so the latest typed answer still wins. A page that sends no `seen` (one
  * opened before this change) saves as before.
+ *
+ * The user (24 Nov 2026), from the code review:
+ * - An answer the claim already holds is not someone else's: a save whose reply was lost on a weak connection is sent again,
+ *   and the claim then holds this page's own value. So the same value again is saved (it changes nothing) and never kept.
+ * - The other person's "I don't know" is an answer too. With `seenNotKnown`, a not-known record the page didn't show stays,
+ *   and an answer this save would put over it is kept. A blank over it is only left out: both say nothing, and theirs keeps
+ *   who said it and whether the broker confirms it.
  */
 export function withoutStale(form: ClaimForm, claim: FollowOnClaim, input: GuidedSave): { input: GuidedSave; kept: string[] } {
   const seen = input.seen;
   if (!seen || !Object.keys(seen).length) return { input, kept: [] };
   // What the page was given for each key (guidedView and every save's answer): the same map, read from the claim as it is now.
   const held = knownValues(form, claim).answers;
+  const seenNotKnown = input.seenNotKnown ? new Set(input.seenNotKnown) : null;
   const kept = new Set<string>();
-  const ok = (key: string) => {
-    if (!Object.prototype.hasOwnProperty.call(seen, key)) return true;
-    const now = Object.prototype.hasOwnProperty.call(held, key) ? held[key] : undefined;
-    // Nothing answered there now: a blank or a pre-fill loses nobody's answer.
-    if (now === undefined) return true;
+  const own = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+  /** `writes`: the value this save gives the key, or undefined for a blank (not known, or taken off). */
+  const ok = (key: string, writes?: string | number | boolean) => {
+    if (!own(seen, key)) return true;
+    const item = itemFor(form, key);
+    const now = own(held, key) ? held[key] : undefined;
+    if (now === undefined) {
+      // Nothing answered there now. A not-known record the page didn't show was given since by the other link.
+      const record = own(claim.answers, key) ? claim.answers[key] : undefined;
+      if (seenNotKnown && record && record.status !== 'answered' && !seenNotKnown.has(key)) {
+        if (writes !== undefined) kept.add(key);
+        return false;
+      }
+      return true;
+    }
+    if (writes !== undefined && sameAsShown(now, writes, item)) return true;
     const shown = seen[key];
-    if (shown !== null && shown !== undefined && sameAsShown(now, shown, itemFor(form, key))) return true;
+    if (shown !== null && shown !== undefined && sameAsShown(now, shown, item)) return true;
     kept.add(key);
     return false;
   };
   const out: GuidedSave = {
     ...input,
-    answers: (input.answers ?? []).filter((a) => ok(a.key)),
-    notKnown: (input.notKnown ?? []).filter(ok),
-    cleared: (input.cleared ?? []).filter(ok),
+    answers: (input.answers ?? []).filter((a) => ok(a.key, a.value)),
+    notKnown: (input.notKnown ?? []).filter((k) => ok(k)),
+    cleared: (input.cleared ?? []).filter((k) => ok(k)),
   };
   return { input: out, kept: [...kept] };
 }
@@ -781,7 +806,7 @@ function topUpInput(input: GuidedSave, keys: ReadonlySet<string>): GuidedSave {
     notKnown: (input.notKnown ?? []).filter(mine),
     cleared: (input.cleared ?? []).filter(mine),
     checked: (input.checked ?? []).filter(mine),
-    ...(input.seen ? { seen: input.seen } : {}),
+    // `seen` is read before this (saveGuided: withoutStale), so it isn't carried. `by` is: applyGuidedSave stamps it.
     ...(input.by ? { by: input.by } : {}),
   };
 }
