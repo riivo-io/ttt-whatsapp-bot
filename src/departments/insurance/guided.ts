@@ -1,4 +1,4 @@
-// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit df632d8). Do not edit here:
+// GENERATED COPY of ttt-preseason-agent/src/departments/insurance/guided.ts (commit 4adb044). Do not edit here:
 // change the source and run scripts/sync-insurance-package.sh. Replaced by the shared package in TTTFG-4830.
 // TTTFG-5562: the guided claim form. Tina sends one link instead of asking the questions on WhatsApp; the client works
 // through the form's question list on their phone, one topic per screen. This file is the form's logic, without the page
@@ -418,8 +418,9 @@ const evidenceKind = (item: QuestionItem): GuidedEvidence['kind'] => (item.answe
 
 /** The form as the page shows it. `earlier`: the riivo_answers of the client's earlier claims, latest first. */
 export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm, earlier: readonly ClaimAnswers[] = []): GuidedView {
+  // TTTFG-5879: the missing-items form reads the stored list, as the reminder and Tina's list do (claimMissing).
+  if (formSubmitted(claim)) return topUpView(list, claim, earlier);
   const form = asGuided(list, claim);
-  if (formSubmitted(claim)) return topUpView(form, claim, earlier);
   const master = masterFormFor(form);
   const facts = factsOf(claim);
   // A theft the client has said so on the form needs the case number too, though the claim wasn't flagged when it opened.
@@ -462,15 +463,24 @@ export function guidedView(list: ClaimForm, claim: FollowOnClaim, crm: GuidedCrm
  * The claim is signed (or its signing step ran), so the client sees only those items: the questions on one screen, in the
  * list's order and with the same controls as on the full form, then the files. What they gave before isn't shown, and
  * can't be changed here (topUpKeys): the signed form holds it.
+ *
+ * TTTFG-5879 (23 Nov 2026): `list` is the claim form as stored, never the guided copy (asGuided). The reminder lists what's
+ * missing from the stored list, and the guided copy can disagree: it drops `formOnly`, so on the generic form its own
+ * "reported? yes" case number and station replaced the SAPS step's required pair, nothing was missing, and the client who
+ * tapped Add missing items was told "Nothing more needed". Each item also shows whatever it hangs on off this screen: the
+ * claim record already says it applies (that is why it's on the list), and the page would otherwise hide it.
  */
-function topUpView(form: ClaimForm, claim: FollowOnClaim, earlier: readonly ClaimAnswers[]): GuidedView {
-  const missing = new Set(claimMissing(form, claim).map((i) => i.key));
-  const all = guidedView(form, { ...claim, signatureStatus: 'Not sent', evidenceComplete: false, readySent: false, status: 'FNOL logged' }, { contact: {}, riivo_policy: {} }, earlier);
-  const fields = all.screens.flatMap((sc) => sc.fields).filter((f) => missing.has(f.key)).map((f) => ({ ...f, hidden: undefined, counted: undefined }));
+function topUpView(list: ClaimForm, claim: FollowOnClaim, earlier: readonly ClaimAnswers[]): GuidedView {
+  const items = new Map(claimMissing(list, claim).map((i) => [i.key, i]));
+  const all = guidedView(list, { ...claim, signatureStatus: 'Not sent', evidenceComplete: false, readySent: false, status: 'FNOL logged' }, { contact: {}, riivo_policy: {} }, earlier);
+  const here = new Set([...items.values()].filter((i) => i.kind === 'question').map((i) => i.key));
+  const onScreen = (when: readonly GuidedCondition[]) => when.filter((w) => here.has(w.key));
+  const fields = all.screens.flatMap((sc) => sc.fields).filter((f) => here.has(f.key))
+    .map((f) => ({ ...f, when: onScreen(f.when), required: f.required || !!items.get(f.key)?.required, hidden: undefined, counted: undefined }));
   return {
     reference: all.reference, title: all.title, insurer: all.insurer, details: [], detailsConfirmed: true,
     screens: fields.length ? [{ id: 'missing', title: 'What we still need', help: 'Add what you have now. You can come back to this link for the rest.', fields }] : [],
-    evidence: all.evidence.filter((e) => missing.has(e.key)),
+    evidence: all.evidence.filter((e) => items.has(e.key)).map((e) => ({ ...e, when: onScreen(e.when) })),
     ...(all.otherHelp ? { otherHelp: all.otherHelp } : {}),
     answers: all.answers, notKnown: all.notKnown, startAt: 0, topUp: true,
   };
@@ -710,14 +720,16 @@ export function applyGuidedSave(
 async function loaded(ports: GuidedPorts, claimId: string) {
   const claim = await ports.loadClaim(claimId);
   if (!claim.claimFormId) throw new Error(`TTTFG-5562: claim ${claimId} has no claim form yet`);
-  const form = asGuided(await ports.claimForm(claim.claimFormId), claim);
-  return { claim, form, sapsRequired: policeOpen(claim, form) };
+  // `stored`: the form as the reminder reads it, for what's missing (TTTFG-5879); `form`: the guided copy the page answers.
+  const stored = await ports.claimForm(claim.claimFormId);
+  const form = asGuided(stored, claim);
+  return { claim, stored, form, sapsRequired: policeOpen(claim, form) };
 }
 
 export async function loadGuided(ports: GuidedPorts, claimId: string, crm: (claim: FollowOnClaim) => Promise<GuidedCrm>, earlier: (claim: FollowOnClaim) => Promise<ClaimAnswers[]>): Promise<GuidedView> {
-  const { claim, form } = await loaded(ports, claimId);
+  const { claim, stored } = await loaded(ports, claimId);
   const [c, e] = await Promise.all([crm(claim), earlier(claim).catch(() => [])]);
-  return guidedView(form, claim, c, e);
+  return guidedView(stored, claim, c, e);
 }
 
 /** The riivo_answers of the client's other claims, latest first: what pre-fills the vehicle or property (AC 3). */
@@ -735,10 +747,10 @@ export async function earlierClaimAnswers(dv: Dv, contactId: string, claimId: st
 
 /** One screen's answers, saved as chat answers are. */
 export async function saveGuided(ports: GuidedPorts, claimId: string, input: GuidedSave, now: Date): Promise<GuidedSaved> {
-  const { claim, form, sapsRequired } = await loaded(ports, claimId);
+  const { claim, stored, form, sapsRequired } = await loaded(ports, claimId);
   const fresh = withoutStale(form, claim, input);
   input = fresh.input;
-  if (formSubmitted(claim)) input = topUpInput(input, topUpKeys(form, claim));
+  if (formSubmitted(claim)) input = topUpInput(input, topUpKeys(stored, claim));
   const { answers, saps, clearSaps, problems } = applyGuidedSave(form, claim, sapsRequired, input, now);
   if (saps.caseNumber || saps.station) await ports.saveSaps(claimId, saps);
   if (clearSaps.caseNumber || clearSaps.station) await ports.clearSaps?.(claimId, clearSaps);
