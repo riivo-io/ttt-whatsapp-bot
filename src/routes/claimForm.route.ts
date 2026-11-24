@@ -150,9 +150,12 @@ function saveInput(body: unknown): GuidedSave {
         ? Object.fromEntries(Object.entries(b.seen as Record<string, unknown>).filter((e): e is [string, string | number | boolean | null] => e[0].length < 120
             && (e[1] === null || typeof e[1] === 'number' || typeof e[1] === 'boolean' || (typeof e[1] === 'string' && e[1].length <= 5000))).slice(0, 500))
         : undefined;
+    // The user (24 Nov 2026): which of those the page showed as "I don't know". Only with a `seen`, and only its keys.
+    const seenNotKnown = seen && Array.isArray(b.seenNotKnown) ? keys(b.seenNotKnown).filter((k) => Object.prototype.hasOwnProperty.call(seen, k)) : undefined;
     return {
         answers, notKnown: keys(b.notKnown), cleared: keys(b.cleared), checked: keys(b.checked), detailsConfirmed: b.detailsConfirmed === true, termsAccepted: b.termsAccepted === true,
         ...(seen ? { seen } : {}),
+        ...(seenNotKnown ? { seenNotKnown } : {}),
     };
 }
 

@@ -267,6 +267,9 @@ const SCRIPT = String.raw`
   var THIS_YEAR = new Date().getFullYear();
 
   var V = null, A = {}, NK = {}, here = null, draft = {}, errors = {}, checked = {}, busy = false, extra = 0;
+  // The user (24 Nov 2026, code review): what the server last said the claim holds, without this page's saves still on their
+  // way (A and NK have those on top). "seen" is read from here: a save not sent yet is this page's, never the other person's.
+  var SA = {}, SNK = {};
   /** The claim is in. "Claim submitted" is the last thing on the page: nothing draws a step over it again. */
   var finished = false;
   /** Which "Other" box is open, which "Earlier" date picker is open. */
@@ -947,7 +950,7 @@ const SCRIPT = String.raw`
     drawnAt = { id: here.id, i: here.i, anchor: here.anchor };
     $('prog').style.width = Math.round((i + part) / Math.max(1, steps.length - 1) * 100) + '%';
     if (!submitting) {
-      if (step.id === 'review') toReview = false;
+      if (step.id === 'review') { toReview = false; keptReviewed = keptCount; }
       $('next').textContent = step.id === 'details' ? 'All correct' : step.id === 'review' ? (V.broker ? 'Save for the client' : V.sign ? 'Confirm and sign' : 'Submit claim') : step.id === 'sign' ? 'Confirm'
         : V.topUp && step.id === 'photos' && !morePages ? (V.broker ? 'Save for the client' : 'Send')
         : toReview && (step.id === 'screen' || step.id === 'photos') ? 'Back to summary' : 'Continue';
@@ -958,12 +961,15 @@ const SCRIPT = String.raw`
 
   // ---- saving: a blank says "I don't know" -------------------------------------------------------------------------
   function collect(blocks) {
-    var answers = [], notKnown = [], cleared = [], seen = {};
+    var answers = [], notKnown = [], cleared = [], seen = {}, seenNotKnown = [];
     // The user (20 Nov 2026): the client and the broker can have this claim open at once, each on their own link. Every key
     // saved here that wasn't typed on this screen (a blank, a pre-fill, a count nobody touched, the "no more" after the last
     // entry) goes with what this page showed for it, so the server keeps an answer the other person gave since (guided.ts
     // withoutStale). What was typed goes without: the latest typed answer wins.
-    function saw(k) { seen[k] = A[k] !== undefined ? A[k] : null; }
+    // The user (24 Nov 2026): what the claim held when this page last heard from the server (SA), not a value a save of this
+    // page still has on its way: the server can never match that, and would keep the old answer over a box taken off. And
+    // whether that was an "I don't know", so the other person's one given since isn't answered over (guided.ts withoutStale).
+    function saw(k) { seen[k] = SA[k] !== undefined ? SA[k] : null; if (SNK[k] && seenNotKnown.indexOf(k) < 0) seenNotKnown.push(k); }
     blocks.forEach(function (b) {
       b.fields.forEach(function (f) {
         var v = value(f.key);
@@ -993,10 +999,13 @@ const SCRIPT = String.raw`
         if (blank) saw(f.key);
       });
     });
-    return { answers: answers, notKnown: notKnown, cleared: cleared, seen: seen };
+    return { answers: answers, notKnown: notKnown, cleared: cleared, seen: seen, seenNotKnown: seenNotKnown };
   }
   // ---- saving behind the page: in order, one at a time, trying again until it's in ---------------------------------------
   var queue = [], sending = false, failures = 0, refused = 0, lost = false, problems = {}, waiters = [], submitting = false, keptNote = false;
+  // The user (24 Nov 2026, code review): how many saves came back with the other person's answers kept, and how many of those
+  // the client had seen on the review page when it was last drawn. Submit never goes with kept answers the client hasn't seen.
+  var keptCount = 0, keptReviewed = 0;
   function idle() { return !queue.length && !sending && !hearing && !uploads.some(busyUp); }
   function whenIdle(fn) { if (idle()) return fn(); waiters.push(fn); }
   function checkIdle() { if (!idle()) return; var w = waiters; waiters = []; w.forEach(function (f) { f(); }); }
@@ -1021,6 +1030,7 @@ const SCRIPT = String.raw`
       Object.keys(to.seen || {}).forEach(function (k) { if (keep(k)) seen[k] = to.seen[k]; });
       Object.keys(b.seen || {}).forEach(function (k) { seen[k] = b.seen[k]; });
       to.seen = seen;
+      to.seenNotKnown = (to.seenNotKnown || []).filter(function (k) { return keep(k) && k in seen; }).concat(b.seenNotKnown || []);
     }
     if (b.detailsConfirmed) to.detailsConfirmed = true;
     if (b.termsAccepted) to.termsAccepted = true;
@@ -1074,6 +1084,8 @@ const SCRIPT = String.raw`
   function absorb(r, sent) {
     A = r.answers; NK = {};
     r.notKnown.forEach(function (k) { NK[k] = true; });
+    fromServer(r);
+    rebase(sent, r.kept || []);
     queue.forEach(overlay);
     var redraw = false;
     (r.problems || []).forEach(function (p) {
@@ -1084,10 +1096,34 @@ const SCRIPT = String.raw`
     });
     // The user (20 Nov 2026): an answer the other link gave while this page showed it blank was kept. A is the claim's now,
     // so the review and any step gone back to show their answer; the bar says why it isn't what was left here.
-    if (r.kept && r.kept.length) { keptNote = true; redraw = true; }
+    if (r.kept && r.kept.length) { keptNote = true; keptCount++; redraw = true; }
     // An answer can open a question only the server knows about. It's read in behind the page.
     if (r.open && !r.open.every(holdsKey)) api('/state').then(function (s) { adopt(s); queue.forEach(overlay); if (!typing() && !sheetOpen()) render(); }).catch(function () {});
     if (redraw && !typing() && !sheetOpen()) render();
+  }
+  /** What the server says the claim holds now (A and NK get this page's saves on their way on top). */
+  function fromServer(s) {
+    SA = {}; SNK = {};
+    Object.keys(s.answers).forEach(function (k) { SA[k] = s.answers[k]; });
+    s.notKnown.forEach(function (k) { SNK[k] = true; });
+  }
+  /**
+   * A save still waiting was collected while the one just answered was on its way, so for a key that one wrote it says what
+   * the claim held before this page's own write. It says what the claim holds now instead, unless the server kept the other
+   * person's answer for that key: then the waiting save must still not go over it.
+   */
+  function rebase(sent, kept) {
+    var wrote = {};
+    (sent.answers || []).forEach(function (a) { wrote[a.key] = 1; });
+    (sent.notKnown || []).concat(sent.cleared || []).forEach(function (k) { wrote[k] = 1; });
+    kept.forEach(function (k) { delete wrote[k]; });
+    queue.forEach(function (b) {
+      Object.keys(b.seen || {}).forEach(function (k) {
+        if (!wrote[k]) return;
+        b.seen[k] = SA[k] !== undefined ? SA[k] : null;
+        b.seenNotKnown = (b.seenNotKnown || []).filter(function (x) { return x !== k; }).concat(SNK[k] ? [k] : []);
+      });
+    });
   }
   function sheetOpen() { return !!(rec || hearing || wheel || picking || listSheet || drawing !== null || adding !== null || !$('terms').hidden); }
   function labelFor(key) {
@@ -1159,6 +1195,7 @@ const SCRIPT = String.raw`
     }
     V.screens = s.screens; V.evidence = s.evidence; A = s.answers; NK = {}; FIELD = {};
     s.notKnown.forEach(function (k) { NK[k] = true; });
+    fromServer(s);
     s.screens.forEach(function (x) { x.fields.forEach(function (f) { FIELD[f.key] = f; if (f.prefill !== undefined) PRE[f.key] = f.prefill; }); });
   }
   /** The page a question is on: it starts at that question, so the client lands right on it. */
@@ -1218,7 +1255,7 @@ const SCRIPT = String.raw`
       $('foot').hidden = true; $('notice').hidden = true;
       $('sec').textContent = '';
       $('prog').style.width = '100%';
-      $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Saved for the client</h1><p class="help">Everything you entered is on the client\'s claim. Ask them to open their own link to check it and sign. You can open this link again to change anything.</p></div>';
+      $('body').innerHTML = '<div class="center"><div class="done-ic">' + ICON_OK + '</div><h1>Saved for the client</h1><p class="help">' + (keptCount ? 'What you entered is on the client\'s claim, except where the client answered first: their answers were kept. ' : 'Everything you entered is on the client\'s claim. ') + 'Ask them to open their own link to check it and sign. You can open this link again to change anything.</p></div>';
     });
   }
   function submit(sig) {
@@ -1248,6 +1285,16 @@ const SCRIPT = String.raw`
       drawNotice();
       var open = Object.keys(problems);
       if (open.length) { clearTimeout(slow); busy = false; submitting = false; goFix(open[0]); return; }
+      // The user (24 Nov 2026, code review): a save that came back while the client was on the signing step, or while Submit
+      // waited for it, kept answers the other person gave. The client sees them on the review page before anything is sent.
+      if (keptCount !== keptReviewed) {
+        clearTimeout(slow); busy = false; submitting = false;
+        keptNote = true;
+        // Drawing the review page counts them as seen (render: keptReviewed), and leaving the signing step drops the signature.
+        here = { id: 'review', anchor: null };
+        errors = { submit: 'Some answers were filled in on your claim while you were busy. Please check them, then ' + (V.sign ? 'sign' : 'submit') + ' again.' };
+        return render();
+      }
       $('next').innerHTML = '<span class="spin"></span>Submitting…';
       post('/submit', sig ? { signature: sig } : {}).then(function (r) {
         clearTimeout(slow);
