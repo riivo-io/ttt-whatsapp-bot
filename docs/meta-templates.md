@@ -24,7 +24,7 @@ This file is the inventory + submission tracker. Template approval typically tak
 
 Sent when an unknown phone number messages the bot (no Dynamics/Supabase match).
 
-**Current code:** [webhook.controller.ts:13-14, 159-160](../src/controllers/webhook.controller.ts#L159-L160) — `SIGN_UP_GREETING` + `SIGN_UP_LINK` as two plain messages.
+**Superseded (TTTFG-5340):** an unknown number is no longer sent a template. It gets one fixed text reply with the tax sign-up link, built in `src/domain/unknownNumber.ts`. No Meta template is needed for it.
 
 **Category:** UTILITY
 

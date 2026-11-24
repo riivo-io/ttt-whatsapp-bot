@@ -628,7 +628,7 @@ export class DynamicsService {
             this.searchEntity(
                 'new_leads',
                 `(${leadsFilter}) and statecode eq 0`,
-                ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             ),
             staffModeEnabled
                 ? this.searchEntity(
@@ -673,6 +673,8 @@ export class DynamicsService {
                 id: lead.new_leadid,
                 type: 'lead',
                 fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                // TTTFG-5340: a lead with no email is still the placeholder Tina made for an unknown number.
+                email: lead.ttt_email || null,
                 loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                 otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                 leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
@@ -829,6 +831,29 @@ export class DynamicsService {
     }
 
     /**
+     * TTTFG-5340: whether an active contact or lead (or, in staff mode, a user) has this number. searchEntity (so getContactByPhone) reads a CRM error
+     * as "no match", which is harmless for a reply but not for a number about to get a new lead: a known client whose
+     * lookup was throttled would get a second record. This asks again and lets any CRM error throw, so the worker
+     * retries the message instead.
+     */
+    async phoneKnownStrict(phoneNumber: string): Promise<boolean> {
+        const token = await this.getToken();
+        const headers = { 'Authorization': `Bearer ${token}`, 'OData-MaxVersion': '4.0', 'OData-Version': '4.0', 'Accept': 'application/json' };
+        const any = async (collection: string, field: string, id: string, active = true): Promise<boolean> => {
+            const filter = `(${this.phoneOrFilter(field, phoneNumber)})${active ? ' and statecode eq 0' : ''}`;
+            const res = await axios.get(`${this.baseUrl}/api/data/v9.2/${collection}?$filter=${encodeURIComponent(filter)}&$select=${id}&$top=1`, { headers });
+            return Array.isArray(res.data?.value) && res.data.value.length > 0;
+        };
+        // The same sources getContactByPhone reads: staff only while STAFF_MODE_ENABLED, as there.
+        const [contact, lead, user] = await Promise.all([
+            any('contacts', 'mobilephone', 'contactid'),
+            any('new_leads', 'ttt_mobilephone', 'new_leadid'),
+            process.env.STAFF_MODE_ENABLED === 'true' ? any('systemusers', 'mobilephone', 'systemuserid', false) : Promise.resolve(false),
+        ]);
+        return contact || lead || user;
+    }
+
+    /**
      * Search for a phone number but return only the entity matching the specified type.
      * Used in test mode to force a specific CRM context.
      */
@@ -844,12 +869,13 @@ export class DynamicsService {
             const lead = await this.searchEntity(
                 'new_leads',
                 `(${this.phoneOrFilter('ttt_mobilephone', phoneNumber)}) and statecode eq 0`,
-                ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+                ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
             );
             if (lead) return {
                 id: lead.new_leadid,
                 type: 'lead',
                 fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                email: lead.ttt_email || null,
                 loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                 otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                 leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
@@ -1036,13 +1062,15 @@ export class DynamicsService {
                 const lead = await this.searchEntity(
                     'new_leads',
                     `new_leadid eq ${crmId} and statecode eq 0`,
-                    ['new_leadid', 'ttt_firstname', 'ttt_lastname', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
+                    ['new_leadid', 'ttt_firstname', 'ttt_lastname', 'ttt_email', LEAD_LOE_RECEIVED_FIELD, LEAD_OTP_COMPLETED_FIELD, 'riivo_leadtype']
                 );
                 if (lead) {
                     return {
                         id: lead.new_leadid,
                         type: 'lead',
                         fullname: `${lead.ttt_firstname || ''} ${lead.ttt_lastname || ''}`.trim(),
+                        // TTTFG-5340: a lead with no email is still the placeholder Tina made for an unknown number.
+                        email: lead.ttt_email || null,
                         loeReceived: lead[LEAD_LOE_RECEIVED_FIELD] === true,
                         otpCompleted: lead[LEAD_OTP_COMPLETED_FIELD] === true,
                         leadType: typeof lead.riivo_leadtype === 'number' ? lead.riivo_leadtype : null,
@@ -1484,6 +1512,43 @@ export class DynamicsService {
     }
 
     /**
+     * TTTFG-5340 AC 5: the active lead on a phone number, with its notes. Unlike searchEntity a CRM error throws: "no lead"
+     * must mean there is none, or the WhatsApp sign-up form would make a second lead for the same number. `preferLeadId`
+     * (the lead Tina made for an unknown number) wins when the number has more than one lead.
+     */
+    async findActiveLeadByPhone(phoneNumber: string, preferLeadId?: string | null): Promise<{ id: string; notes: string | null } | null> {
+        const token = await this.getToken();
+        const filter = `(${this.phoneOrFilter('ttt_mobilephone', phoneNumber)}) and statecode eq 0`;
+        const res = await axios.get(
+            `${this.baseUrl}/api/data/v9.2/new_leads?$filter=${encodeURIComponent(filter)}&$select=new_leadid,riivo_notes&$orderby=createdon asc&$top=10`,
+            { headers: { 'Authorization': `Bearer ${token}`, 'OData-MaxVersion': '4.0', 'OData-Version': '4.0', 'Accept': 'application/json' } },
+        );
+        const rows: { new_leadid: string; riivo_notes?: string | null }[] = Array.isArray(res.data?.value) ? res.data.value : [];
+        // The lead Tina made for this number is the one the person's own form completes; else the oldest on the number.
+        const lead = (preferLeadId && rows.find((r) => r.new_leadid === preferLeadId)) || rows[0];
+        return lead ? { id: lead.new_leadid, notes: lead.riivo_notes || null } : null;
+    }
+
+    /** TTTFG-5340 AC 5: what the WhatsApp sign-up form typed, on the lead already on the number. Owner and lead source stay. */
+    async updateLeadFromSignUp(leadId: string, changes: {
+        firstName: string; lastName: string; email: string; notes?: string; clientType?: number; leadType?: number;
+    }, triggeredBy: string): Promise<boolean> {
+        const payload: Record<string, unknown> = { ttt_firstname: changes.firstName, ttt_lastname: changes.lastName, ttt_email: changes.email };
+        if (changes.notes) payload['riivo_notes'] = changes.notes;
+        if (typeof changes.clientType === 'number') payload['riivo_clienttype'] = changes.clientType;
+        if (typeof changes.leadType === 'number') payload['riivo_leadtype'] = changes.leadType;
+        try {
+            await this.webApi('PATCH', `new_leads(${leadId})`, payload);
+            console.log(`[Dynamics CRM] Updated lead ${leadId} from the WhatsApp sign-up form`);
+            await supabaseService.logCrmWrite({ crmEntity: 'new_leads', crmRecordId: leadId, action: 'update', payload, triggeredBy });
+            return true;
+        } catch (error: any) {
+            console.error('[Dynamics CRM] Failed to update lead from the sign-up form:', error?.message);
+            return false;
+        }
+    }
+
+    /**
      * Create a Contact in Dynamics. All fields below are Business Required on
      * the Contact table, so omitting any of them will cause Dataverse to reject
      * the POST. The chat layer (create_contact tool) is responsible for
@@ -1597,32 +1662,6 @@ export class DynamicsService {
         } catch (error: any) {
             console.error('[Dynamics CRM] Failed to fetch industries:', error?.response?.data?.error?.message || error.message);
             return [];
-        }
-    }
-
-    async searchContactByIdNumber(idNumber: string): Promise<any | null> {
-        return this.searchEntity(
-            'contacts',
-            `ttt_idnumber eq '${idNumber}' and statecode eq 0`,
-            ['contactid', 'fullname', 'mobilephone', 'emailaddress1']
-        );
-    }
-
-    async linkPhoneToContact(contactId: string, phoneNumber: string): Promise<boolean> {
-        try {
-            await this.crmPatch('contacts', `${this.baseUrl}/api/data/v9.2/contacts(${contactId})`, { 'mobilephone': phoneNumber }, phoneNumber);
-            console.log(`[Dynamics CRM] Linked phone ${phoneNumber} to contact ${contactId}`);
-            await supabaseService.logCrmWrite({
-                crmEntity: 'contacts',
-                crmRecordId: contactId,
-                action: 'update',
-                payload: { mobilephone: phoneNumber },
-                triggeredBy: phoneNumber,
-            });
-            return true;
-        } catch (error: any) {
-            console.error('[Dynamics CRM] Failed to link phone:', error?.response?.data?.error?.message || error.message);
-            return false;
         }
     }
 

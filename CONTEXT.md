@@ -116,8 +116,9 @@ it, never maintained as a second list.
 - **Tool registry** — the table mapping tool name → entry, plus `runTool(name, args, ctx)` and
   `deriveOfferedTools(role, permittedKeys)`. `runTool` is called identically in the first Claude
   round and in the follow-up loop; there is no second dispatch site. Lives in
-  `src/services/tools/`, with handlers grouped by audience (`clientTools.ts`, `staffTools.ts`,
-  `leadTools.ts`).
+  `src/services/tools/`, with handlers grouped by audience (`clientTools.ts`, `staffTools.ts`). An
+  `'unknown'` caller (a phone on no contact and no lead) is offered no tool: Tina answers it in code, not with Claude
+  (see **Unknown number** below).
 - **ToolContext** — everything a handler needs for one turn, passed as the second argument:
   per-turn identity (`contactId`, `phoneNumber`, `sessionId`, `entityType`, `ownerFilter`), the
   shared client resolvers, staged upload state, and `deps` — the injected service **Ports**.
@@ -126,6 +127,19 @@ it, never maintained as a second list.
   structurally in production; a test passes a fake implementing only the subset under exercise.
   Two adapters justify the seam: real services in prod, fakes in tests — so a Tool is tested
   through its interface with no Anthropic client mocked.
+
+## Unknown number (TTTFG-5340, SPEC-05)
+
+A WhatsApp number on **no contact and no lead**. Tina never serves it and never trusts what it types (an ID number proves
+nothing). Decided in code, not by Claude, in `src/domain/unknownNumber.ts`:
+
+- **routeUnknownNumber** — the order: the claims flow first (roadside help, or a claim report), then a quoted referral code,
+  then the tax reply.
+- **the one reply** — fixed text with the tax sign-up link and no question answered; a second message inside 24 hours
+  (`REPLY_WINDOW_MS`, the `unknown_number_replies` table) gets nothing.
+- **placeholder lead** — the one Tax lead Tina makes from the number alone (name `WhatsApp <number>`), with a Created agent
+  action for the Tax team. While it has **no email** it is still the unknown number (`isPlaceholderLead`); an email (the sign-up
+  form, a consultant) makes it an ordinary lead.
 
 The registry replaces the duplicated 45-branch `if/else` dispatch in `claude.service.ts`. It is
 **not pure** (handlers do I/O), so it lives under `services/`, not `domain/` — but the decision

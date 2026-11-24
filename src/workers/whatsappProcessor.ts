@@ -42,20 +42,17 @@ import {
 } from '../utils/autoReply';
 import { handleClientClaimMessage, handleUnknownNumberClaim } from '../services/claims.service';
 import { routeClientMessage, serviceRoutingOn } from '../services/serviceRouting.service';
+import { handleUnknownNumber, isUnknownNumberPlaceholder } from '../services/unknownNumber.service';
+import { routeUnknownNumber, WHATSAPP_LEAD_SOURCE } from '../domain/unknownNumber';
+import { saveSignUpLead } from '../domain/signUpLead';
 import { ROUTE_IDS } from '../domain/serviceRoute';
 import { claimsDemoContact, claimsLiveConversation, handleClaimsDemoBatchCheck, handleClaimsDemoMessage, handleClaimsFormDone, handleClaimsDemoReminder, handleClaimsLiveMessage } from '../services/claimsDemo.service';
 
 const WRAP_UP_NOTIFICATION = "Glad I could help! 🙌 I've marked this as resolved. Message me any time if anything else comes up.";
 
-// Text-only fallback fired only when the cold-signup Meta template send fails.
-// The branded templates (`ttt_welcome_signup`, `ttt_referral_welcome`) are
-// the primary path — see PRD-first-contact-templates.md §5.1(b).
-const SIGN_UP_GREETING = `Welcome to TTT Financial Group 👋\n\nYou're one tap from having your tax, accounting and insurance handled here on WhatsApp.\n\nRegister in under a minute: https://www.ttt-tax.co.za/client-onboarding`;
-
-const SIGNUP_TEMPLATE_NAME = process.env.WHATSAPP_SIGNUP_TEMPLATE_NAME || '';
-const SIGNUP_TEMPLATE_LANG = process.env.WHATSAPP_SIGNUP_TEMPLATE_LANG || 'en';
-const SIGNUP_TEMPLATE_HEADER_URL = process.env.WHATSAPP_SIGNUP_TEMPLATE_HEADER_URL
-    || 'https://tttassets.blob.core.windows.net/assets/Welcome_TTTFinancialGroup.png';
+// TTTFG-5340: the cold sign-up template (ttt_welcome_signup / WHATSAPP_SIGNUP_TEMPLATE_*) and its text fallback are retired.
+// An unknown number now gets one fixed reply with the tax sign-up link, and a lead for the Tax team
+// (src/domain/unknownNumber.ts). The referral template below stays: a quoted referral code is not a cold message.
 
 const REFERRAL_TEMPLATE_NAME = process.env.WHATSAPP_REFERRAL_TEMPLATE_NAME || '';
 const REFERRAL_TEMPLATE_LANG = process.env.WHATSAPP_REFERRAL_TEMPLATE_LANG || 'en';
@@ -159,6 +156,8 @@ type ResolvedEntity = {
     crmEntity: any | null;
     staffRoleId: string | null;
     permittedTools: string[];
+    /** TTTFG-5340: the CRM lookup threw, so "no match" may only mean the CRM was down. Never reply to it as an unknown number. */
+    lookupFailed?: boolean;
 };
 
 export type IncomingMessage = {
@@ -411,16 +410,18 @@ async function resolveSender(phoneNumber: string): Promise<ResolvedEntity> {
         }
     }
 
+    let lookupFailed = false;
     try {
         crmEntity = await dynamicsService.getContactByPhone(phoneNumber);
         if (crmEntity) {
             console.log(`[Processor] ${phoneNumber} found in Dynamics: ${crmEntity.type} "${crmEntity.fullname}"`);
         }
     } catch (e) {
+        lookupFailed = true;
         console.warn('[Processor] Dynamics lookup failed:', (e as Error).message);
     }
 
-    return { crmEntity, staffRoleId, permittedTools };
+    return { crmEntity, staffRoleId, permittedTools, lookupFailed };
 }
 
 async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse): Promise<void> {
@@ -483,27 +484,39 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
     // GUIDs are prod-only, so createLead retries with the service principal
     // systemuser as a cross-environment fallback, and finally strips ownerid
     // entirely if Dataverse still rejects.
-    const WHATSAPP_LEAD_SOURCE = 463630005;
     const TAX_CREW_TEAM_ID = 'eb735c44-7b5a-f111-bec7-000d3ada6ac0';
     const TAX_CREW_FALLBACK_OWNER_ID = '873db3ff-d563-f011-bec3-000d3ab7e7df';
 
-    const created = await dynamicsService.createLead({
-        firstName,
-        lastName,
-        phone: from,
-        email,
-        notes: combinedNotes,
+    // TTTFG-5340 AC 5: an unknown number that asked about tax already has a lead (Tina made it). The form updates that lead
+    // instead of making a second one. A CRM error while looking for it throws, and the worker retries the message.
+    const saved = await saveSignUpLead({
+        findByPhone: async (phone) => dynamicsService.findActiveLeadByPhone(phone, await supabaseService.getUnknownNumberLeadId(phone, { tolerateMissingTable: true })),
+        update: (leadId, changes) => dynamicsService.updateLeadFromSignUp(leadId, changes, from),
+        create: async () => {
+            const created = await dynamicsService.createLead({
+                firstName,
+                lastName,
+                phone: from,
+                email,
+                notes: combinedNotes,
+                clientType: typeof clientType === 'number' && !Number.isNaN(clientType) ? clientType : undefined,
+                leadType: typeof leadType === 'number' && !Number.isNaN(leadType) ? leadType : undefined,
+                leadSource: WHATSAPP_LEAD_SOURCE,
+                referredByContactId,
+                ownerSystemUserId,
+                ownerTeamId: ownerSystemUserId ? undefined : TAX_CREW_TEAM_ID,
+                ownerFallbackSystemUserId: TAX_CREW_FALLBACK_OWNER_ID,
+            });
+            return created?.new_leadid ?? null;
+        },
+    }, from, {
+        firstName, lastName, email, notes: combinedNotes,
         clientType: typeof clientType === 'number' && !Number.isNaN(clientType) ? clientType : undefined,
         leadType: typeof leadType === 'number' && !Number.isNaN(leadType) ? leadType : undefined,
-        leadSource: WHATSAPP_LEAD_SOURCE,
-        referredByContactId,
-        ownerSystemUserId,
-        ownerTeamId: ownerSystemUserId ? undefined : TAX_CREW_TEAM_ID,
-        ownerFallbackSystemUserId: TAX_CREW_FALLBACK_OWNER_ID,
     });
 
-    if (!created) {
-        console.error(`[Processor] createLead failed for ${from}`);
+    if (!saved) {
+        console.error(`[Processor] saving the sign-up lead failed for ${from}`);
         await metaWhatsAppService.sendMessage(
             from,
             "Thanks for signing up! We hit a snag saving your details — a consultant will reach out shortly. If you'd prefer, you can also register at https://ttt-tax.co.za/client-onboarding."
@@ -511,7 +524,7 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
         return;
     }
 
-    console.log(`[Processor] Sign-up flow created lead ${created.new_leadid} for ${from}`);
+    console.log(`[Processor] Sign-up flow ${saved.how} lead ${saved.leadId} for ${from}`);
 
     // Fire-and-await the LOE app's team-notification + thank-you emailer.
     // Failures are logged and swallowed inside the helper — the lead is already
@@ -522,10 +535,10 @@ async function handleSignUpFlowSubmission(from: string, flow: SignUpFlowResponse
         phone: from,
         service: serviceLabelFromLeadType(leadType),
         clientType,
-        dynamicsId: created.new_leadid,
+        dynamicsId: saved.leadId,
     });
 
-    const loeLink = buildLoeMagicLink(created.new_leadid);
+    const loeLink = buildLoeMagicLink(saved.leadId);
     if (loeLink) {
         const welcome = `Thanks ${firstName}, you're signed up with TTT Financial Group. 🎉\n\nNext up is your Letter of Engagement (LoE). It's the legally binding contract between you and TTT that lets us act for you at SARS. It sets out the scope of work and the responsibilities on both sides. SARS won't let us file or correspond on your behalf without it, so this one is non-negotiable.\n\nSign yours here (link valid 72 hours):\n${loeLink}\n\nIt takes about 2 minutes. As soon as it's signed I'll message you with the next step.`;
         await metaWhatsAppService.sendMessage(from, welcome);
@@ -923,74 +936,77 @@ async function processMessage(incoming: IncomingMessage, outboundPrefix?: string
         console.log(`[Processor] ${from} tapped campaign button (${interactiveId || text}) → "${effectiveText}"`);
     }
 
-    const { crmEntity, staffRoleId: initialStaffRoleId, permittedTools: initialTools } = await resolveSender(from);
+    const resolved = await resolveSender(from);
+    const { staffRoleId: initialStaffRoleId, permittedTools: initialTools } = resolved;
+    // TTTFG-5340: a lead that Tina herself made for an unknown number, and that has no email yet, is that same unknown number.
+    // It is not served as a lead (Tina would chat to a stranger) until the online sign-up, or a consultant, gives it an email.
+    const placeholderLead = resolved.crmEntity?.type === 'lead' && await isUnknownNumberPlaceholder(from, resolved.crmEntity);
+    const crmEntity = placeholderLead ? null : resolved.crmEntity;
 
     if (!crmEntity) {
-        // TTTFG-5168 AC 2: an unknown number reporting a claim gets only the unknown-number reply (no claim, no
-        // follow-up, no ID number asked). Off unless CLAIMS_ENABLED=true.
-        if (!document && await handleUnknownNumberClaim(from, effectiveText)) return;
+        // TTTFG-5340: the order is the domain's (src/domain/unknownNumber.ts routeUnknownNumber): claims and roadside, a quoted
+        // referral code, then the one tax reply and the one Tax lead.
+        await routeUnknownNumber({
+            // TTTFG-5168 AC 2: an unknown number reporting a claim gets only the unknown-number reply (no claim, no follow-up,
+            // no ID number asked). TTTFG-5299 AC 2: a broken-down car gets its insurer's assist number. Off unless CLAIMS_ENABLED=true.
+            claims: async () => !document && await handleUnknownNumberClaim(from, effectiveText),
 
-        const codeMatch = effectiveText.match(REFERRAL_CODE_PATTERN);
-        const code = codeMatch ? codeMatch[1] : null;
-        const isReferralInbound = !!code || REFERRAL_KEYWORD_PATTERN.test(effectiveText);
+            referral: async () => {
+                const codeMatch = effectiveText.match(REFERRAL_CODE_PATTERN);
+                const code = codeMatch ? codeMatch[1] : null;
+                const isReferralInbound = !!code || REFERRAL_KEYWORD_PATTERN.test(effectiveText);
 
-        if (isReferralInbound) {
-            let referrerFirstName: string | null = null;
-            if (code) {
-                try {
-                    const referrer = await dynamicsService.getContactByReferralCode(code);
-                    if (referrer) {
-                        referrerFirstName = (referrer.firstname || '').trim() || null;
-                        console.log(`[Processor] Referral inbound from ${from} matched code ${code} → ${referrer.fullname}`);
+                if (isReferralInbound) {
+                    let referrerFirstName: string | null = null;
+                    if (code) {
+                        try {
+                            const referrer = await dynamicsService.getContactByReferralCode(code);
+                            if (referrer) {
+                                referrerFirstName = (referrer.firstname || '').trim() || null;
+                                console.log(`[Processor] Referral inbound from ${from} matched code ${code} → ${referrer.fullname}`);
+                            } else {
+                                console.warn(`[Processor] Referral inbound from ${from} had code ${code} but no contact match`);
+                            }
+                        } catch (e) {
+                            console.warn('[Processor] Referral code lookup failed:', (e as Error).message);
+                        }
                     } else {
-                        console.warn(`[Processor] Referral inbound from ${from} had code ${code} but no contact match`);
+                        console.log(`[Processor] Referral inbound from ${from} with no code in text`);
                     }
-                } catch (e) {
-                    console.warn('[Processor] Referral code lookup failed:', (e as Error).message);
+
+                    if (REFERRAL_TEMPLATE_NAME) {
+                        const referrerName = referrerFirstName || 'A friend';
+                        const result = await metaWhatsAppService.sendTemplate(from, {
+                            name: REFERRAL_TEMPLATE_NAME,
+                            languageCode: REFERRAL_TEMPLATE_LANG,
+                            headerImageLink: REFERRAL_TEMPLATE_HEADER_URL,
+                            bodyNamedVariables: { '1': referrerName, '2': referrerName },
+                            flowButton: {
+                                index: 0,
+                                ...(code ? { flowActionData: { referral_code: code } } : {}),
+                            },
+                        });
+                        if (result.delivered) {
+                            console.log(`[Processor] ${from} → referral template "${REFERRAL_TEMPLATE_NAME}" (referrer=${referrerFirstName || 'A friend'}, code=${code || 'none'})`);
+                            return true;
+                        }
+                        console.warn(`[Processor] sendTemplate "${REFERRAL_TEMPLATE_NAME}" failed (${result.error}), falling back to text`);
+                    }
+
+                    await metaWhatsAppService.sendMessage(from, buildReferralFallback(referrerFirstName, code));
+                    return true;
                 }
-            } else {
-                console.log(`[Processor] Referral inbound from ${from} with no code in text`);
-            }
+                return false;
+            },
 
-            if (REFERRAL_TEMPLATE_NAME) {
-                const referrerName = referrerFirstName || 'A friend';
-                const result = await metaWhatsAppService.sendTemplate(from, {
-                    name: REFERRAL_TEMPLATE_NAME,
-                    languageCode: REFERRAL_TEMPLATE_LANG,
-                    headerImageLink: REFERRAL_TEMPLATE_HEADER_URL,
-                    bodyNamedVariables: { '1': referrerName, '2': referrerName },
-                    flowButton: {
-                        index: 0,
-                        ...(code ? { flowActionData: { referral_code: code } } : {}),
-                    },
-                });
-                if (result.delivered) {
-                    console.log(`[Processor] ${from} → referral template "${REFERRAL_TEMPLATE_NAME}" (referrer=${referrerFirstName || 'A friend'}, code=${code || 'none'})`);
-                    return;
-                }
-                console.warn(`[Processor] sendTemplate "${REFERRAL_TEMPLATE_NAME}" failed (${result.error}), falling back to text`);
-            }
-
-            await metaWhatsAppService.sendMessage(from, buildReferralFallback(referrerFirstName, code));
-            return;
-        }
-
-        // Generic (cold) first-contact path
-        if (SIGNUP_TEMPLATE_NAME) {
-            const result = await metaWhatsAppService.sendTemplate(from, {
-                name: SIGNUP_TEMPLATE_NAME,
-                languageCode: SIGNUP_TEMPLATE_LANG,
-                headerImageLink: SIGNUP_TEMPLATE_HEADER_URL,
-                flowButton: { index: 0 },
-            });
-            if (result.delivered) {
-                console.log(`[Processor] ${from} not found — sent sign-up template "${SIGNUP_TEMPLATE_NAME}"`);
-                return;
-            }
-            console.warn(`[Processor] sendTemplate "${SIGNUP_TEMPLATE_NAME}" failed (${result.error}), falling back to text`);
-        }
-        console.log(`[Processor] ${from} not found — sending sign-up fallback text`);
-        await metaWhatsAppService.sendMessage(from, SIGN_UP_GREETING);
+            // TTTFG-5340 (SPEC-05 "Unknown numbers"): every other message from a number on no contact or lead gets one fixed reply
+            // with the tax sign-up link and one Tax lead, and a repeat inside 24 hours gets nothing. No tax question is answered, no
+            // ID number is asked for or used, and no contact is touched. A lookup that failed is not an unknown number: a known
+            // client whose lookup was throttled must not get a second record, so the message is retried instead (confirmUnknown, asked
+            // once the reply is claimed). That guard is on this branch, where a record is made, and not on the claims and referral
+            // branches above: they make no record, and roadside help must not wait on the CRM (TTTFG-5299).
+            tax: () => handleUnknownNumber(from, wamid, { lookupFailed: resolved.lookupFailed }),
+        });
         return;
     }
 

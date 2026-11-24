@@ -109,8 +109,7 @@ src/
 │   │   ├── registry.ts               # ToolEntry type, REGISTRY map, runTool(), deriveOfferedTools(), entryAllowed(), Ports
 │   │   ├── clientTools.ts            # client/lead-facing read + action tools
 │   │   ├── staffTools.ts             # staff write/read tools (role 'user', requiredPerm gates)
-│   │   ├── leadTools.ts              # verify_identity (role 'unknown') + lead-only tools
-│   │   └── index.ts                  # assembles REGISTRY from the three modules
+│   │   └── index.ts                  # assembles REGISTRY from the two modules
 │   ├── meta.service.ts                # Meta Cloud API client
 │   ├── claude.service.ts              # LLM orchestration: builds ToolContext, single runTool dispatch, RAG injection, intent classifier (TOOLS derived from REGISTRY)
 │   ├── dynamics.service.ts            # Dynamics Web API client + all CRM writes/reads
@@ -203,7 +202,7 @@ Deliberately thin:
 `processMessage` is the descendant of the old in-process monolith. Order still matters (it determines Dynamics threading):
 
 1. **Flow submissions short-circuit.** A WhatsApp Flow sign-up reply creates a Dynamics lead and replies; the signup also notifies the external LOE app (`whatsappSignupNotifier`).
-2. **First-contact templating (cold/out-of-session).** For strangers, `firstContactRouting` inspects the text for a referral code/keyword and routes to the `ttt_referral_welcome` or `ttt_welcome_signup` Meta template; falls back to a plain greeting+link if the template send fails.
+2. **Unknown numbers (TTTFG-5340, SPEC-05).** A number on no contact and no lead is routed in code by `routeUnknownNumber` (`src/domain/unknownNumber.ts`), never to Claude: (a) the claims flow first (roadside help gives the insurer's assist number, a claim report gets the unknown-number reply); (b) a quoted referral code or keyword goes to the `ttt_referral_welcome` Meta template, as before; (c) anything else gets **one** fixed reply with the tax sign-up link and **one** Tax lead plus a Created agent action owned by the Tax team. A second message inside 24 hours gets nothing (`unknown_number_replies` in Supabase). No ID number is asked for or used, and no contact is touched. The cold `ttt_welcome_signup` template is retired. See [unknown-numbers-test-steps.md](unknown-numbers-test-steps.md).
 3. **Auto-reply / greeting guards.** `looksLikeAutoReply` drops out-of-office bounces (one clarification per 24h); `looksLikeGreetingOnly` is used to gate the welcome menu.
 4. **Document/image ingestion.** `downloadMedia` → buffer staged via `pendingUploadService` (10-min TTL). IRP5 uploads route to the IRP5 OCR flow (§10.2); other docs are filed to the client/lead record. A successful client doc-file sets the session's `had_doc_upload` flag (§6.7) and marks the doc case answered so the timeout sweep closes it.
 5. **Email-relay consent replies.** A `relay_yes`/`relay_no` tap is handled by `emailRelay.handleClientRelayResponse` before the AI path (§11.1).
@@ -265,7 +264,7 @@ The current tool set spans client reads (`get_my_details`, `get_tax_number`, `ge
 
 ### 5.4 Tool filtering — three layers, all derived from the registry
 
-1. **Role filter** — `deriveOfferedTools(role)` is a pure function over each entry's `roles`. Roles are `client`, `lead`, `user` (staff), and `unknown` (a phone not in the system — offered only `verify_identity`). No second hand-maintained per-role list exists.
+1. **Role filter** — `deriveOfferedTools(role)` is a pure function over each entry's `roles`. Roles are `client`, `lead`, `user` (staff), and `unknown` (a phone on no contact and no lead — offered no tool at all, TTTFG-5340). No second hand-maintained per-role list exists.
 2. **Staff permission gate** — `entryAllowed` keeps a staff-gated entry only if its `requiredPerm` is in the session's cached `permittedToolKeys`. Enforced once, inside `runTool` (the old duplicate `STAFF_TOOL_PERMISSIONS` re-check is deleted).
 3. **Per-turn narrowing** — `claude.service` deletes a few entries that role+permission can't express: a pending file (LOE phase 1) or pending LOE review (phase 2) narrows to that flow; `upload_irp5` is offered to all leads by role then removed for non-State-B leads.
 
@@ -340,7 +339,7 @@ The staff (internal "user") experience is currently **dormant in production**. W
 | `client`         | Dynamics `contacts` or cached session           | Full Tina client experience; interactive welcome menu on first message |
 | `lead`           | Dynamics `new_leads`                            | Onboarding-only; gated by LOE + OTP state (below)                      |
 | `user` (staff)   | Supabase `users` (synced from `systemuser`)     | Staff experience; tool surface filtered by role. **Only when `STAFF_MODE_ENABLED=true`.** |
-| `unknown`        | phone not found in any of the above             | Offered only `verify_identity`; otherwise pushed to sign-up            |
+| `unknown`        | phone not found in any of the above             | Offered no tool; answered in code with one sign-up reply (TTTFG-5340)  |
 
 ### 7.2 Lead onboarding gates
 
